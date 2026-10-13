@@ -33,6 +33,9 @@ const RAY_SPEED_FAST := 1.0
 const ROTATION_DEADBAND := 0.010
 const ROTATION_SMOOTHING_SLOW_SEC := 0.25
 const RAY_DEADBAND := 0.002
+## How many frames go into one "[study]" log line comparing the runtime's ray with ours.
+const AIM_STUDY_FRAMES := 360
+const SETTINGS_PATH := "user://settings.cfg"
 ## The wrist rotation is tracked worst exactly when the fingers close. Below this
 ## thumb-to-index distance, and while a pinch is held, the rotation's contribution
 ## is frozen and the ray moves only with the position of the hand.
@@ -96,7 +99,73 @@ class Spread:
 		_sum_of_squares = 0.0
 
 
+## Works out how the runtime's aim ray is made: fits, frame by frame, the change
+## of its heading and elevation as a mix of the change of the shoulder-to-hand
+## line and of the direction the hand itself points in.
+class AimStudy:
+	var frames := 0
+	var _shoulder_squared := 0.0
+	var _forward_squared := 0.0
+	var _shoulder_forward := 0.0
+	var _aim_shoulder := 0.0
+	var _aim_forward := 0.0
+	var _origin_sum := Vector3.ZERO
+	var _direction_sum := Vector3.ZERO
+	var _angle_sum := 0.0
+	var _has_previous := false
+	var _previous_shoulder := Vector2.ZERO
+	var _previous_forward := Vector2.ZERO
+	var _previous_aim := Vector2.ZERO
+
+	## Heading and elevation in radians; a constant tilt of the ray does not change heading steps.
+	static func _angles(direction: Vector3) -> Vector2:
+		return Vector2(atan2(direction.x, -direction.z), asin(clampf(direction.y, -1.0, 1.0)))
+
+	static func _step(from: Vector2, to: Vector2) -> Vector2:
+		return Vector2(wrapf(to.x - from.x, -PI, PI), to.y - from.y)
+
+	func add(shoulder: Vector3, forward: Vector3, aim: Vector3, origin_in_wrist: Vector3, direction_in_wrist: Vector3, angle_to_own: float) -> void:
+		var shoulder_angles := _angles(shoulder)
+		var forward_angles := _angles(forward)
+		var aim_angles := _angles(aim)
+		if _has_previous:
+			var shoulder_step := _step(_previous_shoulder, shoulder_angles)
+			var forward_step := _step(_previous_forward, forward_angles)
+			var aim_step := _step(_previous_aim, aim_angles)
+			_shoulder_squared += shoulder_step.dot(shoulder_step)
+			_forward_squared += forward_step.dot(forward_step)
+			_shoulder_forward += shoulder_step.dot(forward_step)
+			_aim_shoulder += aim_step.dot(shoulder_step)
+			_aim_forward += aim_step.dot(forward_step)
+		_has_previous = true
+		_previous_shoulder = shoulder_angles
+		_previous_forward = forward_angles
+		_previous_aim = aim_angles
+		_origin_sum += origin_in_wrist
+		_direction_sum += direction_in_wrist
+		_angle_sum += angle_to_own
+		frames += 1
+
+	## x: weight of the shoulder-to-hand line, y: weight of the hand's own direction.
+	func weights() -> Vector2:
+		var determinant := _shoulder_squared * _forward_squared - _shoulder_forward * _shoulder_forward
+		if absf(determinant) < 1e-12:
+			return Vector2(NAN, NAN)
+		return Vector2((_aim_shoulder * _forward_squared - _aim_forward * _shoulder_forward) / determinant,
+				(_aim_forward * _shoulder_squared - _aim_shoulder * _shoulder_forward) / determinant)
+
+	func mean_origin_in_wrist() -> Vector3:
+		return _origin_sum / maxi(frames, 1)
+
+	func mean_direction_in_wrist() -> Vector3:
+		return (_direction_sum / maxi(frames, 1)).normalized()
+
+	func mean_angle_to_own() -> float:
+		return _angle_sum / maxi(frames, 1)
+
+
 class Pointer:
+	var study := AimStudy.new()
 	## Before smoothing, for the tremor measurement.
 	var raw_origin := Vector3.ZERO
 	var raw_direction := Vector3.FORWARD
@@ -172,6 +241,7 @@ func _ready() -> void:
 	_build_world()
 	_build_rig()
 	_build_buttons()
+	_load_settings()
 
 	_hotkey = GlobalHotkey.new()
 	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
@@ -303,6 +373,12 @@ func _log_tremor() -> void:
 		pointer.spread_raw.reset()
 		pointer.spread_position_only.reset()
 		pointer.spread_final.reset()
+		if pointer.study.frames >= AIM_STUDY_FRAMES:
+			var weights := pointer.study.weights()
+			print("[study] %s: луч Meta = %.2f x линия плечо-рука + %.2f x поворот кисти (по %d кадрам); начало луча в системе запястья %.1v см; направление в системе запястья %.2v; угол до своего луча %.1f°" % [
+					SIDE_LABELS[i], weights.x, weights.y, pointer.study.frames, pointer.study.mean_origin_in_wrist() * 100.0,
+					pointer.study.mean_direction_in_wrist(), rad_to_deg(pointer.study.mean_angle_to_own())])
+			pointer.study = AimStudy.new()
 
 
 ## Drives the Windows cursor from the pointer aimed at the screen panel: the ray's
@@ -520,16 +596,39 @@ func _update_xr_session(delta: float) -> void:
 
 func _on_ray_pitch_button(step_deg: float) -> void:
 	_ray_pitch_down_deg = clampf(_ray_pitch_down_deg + step_deg, -30.0, 60.0)
+	_save_settings()
 	print("[ray] наклон луча вниз: %.0f°" % _ray_pitch_down_deg)
+
+
+func _load_settings() -> void:
+	var config := ConfigFile.new()
+	if config.load(SETTINGS_PATH) != OK:
+		return
+	_use_runtime_aim = config.get_value("ray", "use_runtime_aim", _use_runtime_aim)
+	_ray_pitch_down_deg = config.get_value("ray", "pitch_down_deg", _ray_pitch_down_deg)
+	_ray_yaw_right_deg = config.get_value("ray", "yaw_right_deg", _ray_yaw_right_deg)
+	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
+
+
+func _save_settings() -> void:
+	var config := ConfigFile.new()
+	config.set_value("ray", "use_runtime_aim", _use_runtime_aim)
+	config.set_value("ray", "pitch_down_deg", _ray_pitch_down_deg)
+	config.set_value("ray", "yaw_right_deg", _ray_yaw_right_deg)
+	var error := config.save(SETTINGS_PATH)
+	if error != OK:
+		print("[settings] не удалось сохранить: ", error_string(error))
 
 
 func _on_ray_source_button() -> void:
 	_use_runtime_aim = not _use_runtime_aim
+	_save_settings()
 	print("[ray] источник луча рук: ", "Meta (поза прицеливания среды)" if _use_runtime_aim else "свой (по суставам)")
 
 
 func _on_ray_yaw_button(step_deg: float) -> void:
 	_ray_yaw_right_deg = clampf(_ray_yaw_right_deg + step_deg, -45.0, 45.0)
+	_save_settings()
 	print("[ray] поворот луча правой руки вправо: %.1f° (левая зеркально)" % _ray_yaw_right_deg)
 
 
@@ -626,6 +725,12 @@ func _update_pointer(index: int, delta: float) -> void:
 		# The same ray without the rotation filter, only for the tremor measurement.
 		var unfiltered_target := PointerMath.pitch_direction(PointerMath.yaw_direction(
 				PointerMath.blend_ray_direction(shoulder_direction, hand_forward, HAND_ROTATION_WEIGHT), yaw), pitch)
+		if controller.get_has_tracking_data():
+			var wrist_world := to_world * tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST)
+			var aim_direction := -controller.global_basis.z.normalized()
+			pointer.study.add(shoulder_direction, hand_forward, aim_direction,
+					wrist_world.affine_inverse() * controller.global_position,
+					wrist_world.basis.orthonormalized().inverse() * aim_direction, aim_direction.angle_to(unfiltered_target))
 		var ray_origin := palm
 		pointer.runtime_aim = _use_runtime_aim and controller.get_has_tracking_data()
 		if pointer.runtime_aim:

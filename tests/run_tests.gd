@@ -13,6 +13,7 @@ func _init() -> void:
 	_test_recenter_math()
 	_test_rect_uv()
 	_test_cursor_filter()
+	_test_aim_study()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -132,6 +133,26 @@ func _test_cursor_filter() -> void:
 	result = filter.update(Vector2.ZERO, false, true, 0.3)
 	_check(filter.is_held() and not result.release and not result.move, "луч ушёл с экрана — кнопка остаётся зажатой")
 	_check(filter.update(Vector2.ZERO, false, false, 0.4).release, "и отпускается, когда пальцы разведены")
+
+
+func _direction(heading: float, elevation: float) -> Vector3:
+	return Vector3(sin(heading) * cos(elevation), sin(elevation), -cos(heading) * cos(elevation))
+
+
+func _test_aim_study() -> void:
+	# A ray built as 0.7 x shoulder line + 0.3 x hand direction, tilted down by a
+	# constant angle, must be recognised as exactly that mix.
+	var study: RefCounted = preload("res://src/main.gd").AimStudy.new()
+	for i in 400:
+		var shoulder := Vector2(0.3 * sin(i * 0.05), 0.1 + 0.2 * cos(i * 0.031))
+		var forward := Vector2(0.5 * sin(i * 0.083 + 1.0), -0.2 + 0.3 * sin(i * 0.047))
+		var aim := shoulder * 0.7 + forward * 0.3 + Vector2(0.0, -0.4)
+		study.add(_direction(shoulder.x, shoulder.y), _direction(forward.x, forward.y), _direction(aim.x, aim.y),
+				Vector3(0.01, 0.02, 0.03), Vector3.FORWARD, 0.25)
+	var weights: Vector2 = study.weights()
+	_check(absf(weights.x - 0.7) < 0.01 and absf(weights.y - 0.3) < 0.01, "состав луча восстанавливается: %.3f и %.3f" % [weights.x, weights.y])
+	_check(study.mean_origin_in_wrist().is_equal_approx(Vector3(0.01, 0.02, 0.03)), "среднее начало луча")
+	_check(is_equal_approx(study.mean_angle_to_own(), 0.25), "средний угол до своего луча")
 
 
 func _test_recenter_math() -> void:
