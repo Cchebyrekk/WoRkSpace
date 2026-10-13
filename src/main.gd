@@ -22,7 +22,13 @@ const RAY_SMOOTHING_SEC := 0.05
 ## Where the ray starts: 0 = index knuckle, 1 = base of the thumb; adjustable in VR.
 const RAY_ORIGIN_TOWARDS_THUMB := 0.9
 const RAY_ORIGIN_STEP := 0.1
-const XR_RECONNECT_INTERVAL_SEC := 3.0
+## After Quest Link restarts, the OpenXR instance of this process is lost for good
+## (every re-initialisation fails with XR_ERROR_INSTANCE_LOST), so the app
+## restarts itself and keeps restarting until Link is back.
+const XR_RESTART_DELAY_SEC := 5.0
+const XR_RESTART_MAX_ATTEMPTS := 60
+const XR_LOST_TRACKERS_SEC := 3.0
+const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
@@ -81,7 +87,15 @@ func _ready() -> void:
 	if xr == null or not xr.is_initialized():
 		push_error("[xr] OpenXR не инициализирован. Шлем подключён через Link и Link активен?")
 		_status.text = "OpenXR не инициализирован"
+		# Only while recovering from a lost session; a plain launch without Link just stops here.
+		var attempt := OS.get_environment(XR_RETRY_ENV).to_int()
+		if attempt > 0 and attempt < XR_RESTART_MAX_ATTEMPTS:
+			print("[xr] Link ещё не готов, попытка %d из %d" % [attempt, XR_RESTART_MAX_ATTEMPTS])
+			get_tree().create_timer(XR_RESTART_DELAY_SEC).timeout.connect(_restart_app.bind(attempt + 1))
 		return
+	if OS.get_environment(XR_RETRY_ENV) != "":
+		print("[xr] сессия восстановлена после перезапуска, попытка ", OS.get_environment(XR_RETRY_ENV))
+		OS.unset_environment(XR_RETRY_ENV)
 
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	get_viewport().use_xr = true
@@ -157,11 +171,19 @@ func _on_xr_event(event: StringName) -> void:
 
 func _schedule_reconnect() -> void:
 	if _reconnect_timer < 0.0:
-		_reconnect_timer = XR_RECONNECT_INTERVAL_SEC
+		_reconnect_timer = XR_RESTART_DELAY_SEC
 
 
-## Logs session state changes and brings the session back after the runtime drops
-## it (Quest Link restarts whenever a display driver instance is toggled).
+func _restart_app(attempt: int) -> void:
+	print("[xr] перезапускаю приложение, попытка %d" % attempt)
+	OS.set_environment(XR_RETRY_ENV, str(attempt))
+	# Explicit project path: the engine's own arguments are not reported back by get_cmdline_args().
+	OS.set_restart_on_exit(true, ["--path", ProjectSettings.globalize_path("res://")])
+	get_tree().quit()
+
+
+## Logs session state changes and restarts the app after the runtime drops the
+## session (Quest Link restarts whenever a display driver instance is toggled).
 func _update_xr_session(delta: float) -> void:
 	if _xr == null:
 		return
@@ -177,7 +199,7 @@ func _update_xr_session(delta: float) -> void:
 		_hand_trackers_missing_sec = 0.0
 	elif _hand_trackers_seen and _reconnect_timer < 0.0:
 		_hand_trackers_missing_sec += delta
-		if _hand_trackers_missing_sec > XR_RECONNECT_INTERVAL_SEC:
+		if _hand_trackers_missing_sec > XR_LOST_TRACKERS_SEC:
 			print("[xr] трекеры рук пропали — считаю сессию потерянной")
 			_hand_trackers_seen = false
 			_schedule_reconnect()
@@ -187,15 +209,7 @@ func _update_xr_session(delta: float) -> void:
 	_reconnect_timer -= delta
 	if _reconnect_timer > 0.0:
 		return
-	print("[xr] пробую переподключиться…")
-	if _xr.is_initialized():
-		_xr.uninitialize()
-	if _xr.initialize():
-		get_viewport().use_xr = true
-		_reconnect_timer = -1.0
-		print("[xr] переподключено")
-	else:
-		_reconnect_timer = XR_RECONNECT_INTERVAL_SEC
+	_restart_app(1)
 
 
 func _on_ray_origin_button(step: float) -> void:
