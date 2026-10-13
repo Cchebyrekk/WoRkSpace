@@ -84,6 +84,8 @@ var _xr: OpenXRInterface
 var _capture: ScreenCapture
 var _capture_frames_logged := 0
 var _panel_viewport: SubViewport
+var _panel_layer: OpenXRCompositionLayerQuad
+var _recentered := false
 ## Diagnostic switches, comma-separated in WORKPLACE_DIAG: nolayer, nocopy, nohole, nocapture.
 ## Do NOT put the capture texture on a 3D material: in VR that removes the D3D12
 ## device (0x887A0005) and crashes the engine; the composition layer path is fine.
@@ -252,18 +254,46 @@ func _build_panel_layer(pixels: Vector2i) -> void:
 	var layer := OpenXRCompositionLayerQuad.new()
 	layer.layer_viewport = viewport
 	layer.quad_size = Vector2(width, width * pixels.y / pixels.x)
-	layer.position = Vector3(0.0, PANEL_CENTER_HEIGHT, -PANEL_DISTANCE)
 	# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
 	if not _diag.has("nohole"):
 		layer.sort_order = -1
 		layer.enable_hole_punch = true
 		get_viewport().transparent_bg = true
 	_origin.add_child(layer)
+	_panel_layer = layer
+	_place_panel()
 	print("[capture] панель %.2f x %.2f м на расстоянии %.2f м" % [layer.quad_size.x, layer.quad_size.y, PANEL_DISTANCE])
+
+
+## The layer has to be a child of the origin, but it belongs at a fixed place in
+## the world (in front of the user, facing them), so it is positioned globally.
+func _place_panel() -> void:
+	if _panel_layer != null:
+		_panel_layer.global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, PANEL_CENTER_HEIGHT, -PANEL_DISTANCE))
+
+
+## Turns and shifts the play space so that the user stands at the world origin
+## looking along -Z, where the panels and buttons are. The headset's own "forward"
+## comes from the room setup and can point anywhere.
+func _recenter() -> void:
+	var head := _camera.transform
+	var forward := -head.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.01:
+		return
+	var yaw := PI - atan2(forward.x, forward.z)
+	var turn := Basis(Vector3.UP, yaw)
+	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
+	_place_panel()
+	_recentered = true
+	print("[xr] сцена выровнена по взгляду, поворот %.0f°" % rad_to_deg(yaw))
 
 
 func _on_xr_event(event: StringName) -> void:
 	print("[xr] событие: ", event)
+	# A moment after focus, so that the head pose is valid.
+	if event == &"session_focussed" and not _recentered:
+		get_tree().create_timer(0.5).timeout.connect(_recenter)
 	if _panel_viewport != null:
 		if event == &"session_visible" or event == &"session_focussed":
 			_panel_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
@@ -582,6 +612,9 @@ func _build_buttons() -> void:
 	# Kept apart from the others so that it is not hit by accident.
 	var exit_button := _add_button("Выход", Vector3(0.45, 1.0, -1.2), EXIT_BUTTON_HOLD_SEC)
 	exit_button.activated.connect(_quit)
+
+	var recenter_button := _add_button("Центр", Vector3(0.45, 0.52, -1.2), 0.6)
+	recenter_button.activated.connect(_recenter)
 
 	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
 	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)

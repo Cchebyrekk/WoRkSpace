@@ -10,6 +10,7 @@ func _init() -> void:
 	_test_ray_rect()
 	_test_pinch_hysteresis()
 	_test_hand_ray()
+	_test_recenter_math()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -35,6 +36,15 @@ func _test_ray_rect() -> void:
 	var turned := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-2.0, 1.0, 0.0))
 	_check(is_equal_approx(PointerMath.ray_rect_distance(eye, Vector3.LEFT, turned, size), 2.0), "повёрнутый прямоугольник слева")
 	_check(PointerMath.ray_rect_distance(eye, Vector3.FORWARD, turned, size) < 0.0, "повёрнутый: луч вперёд — промах")
+
+
+func _test_recenter_math() -> void:
+	# The formula used by main.gd::_recenter: after the turn the head must look along -Z.
+	for degrees: float in [0.0, 90.0, 180.0, -45.0, 137.0]:
+		var head_basis := Basis(Vector3.UP, deg_to_rad(degrees))
+		var forward := -head_basis.z
+		var turn := Basis(Vector3.UP, PI - atan2(forward.x, forward.z))
+		_check((turn * forward).is_equal_approx(Vector3.FORWARD), "выравнивание при повороте головы %d°" % int(degrees))
 
 
 func _test_pinch_hysteresis() -> void:
