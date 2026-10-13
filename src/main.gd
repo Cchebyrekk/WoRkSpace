@@ -18,13 +18,16 @@ const SHOULDER_DROP := 0.2
 const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
 const HAND_ROTATION_WEIGHT := 0.8
-const RAY_SMOOTHING_SEC := 0.05
-## Closing the fingers shakes the tracked hand, so the ray is smoothed harder the
-## closer the pinch gets (from PINCH_APPROACH_DISTANCE down to the press distance),
-## and moderately while the pinch is held so that dragging stays controllable.
-const PINCH_APPROACH_DISTANCE := 0.04
-const RAY_SMOOTHING_PINCHING_SEC := 0.5
-const RAY_SMOOTHING_HELD_SEC := 0.15
+## Adaptive smoothing: slow ray movement (below RAY_SPEED_SLOW rad/s) is smoothed
+## with the long time constant to hide tremor, fast movement with the short one.
+const RAY_SMOOTHING_SLOW_SEC := 0.2
+const RAY_SMOOTHING_FAST_SEC := 0.03
+const RAY_SPEED_SLOW := 0.1
+const RAY_SPEED_FAST := 1.0
+## The wrist rotation is tracked worst exactly when the fingers close. Below this
+## thumb-to-index distance, and while a pinch is held, the rotation's contribution
+## is frozen and the ray moves only with the position of the hand.
+const PINCH_FREEZE_DISTANCE := 0.03
 ## The hand ray starts at the palm centre and is tilted towards the floor by this
 ## much relative to where the hand points; adjustable in VR.
 const RAY_PITCH_DOWN_DEG := 35.0
@@ -69,6 +72,8 @@ class Pointer:
 	var just_pressed := false
 	var hit_distance := INF
 	var pinch_mm := 0.0
+	## Rotation from the shoulder-to-palm line to the full hand ray; see PINCH_FREEZE_DISTANCE.
+	var rotation_offset := Quaternion.IDENTITY
 	var on_panel := false
 	## Where the ray meets the screen panel: 0..1 from its top-left corner.
 	var panel_uv := Vector2.ZERO
@@ -277,12 +282,18 @@ func _update_cursor() -> void:
 	if result.move:
 		MouseInput.move_to(pixel)
 	if result.press:
+		if result.double_click:
+			# A full click first: the press that follows is then the second one of a
+			# double click by Windows' own timing, however slow the hand was.
+			MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
+			MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
 		MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
 		print("[cursor] %s: нажатие в %s, луч в этот момент в %.0f px от точки%s" % [SIDE_LABELS[_cursor_owner], pixel,
-				_cursor_filter.last_press_offset, ", прилипло к предыдущему" if _cursor_filter.last_press_snapped else ""])
+				_cursor_filter.last_press_offset, ", двойной щелчок" if result.double_click else ""])
 	if result.release:
 		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
-		print("[cursor] отпускание в %s, за время удержания луч уходил на %.0f px" % [pixel, _cursor_filter.last_hold_excursion])
+		print("[cursor] отпускание в %s через %.2f с, за время удержания луч уходил на %.0f px" % [
+				pixel, _cursor_filter.last_hold_sec, _cursor_filter.last_hold_excursion])
 
 
 ## One monitor as a live panel in front of the user. The picture goes through an
@@ -523,10 +534,13 @@ func _update_pointer(index: int, delta: float) -> void:
 		target = PointerMath.yaw_direction(target, deg_to_rad(_ray_yaw_right_deg) * SIDE_SIGNS[index])
 		target = PointerMath.pitch_direction(target, deg_to_rad(_ray_pitch_down_deg))
 		var tip_distance := thumb_tip.distance_to(index_tip)
-		var smoothing := RAY_SMOOTHING_HELD_SEC if was_pressed else lerpf(RAY_SMOOTHING_SEC, RAY_SMOOTHING_PINCHING_SEC,
-				PointerMath.pinch_stability(tip_distance, PINCH_APPROACH_DISTANCE, PINCH_PRESS_DISTANCE))
 		var was_hand := pointer.mode == "рука"
+		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
+			pointer.rotation_offset = Quaternion(shoulder_direction, target)
+		target = pointer.rotation_offset * shoulder_direction
 		var previous := pointer.direction if was_hand else Vector3.ZERO
+		var angular_speed := previous.angle_to(target) / maxf(delta, 0.001) if was_hand else INF
+		var smoothing := PointerMath.adaptive_smoothing(angular_speed, RAY_SMOOTHING_SLOW_SEC, RAY_SMOOTHING_FAST_SEC, RAY_SPEED_SLOW, RAY_SPEED_FAST)
 		pointer.active = true
 		pointer.mode = "рука"
 		# The origin gets the same smoothing: a palm that jumps 1 cm moves the cursor about 15 px.

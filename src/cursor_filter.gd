@@ -15,6 +15,9 @@ class Result:
 	## The cursor has to be moved to `position` this frame.
 	var move := false
 	var press := false
+	## Together with `press`: this press repeats the previous one and should reach
+	## Windows as a double click.
+	var double_click := false
 	var release := false
 
 
@@ -24,10 +27,12 @@ var lookback_sec := 0.1
 var drag_threshold := 40.0
 ## ...and only once the press has lasted this long, so a quick click never drags.
 var drag_delay_sec := 0.25
-## A press this soon after the previous one, and this close to it, is sent to
-## exactly the same point: Windows only counts a double click within a few pixels.
-var double_click_sec := 0.6
-var double_click_radius := 60.0
+## A press this soon after the previous release, and this close to the previous
+## press, is a double click: it is placed on exactly the same point and flagged,
+## so the caller can send Windows a fast double click. Windows itself wants both
+## presses within half a second and a few pixels, which a hand pinch cannot do.
+var double_click_sec := 1.0
+var double_click_radius := 80.0
 
 const HISTORY_SEC := 0.5
 
@@ -38,13 +43,14 @@ var _dragging := false
 var _anchor := Vector2.ZERO
 var _press_time := 0.0
 var _last_release_time := -INF
+var _double_click_done := false
 
 ## Diagnostics for tuning, valid after a press / a release respectively: how far
 ## the raw pointer was from where the press was placed, and how far it strayed
 ## from that point while the button was held.
 var last_press_offset := 0.0
 var last_hold_excursion := 0.0
-var last_press_snapped := false
+var last_hold_sec := 0.0
 var _position := Vector2.ZERO
 var _has_position := false
 
@@ -68,7 +74,10 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Res
 	if _held and not pressed:
 		_held = false
 		_dragging = false
-		_last_release_time = time
+		# The release that ends a double click does not start another one.
+		_last_release_time = -INF if _double_click_done else time
+		_double_click_done = false
+		last_hold_sec = time - _press_time
 		result.release = true
 	elif just_pressed and on_screen:
 		var previous_anchor := _anchor
@@ -76,9 +85,10 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Res
 		_dragging = false
 		_press_time = time
 		_anchor = _position_at(time - lookback_sec, target)
-		last_press_snapped = time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
-		if last_press_snapped:
+		result.double_click = time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
+		if result.double_click:
 			_anchor = previous_anchor
+			_double_click_done = true
 		last_press_offset = target.distance_to(_anchor)
 		last_hold_excursion = 0.0
 		_move(result, _anchor)
