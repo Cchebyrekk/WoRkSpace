@@ -57,7 +57,9 @@ VR-приложение для работы с ПК на Windows: монитор
 
 - `win_backend.h/.cpp` — весь код Windows/WinRT (захват, горячая клавиша). Собирается как C++20; заголовки Godot и Windows в одном файле не смешивать.
 - `workplace_classes.h/.cpp` — классы Godot: `ScreenCapture` (монитор → `Texture2DRD`) и `GlobalHotkey`.
-- Путь кадра: WGC → D3D11-текстура с общим NT-дескриптором → `ID3D12Device::OpenSharedHandle` на устройстве Godot → `RenderingDevice.texture_create_from_extension`. Синхронизации между устройствами нет (возможен разрыв кадра) — принято для первого варианта.
+- Путь кадра: WGC → D3D11-текстура с общим NT-дескриптором → `ID3D12Device::OpenSharedHandle` на устройстве Godot → `RenderingDevice.texture_create_from_extension` → `texture_copy` в текстуру, созданную самим Godot → `Texture2DRD`. Копия нужна: драйвер D3D12 в Godot 4.7 не умеет делать `Texture2DRD` из внешнего ресурса (`texture_create_shared` падает с `!owner_info.allocation`, картинка белая). `ScreenCapture.update()` вызывать каждый кадр. Синхронизации между устройствами нет (возможен разрыв кадра) — принято для первого варианта.
+- Дымовой тест захвата без VR (окно на 3 с): `& "<godot>" --xr-mode off --path . -s tests/capture_probe.gd`; с `WORKPLACE_PROBE_SHOT=<файл.png>` сохраняет снимок окна. На рабочем столе проходит: ~58 кадров/с, цвета верные.
+- Самая первая регистрация расширения (`--import` сразу после появления `.gdextension`) один раз упала с нарушением доступа; повторные запуски чистые, причина не выяснена.
 - Панель: `SubViewport` с `TextureRect` → `OpenXRCompositionLayerQuad` (дочерний узел `XROrigin3D`, `sort_order = -1`, hole punch, у главного вьюпорта `transparent_bg`).
 
 ## Виртуальные дисплеи (VDD) на этой машине
