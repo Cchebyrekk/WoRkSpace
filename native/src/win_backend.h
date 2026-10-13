@@ -38,6 +38,12 @@ public:
 	virtual uint64_t frame_count() const = 0;
 };
 
+// Mouse input injected into Windows with SendInput. Coordinates are pixels of the
+// virtual desktop (the same space as MonitorInfo::x / y).
+void mouse_move(int32_t x, int32_t y);
+void mouse_button(int32_t button, bool down); // 0 left, 1 right, 2 middle
+void mouse_wheel(int32_t delta); // 120 is one notch, positive scrolls up
+
 // System-wide hotkey that fires even when the Godot window is not focused.
 class HotkeyBackend {
 public:

@@ -19,6 +19,13 @@ static func ray_rect_distance(origin: Vector3, direction: Vector3, rect_transfor
 	return distance
 
 
+## Where a world point lies on a rectangle (see ray_rect_distance), as 0..1
+## coordinates with the origin at the top-left corner, like pixels on a screen.
+static func rect_uv(point: Vector3, rect_transform: Transform3D, size: Vector2) -> Vector2:
+	var local := rect_transform.affine_inverse() * point
+	return Vector2(local.x / size.x + 0.5, 0.5 - local.y / size.y)
+
+
 ## Pinch with hysteresis: closes below `press_distance`, opens above `release_distance`.
 static func pinch_state(was_pinched: bool, tip_distance: float, press_distance: float, release_distance: float) -> bool:
 	if was_pinched:

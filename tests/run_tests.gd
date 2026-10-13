@@ -11,6 +11,8 @@ func _init() -> void:
 	_test_pinch_hysteresis()
 	_test_hand_ray()
 	_test_recenter_math()
+	_test_rect_uv()
+	_test_cursor_filter()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -36,6 +38,61 @@ func _test_ray_rect() -> void:
 	var turned := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-2.0, 1.0, 0.0))
 	_check(is_equal_approx(PointerMath.ray_rect_distance(eye, Vector3.LEFT, turned, size), 2.0), "повёрнутый прямоугольник слева")
 	_check(PointerMath.ray_rect_distance(eye, Vector3.FORWARD, turned, size) < 0.0, "повёрнутый: луч вперёд — промах")
+
+
+func _test_rect_uv() -> void:
+	var rect := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.5, -1.0))
+	var size := Vector2(2.0, 1.0)
+	_check(PointerMath.rect_uv(Vector3(0.0, 1.5, -1.0), rect, size).is_equal_approx(Vector2(0.5, 0.5)), "центр панели — середина экрана")
+	_check(PointerMath.rect_uv(Vector3(-1.0, 2.0, -1.0), rect, size).is_equal_approx(Vector2(0.0, 0.0)), "левый верхний угол — пиксель (0, 0)")
+	_check(PointerMath.rect_uv(Vector3(1.0, 1.0, -1.0), rect, size).is_equal_approx(Vector2(1.0, 1.0)), "правый нижний угол")
+	var turned := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-2.0, 1.5, 0.0))
+	_check(PointerMath.rect_uv(Vector3(-2.0, 2.0, 1.0), turned, size).is_equal_approx(Vector2(0.0, 0.0)), "повёрнутая панель: левый верхний угол")
+
+
+func _test_cursor_filter() -> void:
+	var filter := CursorFilter.new()
+	filter.lookback_sec = 0.1
+	filter.drag_threshold = 25.0
+
+	var result := filter.update(Vector2(100.0, 100.0), true, false, 0.0)
+	_check(result.move and result.position == Vector2(100.0, 100.0) and not result.press, "без нажатия курсор следует за лучом")
+	_check(not filter.update(Vector2(100.0, 100.0), true, false, 0.01).move, "та же точка — без лишнего перемещения")
+
+	# The hand drifts while the fingers close: 0.05 s .. 0.19 s, then the pinch registers at 0.2 s.
+	filter.update(Vector2(200.0, 200.0), true, false, 0.05)
+	filter.update(Vector2(200.0, 200.0), true, false, 0.1)
+	filter.update(Vector2(206.0, 204.0), true, false, 0.15)
+	filter.update(Vector2(212.0, 209.0), true, false, 0.19)
+	result = filter.update(Vector2(215.0, 212.0), true, true, 0.2)
+	_check(result.press and result.position == Vector2(200.0, 200.0), "нажатие уходит туда, где луч был до щипка")
+	_check(result.move, "перед нажатием курсор возвращается в эту точку")
+	_check(filter.is_held(), "кнопка считается зажатой")
+
+	result = filter.update(Vector2(218.0, 214.0), true, true, 0.25)
+	_check(not result.move and not result.press and result.position == Vector2(200.0, 200.0), "дрожание в пределах порога курсор не двигает")
+	result = filter.update(Vector2(240.0, 200.0), true, true, 0.3)
+	_check(result.move and result.position == Vector2(240.0, 200.0), "за порогом начинается перетаскивание")
+	result = filter.update(Vector2(242.0, 201.0), true, true, 0.35)
+	_check(result.move and result.position == Vector2(242.0, 201.0), "при перетаскивании курсор следует точно")
+	result = filter.update(Vector2(242.0, 201.0), true, false, 0.4)
+	_check(result.release and not result.move and not filter.is_held(), "разведение пальцев отпускает кнопку на месте")
+
+	# A press that starts off the screen is not a click, even if it wanders onto it.
+	filter = CursorFilter.new()
+	filter.update(Vector2(50.0, 50.0), true, false, 0.0)
+	result = filter.update(Vector2.ZERO, false, true, 0.1)
+	_check(not result.press and not filter.is_held(), "нажатие мимо экрана не считается")
+	result = filter.update(Vector2(60.0, 60.0), true, true, 0.2)
+	_check(not result.press and not result.move, "зажатый щипок, затянутый на экран, ничего не делает")
+
+	# Leaving the screen while holding keeps the button down; opening the fingers releases it.
+	filter = CursorFilter.new()
+	filter.update(Vector2(10.0, 10.0), true, false, 0.0)
+	filter.update(Vector2(10.0, 10.0), true, true, 0.2)
+	result = filter.update(Vector2.ZERO, false, true, 0.3)
+	_check(filter.is_held() and not result.release and not result.move, "луч ушёл с экрана — кнопка остаётся зажатой")
+	_check(filter.update(Vector2.ZERO, false, false, 0.4).release, "и отпускается, когда пальцы разведены")
 
 
 func _test_recenter_math() -> void:

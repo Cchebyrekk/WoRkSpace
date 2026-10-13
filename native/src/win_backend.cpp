@@ -213,6 +213,43 @@ CaptureBackend *CaptureBackend::create() {
 	return new WgcCapture();
 }
 
+void mouse_move(int32_t x, int32_t y) {
+	int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+	if (width <= 1 || height <= 1) {
+		return;
+	}
+	// Absolute moves take 0..65535 across the whole virtual desktop.
+	INPUT input{};
+	input.type = INPUT_MOUSE;
+	input.mi.dx = MulDiv(x - left, 65535, width - 1);
+	input.mi.dy = MulDiv(y - top, 65535, height - 1);
+	input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+	SendInput(1, &input, sizeof(INPUT));
+}
+
+void mouse_button(int32_t button, bool down) {
+	static const DWORD down_flags[] = { MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_MIDDLEDOWN };
+	static const DWORD up_flags[] = { MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP };
+	if (button < 0 || button > 2) {
+		return;
+	}
+	INPUT input{};
+	input.type = INPUT_MOUSE;
+	input.mi.dwFlags = down ? down_flags[button] : up_flags[button];
+	SendInput(1, &input, sizeof(INPUT));
+}
+
+void mouse_wheel(int32_t delta) {
+	INPUT input{};
+	input.type = INPUT_MOUSE;
+	input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+	input.mi.mouseData = static_cast<DWORD>(delta);
+	SendInput(1, &input, sizeof(INPUT));
+}
+
 class Win32Hotkey : public HotkeyBackend {
 	std::thread thread;
 	std::atomic<DWORD> thread_id{ 0 };

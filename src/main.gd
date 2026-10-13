@@ -63,6 +63,9 @@ class Pointer:
 	var just_pressed := false
 	var hit_distance := INF
 	var pinch_mm := 0.0
+	var on_panel := false
+	## Where the ray meets the screen panel: 0..1 from its top-left corner.
+	var panel_uv := Vector2.ZERO
 
 
 var _origin: XROrigin3D
@@ -85,6 +88,12 @@ var _capture: ScreenCapture
 var _capture_frames_logged := 0
 var _panel_viewport: SubViewport
 var _panel_layer: OpenXRCompositionLayerQuad
+## The captured monitor's rectangle on the Windows virtual desktop, in pixels.
+var _panel_monitor := Rect2i()
+var _cursor_filter := CursorFilter.new()
+## Index of the pointer that drives the Windows cursor, or -1.
+var _cursor_owner := -1
+var _cursor_press_armed := false
 var _recentered := false
 ## Diagnostic switches, comma-separated in WORKPLACE_DIAG: nolayer, nocopy, nohole, nocapture.
 ## Do NOT put the capture texture on a 3D material: in VR that removes the D3D12
@@ -172,6 +181,7 @@ func _process(delta: float) -> void:
 			lines[-1] += " | щипок %.0f мм, направление %.2v" % [pointer.pinch_mm, pointer.direction]
 
 	_update_buttons(delta)
+	_update_cursor()
 	_update_rays()
 
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
@@ -204,8 +214,68 @@ func _on_session_begun(openxr: OpenXRInterface) -> void:
 
 
 func _exit_tree() -> void:
+	# Never leave Windows with a mouse button stuck down.
+	if _cursor_filter.is_held():
+		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
 	if _capture != null:
 		_capture.stop()
+
+
+## Drives the Windows cursor from the pointer aimed at the screen panel: the ray's
+## hit point becomes a pixel on that monitor, a pinch or trigger the left button.
+func _update_cursor() -> void:
+	if _panel_layer == null:
+		return
+	var panel_transform := _panel_layer.global_transform
+	var panel_size := _panel_layer.quad_size
+	for pointer in _pointers:
+		pointer.on_panel = false
+		if not pointer.active:
+			continue
+		var distance := PointerMath.ray_rect_distance(pointer.origin, pointer.direction, panel_transform, panel_size)
+		if distance < 0.0:
+			continue
+		pointer.on_panel = true
+		pointer.panel_uv = PointerMath.rect_uv(pointer.origin + pointer.direction * distance, panel_transform, panel_size)
+		pointer.hit_distance = minf(pointer.hit_distance, distance)
+
+	# One pointer owns the cursor: whoever pressed last, otherwise whoever aims at
+	# the panel (right hand first). The owner cannot change while the button is held.
+	if not _cursor_filter.is_held():
+		for i in 2:
+			if _pointers[i].on_panel and _pointers[i].just_pressed:
+				_cursor_owner = i
+		if _cursor_owner < 0 or not _pointers[_cursor_owner].on_panel:
+			_cursor_owner = -1
+			for i: int in [1, 0]:
+				if _pointers[i].on_panel:
+					_cursor_owner = i
+					break
+
+	var now := Time.get_ticks_usec() / 1000000.0
+	var result: CursorFilter.Result
+	if _cursor_owner < 0:
+		_cursor_press_armed = false
+		result = _cursor_filter.update(Vector2.ZERO, false, false, now)
+	else:
+		var owner_pointer := _pointers[_cursor_owner]
+		# A press counts only if it began on the panel, not if a held pinch wandered onto it.
+		if owner_pointer.on_panel and owner_pointer.just_pressed:
+			_cursor_press_armed = true
+		elif not owner_pointer.pressed:
+			_cursor_press_armed = false
+		var target := Vector2(_panel_monitor.position) + owner_pointer.panel_uv * Vector2(_panel_monitor.size - Vector2i.ONE)
+		result = _cursor_filter.update(target, owner_pointer.on_panel, owner_pointer.pressed and _cursor_press_armed, now)
+
+	var pixel := Vector2i(result.position.round())
+	if result.move:
+		MouseInput.move_to(pixel)
+	if result.press:
+		MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
+		print("[cursor] %s: нажатие в %s" % [SIDE_LABELS[_cursor_owner], pixel])
+	if result.release:
+		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
+		print("[cursor] отпускание в %s" % pixel)
 
 
 ## One monitor as a live panel in front of the user. The picture goes through an
@@ -229,6 +299,7 @@ func _build_screen_panel() -> void:
 		_capture = null
 		return
 	var pixels := _capture.get_size()
+	_panel_monitor = Rect2i(monitors[monitor_index]["position"], pixels)
 	print("[capture] захват монитора %d (%s) запущен, %s" % [monitor_index, monitors[monitor_index]["name"], pixels])
 
 	if not _diag.has("nolayer"):

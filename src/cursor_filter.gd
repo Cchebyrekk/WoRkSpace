@@ -1,0 +1,89 @@
+class_name CursorFilter
+extends RefCounted
+## Turns the raw point a pointer aims at on a screen into cursor moves and button
+## events. Pure logic (no nodes, no engine state), covered by tests/run_tests.gd.
+##
+## The problem it solves: closing the fingers for a pinch moves the hand, so a
+## click sent at the moment of the pinch lands next to the target. Therefore the
+## press goes to where the pointer was shortly BEFORE the pinch, and the cursor
+## then stays put until the hand has clearly moved, which starts a drag.
+
+
+class Result:
+	## Where the cursor should be, in the same units as the targets passed in.
+	var position := Vector2.ZERO
+	## The cursor has to be moved to `position` this frame.
+	var move := false
+	var press := false
+	var release := false
+
+
+## The press is placed where the pointer was this long before the pinch closed.
+var lookback_sec := 0.1
+## While held, the cursor follows only after the pointer has left this radius.
+var drag_threshold := 25.0
+
+const HISTORY_SEC := 0.5
+
+var _history: Array[Vector3] = []  # x, y, time
+var _was_pressed := false
+var _held := false
+var _dragging := false
+var _anchor := Vector2.ZERO
+var _position := Vector2.ZERO
+var _has_position := false
+
+
+func is_held() -> bool:
+	return _held
+
+
+## `target` is only meaningful while `on_screen` is true. A press counts only if
+## it starts on the screen; one that started elsewhere and wandered in is ignored.
+func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Result:
+	var result := Result.new()
+	var just_pressed := pressed and not _was_pressed
+	_was_pressed = pressed
+
+	if on_screen:
+		_history.append(Vector3(target.x, target.y, time))
+	while not _history.is_empty() and _history[0].z < time - HISTORY_SEC:
+		_history.pop_front()
+
+	if _held and not pressed:
+		_held = false
+		_dragging = false
+		result.release = true
+	elif just_pressed and on_screen:
+		_held = true
+		_dragging = false
+		_anchor = _position_at(time - lookback_sec, target)
+		_move(result, _anchor)
+		result.press = true
+	elif _held:
+		if on_screen:
+			if not _dragging and target.distance_to(_anchor) > drag_threshold:
+				_dragging = true
+			if _dragging:
+				_move(result, target)
+	elif on_screen and not pressed:
+		_move(result, target)
+
+	result.position = _position
+	return result
+
+
+func _move(result: Result, to: Vector2) -> void:
+	if _has_position and to == _position:
+		return
+	_position = to
+	_has_position = true
+	result.move = true
+
+
+## The oldest remembered position that is not older than `time`.
+func _position_at(time: float, fallback: Vector2) -> Vector2:
+	for entry in _history:
+		if entry.z >= time:
+			return Vector2(entry.x, entry.y)
+	return fallback

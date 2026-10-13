@@ -50,6 +50,27 @@ public:
 	String get_last_error() const;
 };
 
+// Moves the real Windows cursor and presses its buttons. Static methods only.
+class MouseInput : public Object {
+	GDCLASS(MouseInput, Object)
+
+protected:
+	static void _bind_methods();
+
+public:
+	enum Button {
+		BUTTON_LEFT = 0,
+		BUTTON_RIGHT = 1,
+		BUTTON_MIDDLE = 2,
+	};
+
+	// Pixel on the virtual desktop, the same space as ScreenCapture.list_monitors() positions.
+	static void move_to(const Vector2i &p_position);
+	static void set_button(Button p_button, bool p_pressed);
+	// 120 is one wheel notch; positive scrolls up.
+	static void scroll(int p_delta);
+};
+
 // System-wide keyboard shortcut that works while another window has focus.
 class GlobalHotkey : public RefCounted {
 	GDCLASS(GlobalHotkey, RefCounted)
@@ -70,3 +91,5 @@ public:
 };
 
 } // namespace godot
+
+VARIANT_ENUM_CAST(godot::MouseInput::Button);

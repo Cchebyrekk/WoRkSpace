@@ -19,6 +19,17 @@ func _initialize() -> void:
 		if monitors[i]["primary"]:
 			monitor_index = i
 
+	# Mouse injection round trip: "moving" the cursor to where it already is must
+	# leave it there, which checks the pixel-to-SendInput mapping without disturbing the user.
+	var before := DisplayServer.mouse_get_position()
+	MouseInput.move_to(before)
+	var after := DisplayServer.mouse_get_position()
+	if (after - before).abs().x > 1 or (after - before).abs().y > 1:
+		printerr("probe: ПРОВАЛ, курсор сместился: %s -> %s" % [before, after])
+		quit(1)
+		return
+	print("probe: курсор на месте после move_to(%s): %s" % [before, after])
+
 	_capture = ScreenCapture.new()
 	if not _capture.start(monitor_index):
 		printerr("probe: ПРОВАЛ, захват не запустился: ", _capture.get_last_error())

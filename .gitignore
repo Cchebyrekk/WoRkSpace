@@ -8,6 +8,7 @@
 /native/.sconsign*.dblite
 *.obj
 /bin/*.dll
+/bin/~*
 /bin/*.lib
 /bin/*.exp
 /bin/*.pdb

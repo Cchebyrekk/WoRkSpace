@@ -166,6 +166,28 @@ String ScreenCapture::get_last_error() const {
 	return last_error;
 }
 
+void MouseInput::_bind_methods() {
+	ClassDB::bind_static_method("MouseInput", D_METHOD("move_to", "position"), &MouseInput::move_to);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("set_button", "button", "pressed"), &MouseInput::set_button);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll", "delta"), &MouseInput::scroll);
+
+	BIND_ENUM_CONSTANT(BUTTON_LEFT);
+	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
+	BIND_ENUM_CONSTANT(BUTTON_MIDDLE);
+}
+
+void MouseInput::move_to(const Vector2i &p_position) {
+	workplace::mouse_move(p_position.x, p_position.y);
+}
+
+void MouseInput::set_button(Button p_button, bool p_pressed) {
+	workplace::mouse_button(static_cast<int32_t>(p_button), p_pressed);
+}
+
+void MouseInput::scroll(int p_delta) {
+	workplace::mouse_wheel(p_delta);
+}
+
 void GlobalHotkey::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start", "ctrl", "alt", "shift", "virtual_key"), &GlobalHotkey::start);
 	ClassDB::bind_method(D_METHOD("stop"), &GlobalHotkey::stop);
