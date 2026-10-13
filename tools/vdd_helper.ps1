@@ -18,6 +18,11 @@ $ErrorActionPreference = 'Stop'
 $HardwareId = 'Root\MttVDD'
 $MaxScreens = 8
 $Nefconc = 'C:\ProgramData\scoop\shims\nefconc.exe'
+$LogPath = Join-Path $Dir 'helper.log'
+
+function Write-Log([string]$text) {
+    Add-Content -Path $LogPath -Value ('{0:HH:mm:ss.fff} {1}' -f (Get-Date), $text)
+}
 
 function Get-VddInstances {
     @(Get-PnpDevice -Class Display | Where-Object { $_.HardwareID -contains $HardwareId } | Sort-Object InstanceId)
@@ -38,7 +43,8 @@ function Wait-ScreenCount([int]$Expected, [int]$TimeoutSec) {
 
 function Invoke-Tool([string]$Exe, [string[]]$Arguments) {
     if ($DryRun) { return 0 }
-    & $Exe @Arguments | Out-Null
+    $output = & $Exe @Arguments 2>&1 | Out-String
+    Write-Log "$Exe $($Arguments -join ' ') -> exit $LASTEXITCODE, screens $(Get-ScreenCount): $($output.Trim() -replace '\s+', ' ')"
     return $LASTEXITCODE
 }
 
@@ -57,12 +63,23 @@ function Add-Screen {
     }
 
     if (-not (Test-Path $Nefconc)) { throw "$Nefconc not found" }
+    $known = @(Get-VddInstances | ForEach-Object InstanceId)
     $code = Invoke-Tool $Nefconc @('--create-device-node', '--hardware-id', $HardwareId, '--class-name', 'Display', '--class-guid', '4D36E968-E325-11CE-BFC1-08002BE10318')
     if ($code -ne 0) { throw "nefconc --create-device-node: exit code $code" }
     if ($DryRun) { return 'dry run: would create a new device instance' }
-    if (Wait-ScreenCount ($before + 1) 40) { return 'created a new device instance' }
+    if (Wait-ScreenCount ($before + 1) 5) { return 'created a new device instance' }
 
-    # The driver did not bind on its own: install it onto the new node explicitly.
+    # The driver rarely binds on its own. Try the steps that touch only the new
+    # node first; --install-driver restarts every instance and drops Quest Link.
+    Invoke-Tool 'pnputil.exe' @('/scan-devices') | Out-Null
+    if (Wait-ScreenCount ($before + 1) 10) { return 'created a new device instance (bound after device scan)' }
+    $created = @(Get-VddInstances | ForEach-Object InstanceId | Where-Object { $known -notcontains $_ })
+    Write-Log "new instances: $($created -join ', ')"
+    if ($created.Count -eq 1) {
+        Invoke-Tool 'pnputil.exe' @('/restart-device', $created[0]) | Out-Null
+        if (Wait-ScreenCount ($before + 1) 10) { return "created $($created[0]) (bound after restart)" }
+    }
+
     $inf = Get-ChildItem (Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository\mttvdd.inf_amd64_*\MttVDD.inf') | Select-Object -First 1
     if ($null -eq $inf) { throw 'instance created, but the driver did not bind and MttVDD.inf was not found' }
     $code = Invoke-Tool $Nefconc @('--install-driver', '--inf-path', $inf.FullName)
@@ -93,6 +110,7 @@ $parts = (Get-Content $requestPath -Raw).Trim() -split '\s+'
 Remove-Item $requestPath -Force
 $requestId = if ($parts[0] -match '^\d+$') { $parts[0] } else { '' }
 
+Write-Log "request: $($parts -join ' ') (screens $(Get-ScreenCount))"
 $ok = $false
 try {
     if ($requestId -eq '' -or $parts.Count -ne 2) { throw 'malformed request' }
@@ -108,3 +126,4 @@ try {
 
 $response = @{ id = $requestId; ok = $ok; screens = (Get-ScreenCount); message = $message } | ConvertTo-Json -Compress
 [System.IO.File]::WriteAllText($responsePath, $response, (New-Object System.Text.UTF8Encoding($false)))
+Write-Log "response: $response"

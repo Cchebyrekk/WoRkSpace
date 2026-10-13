@@ -19,6 +19,8 @@ const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
 const HAND_ROTATION_WEIGHT := 0.8
 const RAY_SMOOTHING_SEC := 0.05
+## Where the ray starts: 0 = index knuckle, 1 = base of the thumb.
+const RAY_ORIGIN_TOWARDS_THUMB := 0.5
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
@@ -41,6 +43,7 @@ class Pointer:
 	var pressed := false
 	var just_pressed := false
 	var hit_distance := INF
+	var pinch_mm := 0.0
 
 
 var _origin: XROrigin3D
@@ -102,6 +105,8 @@ func _process(delta: float) -> void:
 			controller.get_vector2(&"primary"),
 			pointer.mode, ", нажат" if pointer.pressed else "",
 		])
+		if pointer.mode == "рука":
+			lines[-1] += " | щипок %.0f мм, направление %.2v" % [pointer.pinch_mm, pointer.direction]
 
 	_update_buttons(delta)
 	_update_rays()
@@ -214,7 +219,9 @@ func _update_pointer(index: int, delta: float) -> void:
 		var previous := pointer.direction if pointer.mode == "рука" else Vector3.ZERO
 		pointer.active = true
 		pointer.mode = "рука"
-		pointer.origin = to_world * index_knuckle
+		var thumb_base := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_PHALANX_PROXIMAL).origin
+		pointer.origin = to_world * index_knuckle.lerp(thumb_base, RAY_ORIGIN_TOWARDS_THUMB)
+		pointer.pinch_mm = thumb_tip.distance_to(index_tip) * 1000.0
 		pointer.direction = PointerMath.smooth_direction(previous, target, delta, RAY_SMOOTHING_SEC)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
 	elif controller.get_has_tracking_data():
