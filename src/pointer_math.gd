@@ -35,6 +35,12 @@ static func blend_ray_direction(shoulder_direction: Vector3, hand_forward: Vecto
 	return shoulder_direction.slerp(hand_forward.normalized(), clampf(rotation_weight, 0.0, 1.0)).normalized()
 
 
+## Turns a direction around the vertical axis; positive `right_radians` turns it
+## to the right as seen by the user. Mirror the sign for the other hand.
+static func yaw_direction(direction: Vector3, right_radians: float) -> Vector3:
+	return direction.rotated(Vector3.UP, -right_radians)
+
+
 ## Tilts a direction towards the floor by `down_radians` (negative tilts it up),
 ## keeping its heading. A vertical direction is returned unchanged.
 static func pitch_direction(direction: Vector3, down_radians: float) -> Vector3:
