@@ -190,6 +190,20 @@ func _test_hand_ray() -> void:
 	_check(is_equal_approx(turned_left.x, -turned_right.x) and is_equal_approx(turned_left.z, turned_right.z), "зеркальный поворот для другой руки")
 	_check(is_equal_approx(PointerMath.yaw_direction(Vector3(0.0, -0.6, -0.8), 0.4).y, -0.6), "поворот не меняет наклон")
 
+	# Dead zone: 0.01 rad here.
+	var near := Vector3.FORWARD.rotated(Vector3.UP, 0.006)
+	_check(PointerMath.deadband_direction(Vector3.FORWARD, near, 0.01).is_equal_approx(Vector3.FORWARD), "в мёртвой зоне луч стоит")
+	var far := Vector3.FORWARD.rotated(Vector3.UP, 0.05)
+	var trailing := PointerMath.deadband_direction(Vector3.FORWARD, far, 0.01)
+	_check(is_equal_approx(trailing.angle_to(far), 0.01), "вне зоны луч отстаёт ровно на её радиус")
+	_check(is_equal_approx(trailing.angle_to(Vector3.FORWARD), 0.04), "и сдвигается на остаток")
+	_check(PointerMath.deadband_direction(Vector3.ZERO, far, 0.01).is_equal_approx(far), "первый кадр — без мёртвой зоны")
+	_check(PointerMath.deadband_direction(Vector3.FORWARD, far, 0.0).is_equal_approx(far), "нулевой радиус отключает зону")
+	var held := Vector3.FORWARD
+	for i in 100:
+		held = PointerMath.deadband_direction(held, Vector3.FORWARD.rotated(Vector3.UP, 0.004 * sin(i * 0.7)), 0.01)
+	_check(held.is_equal_approx(Vector3.FORWARD), "дрожание меньше радиуса не сдвигает луч вовсе")
+
 	_check(PointerMath.smooth_direction(Vector3.ZERO, Vector3.UP, 0.01, 0.05).is_equal_approx(Vector3.UP), "первый кадр — без сглаживания")
 	_check(PointerMath.smooth_direction(Vector3.FORWARD, Vector3.UP, 0.01, 0.0).is_equal_approx(Vector3.UP), "сглаживание выключено")
 	var smoothed := PointerMath.smooth_direction(Vector3.FORWARD, Vector3.UP, 0.01, 0.05)

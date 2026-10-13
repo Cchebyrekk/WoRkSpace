@@ -24,6 +24,9 @@ const RAY_SMOOTHING_SLOW_SEC := 0.2
 const RAY_SMOOTHING_FAST_SEC := 0.03
 const RAY_SPEED_SLOW := 0.1
 const RAY_SPEED_FAST := 1.0
+## The hand ray ignores direction changes smaller than this (radians) and trails
+## larger ones by it: 0.004 rad is about 7 px on the panel at 1.1 m.
+const RAY_DEADBAND := 0.004
 ## The wrist rotation is tracked worst exactly when the fingers close. Below this
 ## thumb-to-index distance, and while a pinch is held, the rotation's contribution
 ## is frozen and the ray moves only with the position of the hand.
@@ -63,7 +66,38 @@ const TOPOLOGY_MESSAGES := {
 }
 
 
+## Spread of a point over a stretch of frames: the root-mean-square distance from
+## its mean. Used to measure how much the hand ray trembles on the panel.
+class Spread:
+	var count := 0
+	var _sum := Vector2.ZERO
+	var _sum_of_squares := 0.0
+
+	func add(point: Vector2) -> void:
+		count += 1
+		_sum += point
+		_sum_of_squares += point.length_squared()
+
+	func deviation() -> float:
+		if count < 2:
+			return 0.0
+		var mean := _sum / count
+		return sqrt(maxf(_sum_of_squares / count - mean.length_squared(), 0.0))
+
+	func reset() -> void:
+		count = 0
+		_sum = Vector2.ZERO
+		_sum_of_squares = 0.0
+
+
 class Pointer:
+	## Before smoothing, for the tremor measurement.
+	var raw_origin := Vector3.ZERO
+	var raw_direction := Vector3.FORWARD
+	var shoulder_direction := Vector3.FORWARD
+	var spread_raw := Spread.new()
+	var spread_position_only := Spread.new()
+	var spread_final := Spread.new()
 	var active := false
 	var mode := "нет"
 	var origin := Vector3.ZERO
@@ -201,6 +235,8 @@ func _process(delta: float) -> void:
 	_log_timer += delta
 	if _log_timer >= LOG_INTERVAL_SEC:
 		_log_timer = 0.0
+		if _panel_layer != null:
+			_log_tremor()
 		if _capture != null:
 			var frames := _capture.get_frame_count()
 			lines.append("Захват: %s, кадров %d (+%d за интервал)" % [_capture.get_size(), frames, frames - _capture_frames_logged])
@@ -232,6 +268,27 @@ func _exit_tree() -> void:
 		_capture.stop()
 
 
+## Adds where a ray meets the plane of the panel (inside it or not), in panel pixels.
+func _add_plane_point(spread: Spread, origin: Vector3, direction: Vector3) -> void:
+	var panel_transform := _panel_layer.global_transform
+	var distance := PointerMath.ray_rect_distance(origin, direction, panel_transform, Vector2(1000.0, 1000.0))
+	if distance >= 0.0:
+		spread.add(PointerMath.rect_uv(origin + direction * distance, panel_transform, _panel_layer.quad_size) * Vector2(_panel_monitor.size))
+
+
+## Once per log interval: how much each hand ray trembled on the panel, in pixels.
+func _log_tremor() -> void:
+	for i in 2:
+		var pointer := _pointers[i]
+		if pointer.spread_final.count >= 20:
+			print("[jitter] %s: разброс за интервал, px — сырой луч %.1f, только положение руки %.1f, итог после фильтров %.1f (кадров %d, щипок %.0f мм)" % [
+					SIDE_LABELS[i], pointer.spread_raw.deviation(), pointer.spread_position_only.deviation(),
+					pointer.spread_final.deviation(), pointer.spread_final.count, pointer.pinch_mm])
+		pointer.spread_raw.reset()
+		pointer.spread_position_only.reset()
+		pointer.spread_final.reset()
+
+
 ## Drives the Windows cursor from the pointer aimed at the screen panel: the ray's
 ## hit point becomes a pixel on that monitor, a pinch or trigger the left button.
 func _update_cursor() -> void:
@@ -249,6 +306,10 @@ func _update_cursor() -> void:
 		pointer.on_panel = true
 		pointer.panel_uv = PointerMath.rect_uv(pointer.origin + pointer.direction * distance, panel_transform, panel_size)
 		pointer.hit_distance = minf(pointer.hit_distance, distance)
+		if pointer.mode == "рука":
+			pointer.spread_final.add(pointer.panel_uv * Vector2(_panel_monitor.size))
+			_add_plane_point(pointer.spread_raw, pointer.raw_origin, pointer.raw_direction)
+			_add_plane_point(pointer.spread_position_only, pointer.raw_origin, pointer.shoulder_direction)
 
 	# One pointer owns the cursor: whoever pressed last, otherwise whoever aims at
 	# the panel (right hand first). The owner cannot change while the button is held.
@@ -538,6 +599,9 @@ func _update_pointer(index: int, delta: float) -> void:
 		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
 			pointer.rotation_offset = Quaternion(shoulder_direction, target)
 		target = pointer.rotation_offset * shoulder_direction
+		pointer.raw_origin = palm
+		pointer.raw_direction = target
+		pointer.shoulder_direction = shoulder_direction
 		var previous := pointer.direction if was_hand else Vector3.ZERO
 		var angular_speed := previous.angle_to(target) / maxf(delta, 0.001) if was_hand else INF
 		var smoothing := PointerMath.adaptive_smoothing(angular_speed, RAY_SMOOTHING_SLOW_SEC, RAY_SMOOTHING_FAST_SEC, RAY_SPEED_SLOW, RAY_SPEED_FAST)
@@ -546,7 +610,10 @@ func _update_pointer(index: int, delta: float) -> void:
 		# The origin gets the same smoothing: a palm that jumps 1 cm moves the cursor about 15 px.
 		pointer.origin = pointer.origin.lerp(palm, 1.0 - exp(-delta / smoothing)) if was_hand else palm
 		pointer.pinch_mm = tip_distance * 1000.0
-		pointer.direction = PointerMath.smooth_direction(previous, target, delta, smoothing)
+		# Dead zone first, then smoothing towards its result: the other way round a
+		# single smoothed step would always be smaller than the zone.
+		pointer.direction = PointerMath.smooth_direction(previous,
+				PointerMath.deadband_direction(previous, target, RAY_DEADBAND), delta, smoothing)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
 	elif controller.get_has_tracking_data():
 		pointer.active = true

@@ -64,6 +64,18 @@ static func pitch_direction(direction: Vector3, down_radians: float) -> Vector3:
 	return direction.rotated(axis.normalized(), -down_radians)
 
 
+## Dead zone for a direction: the output stays where it was while the target is
+## within `radius` (radians) of it, and otherwise trails the target by exactly
+## `radius`. A hand held still therefore gives a ray that does not move at all.
+static func deadband_direction(previous: Vector3, target: Vector3, radius: float) -> Vector3:
+	if radius <= 0.0 or previous.length_squared() < 0.0001:
+		return target
+	var angle := previous.angle_to(target)
+	if angle <= radius:
+		return previous
+	return previous.slerp(target, (angle - radius) / angle).normalized()
+
+
 ## Exponential smoothing of a direction; `time_constant` <= 0 disables it.
 static func smooth_direction(previous: Vector3, target: Vector3, delta: float, time_constant: float) -> Vector3:
 	if time_constant <= 0.0 or previous.length_squared() < 0.0001:
