@@ -83,6 +83,11 @@ var _xr_ready := false
 var _xr: OpenXRInterface
 var _capture: ScreenCapture
 var _capture_frames_logged := 0
+var _panel_viewport: SubViewport
+## Diagnostic switches, comma-separated in WORKPLACE_DIAG: nolayer, nocopy, nohole, nocapture.
+## Do NOT put the capture texture on a 3D material: in VR that removes the D3D12
+## device (0x887A0005) and crashes the engine; the composition layer path is fine.
+var _diag: PackedStringArray = OS.get_environment("WORKPLACE_DIAG").split(",", false)
 var _hotkey: GlobalHotkey
 var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 var _ray_yaw_right_deg := RAY_YAW_RIGHT_DEG
@@ -143,7 +148,7 @@ func _process(delta: float) -> void:
 		return
 	if not _xr_ready:
 		return
-	if _capture != null:
+	if _capture != null and not _diag.has("nocopy"):
 		_capture.update()
 	_update_xr_session(delta)
 
@@ -205,6 +210,10 @@ func _exit_tree() -> void:
 ## OpenXR composition layer, which the runtime samples directly and which is
 ## noticeably sharper for text than a textured mesh.
 func _build_screen_panel() -> void:
+	if not _diag.is_empty():
+		print("[diag] ", _diag)
+	if _diag.has("nocapture"):
+		return
 	var monitors := ScreenCapture.list_monitors()
 	print("[capture] мониторы: ", monitors)
 	var monitor_index := 0
@@ -220,6 +229,11 @@ func _build_screen_panel() -> void:
 	var pixels := _capture.get_size()
 	print("[capture] захват монитора %d (%s) запущен, %s" % [monitor_index, monitors[monitor_index]["name"], pixels])
 
+	if not _diag.has("nolayer"):
+		_build_panel_layer(pixels)
+
+
+func _build_panel_layer(pixels: Vector2i) -> void:
 	var picture := TextureRect.new()
 	picture.texture = _capture.get_texture()
 	picture.stretch_mode = TextureRect.STRETCH_SCALE
@@ -227,9 +241,12 @@ func _build_screen_panel() -> void:
 	var viewport := SubViewport.new()
 	viewport.size = pixels
 	viewport.disable_3d = true
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# Stays off until the session is visible: rendering the layer earlier makes
+	# OpenXR acquire its swapchain image twice ("image_acquired" errors).
+	viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	viewport.add_child(picture)
 	add_child(viewport)
+	_panel_viewport = viewport
 
 	var width := 2.0 * PANEL_DISTANCE * tan(deg_to_rad(PANEL_WIDTH_DEG * 0.5)) * (pixels.x / 1920.0)
 	var layer := OpenXRCompositionLayerQuad.new()
@@ -237,28 +254,21 @@ func _build_screen_panel() -> void:
 	layer.quad_size = Vector2(width, width * pixels.y / pixels.x)
 	layer.position = Vector3(0.0, PANEL_CENTER_HEIGHT, -PANEL_DISTANCE)
 	# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
-	layer.sort_order = -1
-	layer.enable_hole_punch = true
-	get_viewport().transparent_bg = true
+	if not _diag.has("nohole"):
+		layer.sort_order = -1
+		layer.enable_hole_punch = true
+		get_viewport().transparent_bg = true
 	_origin.add_child(layer)
 	print("[capture] панель %.2f x %.2f м на расстоянии %.2f м" % [layer.quad_size.x, layer.quad_size.y, PANEL_DISTANCE])
-
-	# Diagnostic only: the same texture on an ordinary mesh, to tell a capture
-	# problem from a composition layer problem. Colours are expected to be off here.
-	var probe_mesh := QuadMesh.new()
-	probe_mesh.size = Vector2(0.48, 0.27)
-	var probe_material := StandardMaterial3D.new()
-	probe_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	probe_material.albedo_texture = _capture.get_texture()
-	var probe := MeshInstance3D.new()
-	probe.mesh = probe_mesh
-	probe.material_override = probe_material
-	probe.position = Vector3(1.05, 1.95, -PANEL_DISTANCE)
-	add_child(probe)
 
 
 func _on_xr_event(event: StringName) -> void:
 	print("[xr] событие: ", event)
+	if _panel_viewport != null:
+		if event == &"session_visible" or event == &"session_focussed":
+			_panel_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		elif event == &"session_stopping":
+			_panel_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	if event == &"session_loss_pending" or event == &"instance_exiting":
 		_schedule_reconnect()
 
