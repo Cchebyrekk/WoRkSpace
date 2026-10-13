@@ -24,7 +24,7 @@ const RAY_SMOOTHING_SEC := 0.05
 const RAY_PITCH_DOWN_DEG := 35.0
 const RAY_PITCH_STEP_DEG := 5.0
 ## Sideways turn of the right-hand ray, positive to the right; mirrored for the left hand.
-const RAY_YAW_RIGHT_DEG := 0.0
+const RAY_YAW_RIGHT_DEG := 5.0
 const RAY_YAW_STEP_DEG := 2.5
 ## After Quest Link restarts, the OpenXR instance of this process is lost for good
 ## (every re-initialisation fails with XR_ERROR_INSTANCE_LOST), so the app
