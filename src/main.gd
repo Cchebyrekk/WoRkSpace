@@ -19,9 +19,10 @@ const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
 const HAND_ROTATION_WEIGHT := 0.8
 const RAY_SMOOTHING_SEC := 0.05
-## Where the ray starts: 0 = index knuckle, 1 = base of the thumb; adjustable in VR.
-const RAY_ORIGIN_TOWARDS_THUMB := 0.9
-const RAY_ORIGIN_STEP := 0.1
+## The hand ray starts at the palm centre and is tilted towards the floor by this
+## much relative to where the hand points; adjustable in VR.
+const RAY_PITCH_DOWN_DEG := 20.0
+const RAY_PITCH_STEP_DEG := 5.0
 ## After Quest Link restarts, the OpenXR instance of this process is lost for good
 ## (every re-initialisation fails with XR_ERROR_INSTANCE_LOST), so the app
 ## restarts itself and keeps restarting until Link is back.
@@ -70,7 +71,7 @@ var _status: Label3D
 var _log_timer := 0.0
 var _xr_ready := false
 var _xr: OpenXRInterface
-var _ray_origin_towards_thumb := RAY_ORIGIN_TOWARDS_THUMB
+var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 ## Seconds until the next reconnect attempt; negative while the session is healthy.
 var _reconnect_timer := -1.0
 var _last_session_state := -1
@@ -138,7 +139,7 @@ func _process(delta: float) -> void:
 	_update_buttons(delta)
 	_update_rays()
 
-	lines.append("Экранов Windows: %d  |  начало луча %.1f%s" % [DisplayServer.get_screen_count(), _ray_origin_towards_thumb, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
+	lines.append("Экранов Windows: %d  |  наклон луча %.0f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	_status.text = "\n".join(lines)
 
 	_log_timer += delta
@@ -212,9 +213,9 @@ func _update_xr_session(delta: float) -> void:
 	_restart_app(1)
 
 
-func _on_ray_origin_button(step: float) -> void:
-	_ray_origin_towards_thumb = clampf(_ray_origin_towards_thumb + step, -0.5, 2.0)
-	print("[ray] начало луча: %.1f" % _ray_origin_towards_thumb)
+func _on_ray_pitch_button(step_deg: float) -> void:
+	_ray_pitch_down_deg = clampf(_ray_pitch_down_deg + step_deg, -30.0, 60.0)
+	print("[ray] наклон луча вниз: %.0f°" % _ray_pitch_down_deg)
 
 
 func _on_button_pressed(button: String, side: int) -> void:
@@ -294,14 +295,13 @@ func _update_pointer(index: int, delta: float) -> void:
 		# Wrist and knuckles barely move when the fingers pinch, so they define the ray.
 		var wrist := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
 		var middle_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL).origin
-		var index_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL).origin
 		var shoulder_direction := PointerMath.hand_ray_direction(_camera.global_transform, palm, SIDE_SIGNS[index], SHOULDER_DROP, SHOULDER_HALF_WIDTH)
 		var target := PointerMath.blend_ray_direction(shoulder_direction, to_world.basis * (middle_knuckle - wrist), HAND_ROTATION_WEIGHT)
+		target = PointerMath.pitch_direction(target, deg_to_rad(_ray_pitch_down_deg))
 		var previous := pointer.direction if pointer.mode == "рука" else Vector3.ZERO
 		pointer.active = true
 		pointer.mode = "рука"
-		var thumb_base := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_PHALANX_PROXIMAL).origin
-		pointer.origin = to_world * index_knuckle.lerp(thumb_base, _ray_origin_towards_thumb)
+		pointer.origin = palm
 		pointer.pinch_mm = thumb_tip.distance_to(index_tip) * 1000.0
 		pointer.direction = PointerMath.smooth_direction(previous, target, delta, RAY_SMOOTHING_SEC)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
@@ -469,9 +469,9 @@ func _build_buttons() -> void:
 
 	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
 	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)
-	ray_up_button.activated.connect(_on_ray_origin_button.bind(-RAY_ORIGIN_STEP))
+	ray_up_button.activated.connect(_on_ray_pitch_button.bind(-RAY_PITCH_STEP_DEG))
 	var ray_down_button := _add_button("Луч ниже", Vector3(0.61, 0.84, -1.2), 0.3)
-	ray_down_button.activated.connect(_on_ray_origin_button.bind(RAY_ORIGIN_STEP))
+	ray_down_button.activated.connect(_on_ray_pitch_button.bind(RAY_PITCH_STEP_DEG))
 
 
 func _add_button(text: String, at: Vector3, hold_time: float) -> VrButton:

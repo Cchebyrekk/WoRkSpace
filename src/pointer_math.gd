@@ -35,6 +35,15 @@ static func blend_ray_direction(shoulder_direction: Vector3, hand_forward: Vecto
 	return shoulder_direction.slerp(hand_forward.normalized(), clampf(rotation_weight, 0.0, 1.0)).normalized()
 
 
+## Tilts a direction towards the floor by `down_radians` (negative tilts it up),
+## keeping its heading. A vertical direction is returned unchanged.
+static func pitch_direction(direction: Vector3, down_radians: float) -> Vector3:
+	var axis := direction.cross(Vector3.UP)
+	if axis.length_squared() < 0.0001:
+		return direction
+	return direction.rotated(axis.normalized(), -down_radians)
+
+
 ## Exponential smoothing of a direction; `time_constant` <= 0 disables it.
 static func smooth_direction(previous: Vector3, target: Vector3, delta: float, time_constant: float) -> Vector3:
 	if time_constant <= 0.0 or previous.length_squared() < 0.0001:
