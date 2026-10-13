@@ -67,18 +67,19 @@ function Add-Screen {
     $code = Invoke-Tool $Nefconc @('--create-device-node', '--hardware-id', $HardwareId, '--class-name', 'Display', '--class-guid', '4D36E968-E325-11CE-BFC1-08002BE10318')
     if ($code -ne 0) { throw "nefconc --create-device-node: exit code $code" }
     if ($DryRun) { return 'dry run: would create a new device instance' }
-    if (Wait-ScreenCount ($before + 1) 5) { return 'created a new device instance' }
+    if (Wait-ScreenCount ($before + 1) 2) { return 'created a new device instance' }
 
-    # The driver rarely binds on its own. Try the steps that touch only the new
-    # node first; --install-driver restarts every instance and drops Quest Link.
-    Invoke-Tool 'pnputil.exe' @('/scan-devices') | Out-Null
-    if (Wait-ScreenCount ($before + 1) 10) { return 'created a new device instance (bound after device scan)' }
+    # The driver does not bind on its own. Restarting just the new node is what
+    # worked in practice (a device scan did not); --install-driver is the last
+    # resort because it restarts every instance.
     $created = @(Get-VddInstances | ForEach-Object InstanceId | Where-Object { $known -notcontains $_ })
     Write-Log "new instances: $($created -join ', ')"
     if ($created.Count -eq 1) {
         Invoke-Tool 'pnputil.exe' @('/restart-device', $created[0]) | Out-Null
         if (Wait-ScreenCount ($before + 1) 10) { return "created $($created[0]) (bound after restart)" }
     }
+    Invoke-Tool 'pnputil.exe' @('/scan-devices') | Out-Null
+    if (Wait-ScreenCount ($before + 1) 10) { return 'created a new device instance (bound after device scan)' }
 
     $inf = Get-ChildItem (Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository\mttvdd.inf_amd64_*\MttVDD.inf') | Select-Object -First 1
     if ($null -eq $inf) { throw 'instance created, but the driver did not bind and MttVDD.inf was not found' }
