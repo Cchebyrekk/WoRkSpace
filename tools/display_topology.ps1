@@ -241,7 +241,11 @@ function Write-ScreensToLog($screens) {
 
 function Read-State {
     if (-not (Test-Path $StatePath)) { return @() }
-    try { return @(Get-Content $StatePath -Raw | ConvertFrom-Json | Where-Object { $_.Path }) } catch { return @() }
+    try {
+        # Through a variable: ConvertFrom-Json sends an array down the pipeline as ONE object.
+        $parsed = Get-Content $StatePath -Raw | ConvertFrom-Json
+        return @($parsed | Where-Object { $_.Path -is [string] })
+    } catch { return @() }
 }
 
 function Write-State($entries) {

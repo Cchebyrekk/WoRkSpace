@@ -19,8 +19,10 @@ const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
 const HAND_ROTATION_WEIGHT := 0.8
 const RAY_SMOOTHING_SEC := 0.05
-## Where the ray starts: 0 = index knuckle, 1 = base of the thumb.
-const RAY_ORIGIN_TOWARDS_THUMB := 0.5
+## Where the ray starts: 0 = index knuckle, 1 = base of the thumb; adjustable in VR.
+const RAY_ORIGIN_TOWARDS_THUMB := 0.9
+const RAY_ORIGIN_STEP := 0.1
+const XR_RECONNECT_INTERVAL_SEC := 3.0
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
@@ -61,6 +63,13 @@ var _vdd_message := ""
 var _status: Label3D
 var _log_timer := 0.0
 var _xr_ready := false
+var _xr: OpenXRInterface
+var _ray_origin_towards_thumb := RAY_ORIGIN_TOWARDS_THUMB
+## Seconds until the next reconnect attempt; negative while the session is healthy.
+var _reconnect_timer := -1.0
+var _last_session_state := -1
+var _hand_trackers_seen := false
+var _hand_trackers_missing_sec := 0.0
 
 
 func _ready() -> void:
@@ -83,13 +92,17 @@ func _ready() -> void:
 			" / ", RenderingServer.get_current_rendering_method())
 	var openxr := xr as OpenXRInterface
 	if openxr != null:
+		_xr = openxr
 		print("[xr] расширение hand tracking поддерживается средой: ", openxr.is_hand_tracking_supported())
 		openxr.session_begun.connect(_on_session_begun.bind(openxr))
+		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
+			openxr.connect(event, _on_xr_event.bind(event))
 
 
 func _process(delta: float) -> void:
 	if not _xr_ready:
 		return
+	_update_xr_session(delta)
 
 	var lines: PackedStringArray = []
 	for i in 2:
@@ -111,7 +124,7 @@ func _process(delta: float) -> void:
 	_update_buttons(delta)
 	_update_rays()
 
-	lines.append("Экранов Windows: %d%s" % [DisplayServer.get_screen_count(), ("  |  " + _vdd_message) if _vdd_message != "" else ""])
+	lines.append("Экранов Windows: %d  |  начало луча %.1f%s" % [DisplayServer.get_screen_count(), _ray_origin_towards_thumb, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	_status.text = "\n".join(lines)
 
 	_log_timer += delta
@@ -134,6 +147,60 @@ func _quit() -> void:
 
 func _on_session_begun(openxr: OpenXRInterface) -> void:
 	print("[xr] сессия начата, частота: ", openxr.display_refresh_rate, " Гц")
+
+
+func _on_xr_event(event: StringName) -> void:
+	print("[xr] событие: ", event)
+	if event == &"session_loss_pending" or event == &"instance_exiting":
+		_schedule_reconnect()
+
+
+func _schedule_reconnect() -> void:
+	if _reconnect_timer < 0.0:
+		_reconnect_timer = XR_RECONNECT_INTERVAL_SEC
+
+
+## Logs session state changes and brings the session back after the runtime drops
+## it (Quest Link restarts whenever a display driver instance is toggled).
+func _update_xr_session(delta: float) -> void:
+	if _xr == null:
+		return
+	if _xr.has_method(&"get_session_state"):
+		var state: int = _xr.call(&"get_session_state")
+		if state != _last_session_state:
+			_last_session_state = state
+			print("[xr] состояние сессии: ", state)
+
+	# The runtime does not always announce the loss; vanished hand trackers also mean it.
+	if XRServer.get_tracker(HAND_TRACKER_NAMES[0]) != null:
+		_hand_trackers_seen = true
+		_hand_trackers_missing_sec = 0.0
+	elif _hand_trackers_seen and _reconnect_timer < 0.0:
+		_hand_trackers_missing_sec += delta
+		if _hand_trackers_missing_sec > XR_RECONNECT_INTERVAL_SEC:
+			print("[xr] трекеры рук пропали — считаю сессию потерянной")
+			_hand_trackers_seen = false
+			_schedule_reconnect()
+
+	if _reconnect_timer < 0.0:
+		return
+	_reconnect_timer -= delta
+	if _reconnect_timer > 0.0:
+		return
+	print("[xr] пробую переподключиться…")
+	if _xr.is_initialized():
+		_xr.uninitialize()
+	if _xr.initialize():
+		get_viewport().use_xr = true
+		_reconnect_timer = -1.0
+		print("[xr] переподключено")
+	else:
+		_reconnect_timer = XR_RECONNECT_INTERVAL_SEC
+
+
+func _on_ray_origin_button(step: float) -> void:
+	_ray_origin_towards_thumb = clampf(_ray_origin_towards_thumb + step, -0.5, 2.0)
+	print("[ray] начало луча: %.1f" % _ray_origin_towards_thumb)
 
 
 func _on_button_pressed(button: String, side: int) -> void:
@@ -220,7 +287,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.active = true
 		pointer.mode = "рука"
 		var thumb_base := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_PHALANX_PROXIMAL).origin
-		pointer.origin = to_world * index_knuckle.lerp(thumb_base, RAY_ORIGIN_TOWARDS_THUMB)
+		pointer.origin = to_world * index_knuckle.lerp(thumb_base, _ray_origin_towards_thumb)
 		pointer.pinch_mm = thumb_tip.distance_to(index_tip) * 1000.0
 		pointer.direction = PointerMath.smooth_direction(previous, target, delta, RAY_SMOOTHING_SEC)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
@@ -385,6 +452,12 @@ func _build_buttons() -> void:
 	# Kept apart from the others so that it is not hit by accident.
 	var exit_button := _add_button("Выход", Vector3(0.45, 1.0, -1.2), EXIT_BUTTON_HOLD_SEC)
 	exit_button.activated.connect(_quit)
+
+	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
+	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)
+	ray_up_button.activated.connect(_on_ray_origin_button.bind(-RAY_ORIGIN_STEP))
+	var ray_down_button := _add_button("Луч ниже", Vector3(0.61, 0.84, -1.2), 0.3)
+	ray_down_button.activated.connect(_on_ray_origin_button.bind(RAY_ORIGIN_STEP))
 
 
 func _add_button(text: String, at: Vector3, hold_time: float) -> VrButton:
