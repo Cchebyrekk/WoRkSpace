@@ -33,6 +33,14 @@ static func pinch_state(was_pinched: bool, tip_distance: float, press_distance: 
 	return tip_distance < press_distance
 
 
+## How close the fingers are to pinching: 0 at `approach_distance` or wider, 1 at
+## `press_distance` or closer. Used to steady the ray while the pinch closes.
+static func pinch_stability(tip_distance: float, approach_distance: float, press_distance: float) -> float:
+	if approach_distance <= press_distance:
+		return 1.0 if tip_distance <= press_distance else 0.0
+	return clampf((approach_distance - tip_distance) / (approach_distance - press_distance), 0.0, 1.0)
+
+
 ## Hand ray in the style of the Quest system pointer: it mostly follows where the
 ## hand itself points (`hand_forward`, wrist towards the knuckles), steadied by
 ## the shoulder-to-hand line. `rotation_weight`: 0 = shoulder only, 1 = hand only.

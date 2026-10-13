@@ -19,6 +19,12 @@ const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
 const HAND_ROTATION_WEIGHT := 0.8
 const RAY_SMOOTHING_SEC := 0.05
+## Closing the fingers shakes the tracked hand, so the ray is smoothed harder the
+## closer the pinch gets (from PINCH_APPROACH_DISTANCE down to the press distance),
+## and moderately while the pinch is held so that dragging stays controllable.
+const PINCH_APPROACH_DISTANCE := 0.04
+const RAY_SMOOTHING_PINCHING_SEC := 0.5
+const RAY_SMOOTHING_HELD_SEC := 0.15
 ## The hand ray starts at the palm centre and is tilted towards the floor by this
 ## much relative to where the hand points; adjustable in VR.
 const RAY_PITCH_DOWN_DEG := 35.0
@@ -272,10 +278,11 @@ func _update_cursor() -> void:
 		MouseInput.move_to(pixel)
 	if result.press:
 		MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
-		print("[cursor] %s: нажатие в %s" % [SIDE_LABELS[_cursor_owner], pixel])
+		print("[cursor] %s: нажатие в %s, луч в этот момент в %.0f px от точки%s" % [SIDE_LABELS[_cursor_owner], pixel,
+				_cursor_filter.last_press_offset, ", прилипло к предыдущему" if _cursor_filter.last_press_snapped else ""])
 	if result.release:
 		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
-		print("[cursor] отпускание в %s" % pixel)
+		print("[cursor] отпускание в %s, за время удержания луч уходил на %.0f px" % [pixel, _cursor_filter.last_hold_excursion])
 
 
 ## One monitor as a live panel in front of the user. The picture goes through an
@@ -515,12 +522,17 @@ func _update_pointer(index: int, delta: float) -> void:
 		# SIDE_SIGNS mirrors the turn: what is "right" for the right hand is "left" for the left one.
 		target = PointerMath.yaw_direction(target, deg_to_rad(_ray_yaw_right_deg) * SIDE_SIGNS[index])
 		target = PointerMath.pitch_direction(target, deg_to_rad(_ray_pitch_down_deg))
-		var previous := pointer.direction if pointer.mode == "рука" else Vector3.ZERO
+		var tip_distance := thumb_tip.distance_to(index_tip)
+		var smoothing := RAY_SMOOTHING_HELD_SEC if was_pressed else lerpf(RAY_SMOOTHING_SEC, RAY_SMOOTHING_PINCHING_SEC,
+				PointerMath.pinch_stability(tip_distance, PINCH_APPROACH_DISTANCE, PINCH_PRESS_DISTANCE))
+		var was_hand := pointer.mode == "рука"
+		var previous := pointer.direction if was_hand else Vector3.ZERO
 		pointer.active = true
 		pointer.mode = "рука"
-		pointer.origin = palm
-		pointer.pinch_mm = thumb_tip.distance_to(index_tip) * 1000.0
-		pointer.direction = PointerMath.smooth_direction(previous, target, delta, RAY_SMOOTHING_SEC)
+		# The origin gets the same smoothing: a palm that jumps 1 cm moves the cursor about 15 px.
+		pointer.origin = pointer.origin.lerp(palm, 1.0 - exp(-delta / smoothing)) if was_hand else palm
+		pointer.pinch_mm = tip_distance * 1000.0
+		pointer.direction = PointerMath.smooth_direction(previous, target, delta, smoothing)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
 	elif controller.get_has_tracking_data():
 		pointer.active = true

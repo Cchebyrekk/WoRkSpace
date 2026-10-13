@@ -20,8 +20,14 @@ class Result:
 
 ## The press is placed where the pointer was this long before the pinch closed.
 var lookback_sec := 0.1
-## While held, the cursor follows only after the pointer has left this radius.
-var drag_threshold := 25.0
+## While held, the cursor follows only after the pointer has left this radius...
+var drag_threshold := 40.0
+## ...and only once the press has lasted this long, so a quick click never drags.
+var drag_delay_sec := 0.25
+## A press this soon after the previous one, and this close to it, is sent to
+## exactly the same point: Windows only counts a double click within a few pixels.
+var double_click_sec := 0.6
+var double_click_radius := 60.0
 
 const HISTORY_SEC := 0.5
 
@@ -30,6 +36,15 @@ var _was_pressed := false
 var _held := false
 var _dragging := false
 var _anchor := Vector2.ZERO
+var _press_time := 0.0
+var _last_release_time := -INF
+
+## Diagnostics for tuning, valid after a press / a release respectively: how far
+## the raw pointer was from where the press was placed, and how far it strayed
+## from that point while the button was held.
+var last_press_offset := 0.0
+var last_hold_excursion := 0.0
+var last_press_snapped := false
 var _position := Vector2.ZERO
 var _has_position := false
 
@@ -53,16 +68,25 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Res
 	if _held and not pressed:
 		_held = false
 		_dragging = false
+		_last_release_time = time
 		result.release = true
 	elif just_pressed and on_screen:
+		var previous_anchor := _anchor
 		_held = true
 		_dragging = false
+		_press_time = time
 		_anchor = _position_at(time - lookback_sec, target)
+		last_press_snapped = time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
+		if last_press_snapped:
+			_anchor = previous_anchor
+		last_press_offset = target.distance_to(_anchor)
+		last_hold_excursion = 0.0
 		_move(result, _anchor)
 		result.press = true
 	elif _held:
 		if on_screen:
-			if not _dragging and target.distance_to(_anchor) > drag_threshold:
+			last_hold_excursion = maxf(last_hold_excursion, target.distance_to(_anchor))
+			if not _dragging and time - _press_time >= drag_delay_sec and target.distance_to(_anchor) > drag_threshold:
 				_dragging = true
 			if _dragging:
 				_move(result, target)

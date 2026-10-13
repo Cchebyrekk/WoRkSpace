@@ -71,12 +71,45 @@ func _test_cursor_filter() -> void:
 
 	result = filter.update(Vector2(218.0, 214.0), true, true, 0.25)
 	_check(not result.move and not result.press and result.position == Vector2(200.0, 200.0), "дрожание в пределах порога курсор не двигает")
-	result = filter.update(Vector2(240.0, 200.0), true, true, 0.3)
-	_check(result.move and result.position == Vector2(240.0, 200.0), "за порогом начинается перетаскивание")
-	result = filter.update(Vector2(242.0, 201.0), true, true, 0.35)
+	result = filter.update(Vector2(260.0, 200.0), true, true, 0.3)
+	_check(not result.move, "рывок в первые доли секунды после нажатия — ещё не перетаскивание")
+	result = filter.update(Vector2(240.0, 200.0), true, true, 0.5)
+	_check(result.move and result.position == Vector2(240.0, 200.0), "после задержки и за порогом начинается перетаскивание")
+	result = filter.update(Vector2(242.0, 201.0), true, true, 0.55)
 	_check(result.move and result.position == Vector2(242.0, 201.0), "при перетаскивании курсор следует точно")
-	result = filter.update(Vector2(242.0, 201.0), true, false, 0.4)
+	result = filter.update(Vector2(242.0, 201.0), true, false, 0.6)
 	_check(result.release and not result.move and not filter.is_held(), "разведение пальцев отпускает кнопку на месте")
+
+	# A quick click with a jumpy ray stays a click: pressed and released at the same pixel.
+	filter = CursorFilter.new()
+	filter.update(Vector2(300.0, 300.0), true, false, 0.0)
+	filter.update(Vector2(300.0, 300.0), true, false, 0.1)
+	result = filter.update(Vector2(330.0, 340.0), true, true, 0.2)
+	_check(result.press and result.position == Vector2(300.0, 300.0), "щелчок: нажатие в точке до щипка")
+	filter.update(Vector2(350.0, 280.0), true, true, 0.25)
+	result = filter.update(Vector2(350.0, 280.0), true, false, 0.3)
+	_check(result.release and result.position == Vector2(300.0, 300.0), "щелчок: отпускание в той же точке, несмотря на прыжок луча")
+
+	# The second press of a double click lands exactly on the first one.
+	filter.update(Vector2(320.0, 310.0), true, false, 0.35)
+	filter.update(Vector2(320.0, 310.0), true, false, 0.45)
+	result = filter.update(Vector2(325.0, 300.0), true, true, 0.5)
+	_check(result.press and result.position == Vector2(300.0, 300.0) and filter.last_press_snapped, "двойной щелчок: второе нажатие прилипает к первому")
+	filter.update(Vector2(325.0, 300.0), true, false, 0.55)
+	# Too late or too far away is a separate click.
+	filter.update(Vector2(310.0, 305.0), true, false, 1.3)
+	filter.update(Vector2(310.0, 305.0), true, false, 1.4)
+	result = filter.update(Vector2(310.0, 305.0), true, true, 1.5)
+	_check(result.position == Vector2(310.0, 305.0) and not filter.last_press_snapped, "нажатие через секунду — отдельный щелчок")
+	filter.update(Vector2(310.0, 305.0), true, false, 1.55)
+	filter.update(Vector2(900.0, 500.0), true, false, 1.6)
+	filter.update(Vector2(900.0, 500.0), true, false, 1.7)
+	result = filter.update(Vector2(900.0, 500.0), true, true, 1.8)
+	_check(result.position == Vector2(900.0, 500.0) and not filter.last_press_snapped, "нажатие далеко от предыдущего — отдельный щелчок")
+
+	_check(is_equal_approx(PointerMath.pinch_stability(0.05, 0.04, 0.018), 0.0), "пальцы разведены — луч не притормаживается")
+	_check(is_equal_approx(PointerMath.pinch_stability(0.018, 0.04, 0.018), 1.0), "пальцы сведены — полное успокоение")
+	_check(is_equal_approx(PointerMath.pinch_stability(0.029, 0.04, 0.018), 0.5), "на полпути — половина")
 
 	# A press that starts off the screen is not a click, even if it wanders onto it.
 	filter = CursorFilter.new()
