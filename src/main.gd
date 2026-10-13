@@ -16,10 +16,21 @@ const PINCH_PRESS_DISTANCE := 0.018
 const PINCH_RELEASE_DISTANCE := 0.035
 const SHOULDER_DROP := 0.2
 const SHOULDER_HALF_WIDTH := 0.18
+## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
+const HAND_ROTATION_WEIGHT := 0.8
+const RAY_SMOOTHING_SEC := 0.05
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
 const EXIT_BUTTON_HOLD_SEC := 1.0
+## Creating a driver instance restarts every virtual display and drops Quest Link.
+const NEW_INSTANCE_BUTTON_HOLD_SEC := 2.0
+const TOPOLOGY_MESSAGES := {
+	"detached": "экран отсоединён",
+	"attached": "экран присоединён",
+	"last_screen": "это последний экран, убирать нельзя",
+	"no_free_screen": "свободных экранов нет — «Новый VDD» создаст ещё один (Link переподключится)",
+}
 
 
 class Pointer:
@@ -41,6 +52,7 @@ var _pointers: Array[Pointer] = [Pointer.new(), Pointer.new()]
 var _rays: Array[Node3D] = []
 var _buttons: Array[VrButton] = []
 var _screen_buttons: Array[VrButton] = []
+var _topology: DisplayTopology
 var _vdd: VddControl
 var _vdd_message := ""
 var _status: Label3D
@@ -79,7 +91,7 @@ func _process(delta: float) -> void:
 	var lines: PackedStringArray = []
 	for i in 2:
 		var joints := _update_hand(i)
-		_update_pointer(i)
+		_update_pointer(i, delta)
 		var controller := _controllers[i]
 		var pointer := _pointers[i]
 		_controller_visuals[i].visible = controller.get_has_tracking_data()
@@ -123,15 +135,33 @@ func _on_button_pressed(button: String, side: int) -> void:
 	print("[input] ", SIDE_LABELS[side], " контроллер: нажато ", button)
 
 
+func _screens_busy() -> bool:
+	return _topology.busy or _vdd.busy
+
+
 func _on_screen_button(add: bool) -> void:
-	if _vdd.busy:
+	if _screens_busy():
 		return
-	_vdd_message = "добавляю экран…" if add else "убираю экран…"
-	print("[vdd] ", _vdd_message)
+	_vdd_message = "присоединяю экран…" if add else "отсоединяю экран…"
+	print("[screens] ", _vdd_message)
 	if add:
-		_vdd.add_screen()
+		_topology.add_screen()
 	else:
-		_vdd.remove_screen()
+		_topology.remove_screen()
+
+
+func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
+	var text: String = TOPOLOGY_MESSAGES.get(code, code)
+	_vdd_message = ("готово: " if ok else "ошибка: ") + text + ((" (" + detail + ")") if detail != "" else "")
+	print("[screens] ", _vdd_message)
+
+
+func _on_new_instance_button() -> void:
+	if _screens_busy():
+		return
+	_vdd_message = "создаю экземпляр VDD, Link переподключится…"
+	print("[vdd] ", _vdd_message)
+	_vdd.add_screen()
 
 
 func _on_vdd_finished(ok: bool, message: String) -> void:
@@ -161,7 +191,7 @@ func _update_hand(index: int) -> int:
 
 ## A real hand wins over a controller; hand joints synthesised from a held
 ## controller do not count as a hand.
-func _update_pointer(index: int) -> void:
+func _update_pointer(index: int, delta: float) -> void:
 	var pointer := _pointers[index]
 	var was_pressed := pointer.pressed
 	var controller := _controllers[index]
@@ -175,10 +205,17 @@ func _update_pointer(index: int) -> void:
 		var palm := to_world * tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin
 		var thumb_tip := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_TIP).origin
 		var index_tip := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP).origin
+		# Wrist and knuckles barely move when the fingers pinch, so they define the ray.
+		var wrist := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
+		var middle_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL).origin
+		var index_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL).origin
+		var shoulder_direction := PointerMath.hand_ray_direction(_camera.global_transform, palm, SIDE_SIGNS[index], SHOULDER_DROP, SHOULDER_HALF_WIDTH)
+		var target := PointerMath.blend_ray_direction(shoulder_direction, to_world.basis * (middle_knuckle - wrist), HAND_ROTATION_WEIGHT)
+		var previous := pointer.direction if pointer.mode == "рука" else Vector3.ZERO
 		pointer.active = true
 		pointer.mode = "рука"
-		pointer.origin = palm
-		pointer.direction = PointerMath.hand_ray_direction(_camera.global_transform, palm, SIDE_SIGNS[index], SHOULDER_DROP, SHOULDER_HALF_WIDTH)
+		pointer.origin = to_world * index_knuckle
+		pointer.direction = PointerMath.smooth_direction(previous, target, delta, RAY_SMOOTHING_SEC)
 		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
 	elif controller.get_has_tracking_data():
 		pointer.active = true
@@ -195,7 +232,7 @@ func _update_pointer(index: int) -> void:
 
 func _update_buttons(delta: float) -> void:
 	for button in _screen_buttons:
-		button.enabled = not _vdd.busy
+		button.enabled = not _screens_busy()
 	for button in _buttons:
 		var hovered := false
 		var pressed := false
@@ -326,12 +363,17 @@ func _build_buttons() -> void:
 	_vdd = VddControl.new()
 	_vdd.finished.connect(_on_vdd_finished)
 	add_child(_vdd)
+	_topology = DisplayTopology.new()
+	_topology.finished.connect(_on_topology_finished)
+	add_child(_topology)
 
 	var remove_button := _add_button("− экран", Vector3(-0.47, 1.0, -1.2), SCREEN_BUTTON_HOLD_SEC)
 	remove_button.activated.connect(_on_screen_button.bind(false))
 	var add_button := _add_button("+ экран", Vector3(-0.15, 1.0, -1.2), SCREEN_BUTTON_HOLD_SEC)
 	add_button.activated.connect(_on_screen_button.bind(true))
-	_screen_buttons = [remove_button, add_button]
+	var new_instance_button := _add_button("Новый VDD", Vector3(-0.31, 0.84, -1.2), NEW_INSTANCE_BUTTON_HOLD_SEC)
+	new_instance_button.activated.connect(_on_new_instance_button)
+	_screen_buttons = [remove_button, add_button, new_instance_button]
 
 	# Kept apart from the others so that it is not hit by accident.
 	var exit_button := _add_button("Выход", Vector3(0.45, 1.0, -1.2), EXIT_BUTTON_HOLD_SEC)

@@ -26,8 +26,24 @@ static func pinch_state(was_pinched: bool, tip_distance: float, press_distance: 
 	return tip_distance < press_distance
 
 
-## Ray direction for a hand: from an estimated shoulder through the palm, so that
-## closing the fingers barely moves the pointer. `side_sign` is -1 left, +1 right.
+## Hand ray in the style of the Quest system pointer: it mostly follows where the
+## hand itself points (`hand_forward`, wrist towards the knuckles), steadied by
+## the shoulder-to-hand line. `rotation_weight`: 0 = shoulder only, 1 = hand only.
+static func blend_ray_direction(shoulder_direction: Vector3, hand_forward: Vector3, rotation_weight: float) -> Vector3:
+	if hand_forward.length_squared() < 0.0001:
+		return shoulder_direction
+	return shoulder_direction.slerp(hand_forward.normalized(), clampf(rotation_weight, 0.0, 1.0)).normalized()
+
+
+## Exponential smoothing of a direction; `time_constant` <= 0 disables it.
+static func smooth_direction(previous: Vector3, target: Vector3, delta: float, time_constant: float) -> Vector3:
+	if time_constant <= 0.0 or previous.length_squared() < 0.0001:
+		return target
+	return previous.slerp(target, 1.0 - exp(-delta / time_constant)).normalized()
+
+
+## Shoulder component of the hand ray: from an estimated shoulder through the
+## palm. `side_sign` is -1 left, +1 right.
 static func hand_ray_direction(head: Transform3D, palm: Vector3, side_sign: float, shoulder_drop: float, shoulder_half_width: float) -> Vector3:
 	var right := Vector3(head.basis.x.x, 0.0, head.basis.x.z)
 	right = right.normalized() if right.length_squared() > 0.0001 else Vector3.RIGHT
