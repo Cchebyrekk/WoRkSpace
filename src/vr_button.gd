@@ -54,6 +54,10 @@ func _init(text: String, button_size: Vector2, button_hold_time: float) -> void:
 	add_child(_label)
 
 
+func set_text(text: String) -> void:
+	_label.text = text
+
+
 func hit_distance(origin: Vector3, direction: Vector3) -> float:
 	return PointerMath.ray_rect_distance(origin, direction, global_transform, size)
 

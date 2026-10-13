@@ -43,6 +43,10 @@ const AIM_STUDY_FRAMES := 360
 const AIM_ORIGIN_IN_WRIST := Vector3(0.02, 0.11, 0.06)
 ## Our ray's constant heading/elevation offset follows the runtime's ray this slowly.
 const AIM_CALIBRATION_SEC := 20.0
+## ...except for a few seconds after the user changes the mix or asks to recalibrate.
+const AIM_CALIBRATION_FAST_SEC := 1.0
+const AIM_CALIBRATION_BOOST_SEC := 5.0
+const ROTATION_WEIGHT_STEP := 0.05
 const SETTINGS_PATH := "user://settings.cfg"
 const SETTINGS_VERSION := 2
 ## The wrist rotation is tracked worst exactly when the fingers close. Below this
@@ -240,6 +244,12 @@ var _use_runtime_aim := true
 ## Constant offset (heading, elevation in radians) that turns our blended ray into
 ## the runtime's aim ray, per hand; learned while the runtime provides its ray.
 var _aim_offset: Array[Vector2] = [Vector2.ZERO, Vector2.ZERO]
+## Share of the wrist rotation in our ray: 0 = follows the hand position only, 1 = the rotation only.
+var _hand_rotation_weight := HAND_ROTATION_WEIGHT
+## While positive, the offset above is re-learned quickly.
+var _calibration_boost_sec := 0.0
+var _ray_info: Label3D
+var _ray_source_button: VrButton
 var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 var _ray_yaw_right_deg := RAY_YAW_RIGHT_DEG
 ## Seconds until the next reconnect attempt; negative while the session is healthy.
@@ -254,6 +264,7 @@ func _ready() -> void:
 	_build_rig()
 	_build_buttons()
 	_load_settings()
+	_update_ray_info()
 
 	_hotkey = GlobalHotkey.new()
 	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
@@ -303,6 +314,7 @@ func _process(delta: float) -> void:
 		return
 	if _capture != null and not _diag.has("nocopy"):
 		_capture.update()
+	_calibration_boost_sec = maxf(_calibration_boost_sec - delta, 0.0)
 	_update_xr_session(delta)
 
 	var lines: PackedStringArray = []
@@ -612,6 +624,7 @@ func _update_xr_session(delta: float) -> void:
 func _on_ray_pitch_button(step_deg: float) -> void:
 	_ray_pitch_down_deg = clampf(_ray_pitch_down_deg + step_deg, -30.0, 60.0)
 	_save_settings()
+	_update_ray_info()
 	print("[ray] наклон луча вниз: %.0f°" % _ray_pitch_down_deg)
 
 
@@ -625,6 +638,7 @@ func _load_settings() -> void:
 	_use_runtime_aim = config.get_value("ray", "use_runtime_aim", _use_runtime_aim)
 	_ray_pitch_down_deg = config.get_value("ray", "trim_pitch_down_deg", _ray_pitch_down_deg)
 	_ray_yaw_right_deg = config.get_value("ray", "trim_yaw_right_deg", _ray_yaw_right_deg)
+	_hand_rotation_weight = config.get_value("ray", "rotation_weight", _hand_rotation_weight)
 	_aim_offset[0] = config.get_value("ray", "aim_offset_left", _aim_offset[0])
 	_aim_offset[1] = config.get_value("ray", "aim_offset_right", _aim_offset[1])
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
@@ -636,6 +650,7 @@ func _save_settings() -> void:
 	config.set_value("ray", "use_runtime_aim", _use_runtime_aim)
 	config.set_value("ray", "trim_pitch_down_deg", _ray_pitch_down_deg)
 	config.set_value("ray", "trim_yaw_right_deg", _ray_yaw_right_deg)
+	config.set_value("ray", "rotation_weight", _hand_rotation_weight)
 	config.set_value("ray", "aim_offset_left", _aim_offset[0])
 	config.set_value("ray", "aim_offset_right", _aim_offset[1])
 	var error := config.save(SETTINGS_PATH)
@@ -643,15 +658,47 @@ func _save_settings() -> void:
 		print("[settings] не удалось сохранить: ", error_string(error))
 
 
+## Shows which hand ray is in use and how ours is set up.
+func _update_ray_info() -> void:
+	if _ray_source_button != null:
+		_ray_source_button.set_text("Луч: Meta" if _use_runtime_aim else "Луч: свой")
+	if _ray_info != null:
+		_ray_info.text = "Луч рук: %s\nСвой луч: кисть %.2f / рука %.2f,\nнаклон %+.0f°, вбок %+.1f°" % [
+				"Meta" if _use_runtime_aim else "свой", _hand_rotation_weight, 1.0 - _hand_rotation_weight,
+				_ray_pitch_down_deg, _ray_yaw_right_deg]
+
+
+func _on_rotation_weight_button(step: float) -> void:
+	_hand_rotation_weight = clampf(snappedf(_hand_rotation_weight + step, 0.01), 0.0, 1.0)
+	# The mix changes where the blended ray points, so its offset is re-learned at once.
+	_calibration_boost_sec = AIM_CALIBRATION_BOOST_SEC
+	_save_settings()
+	_update_ray_info()
+	print("[ray] доля поворота кисти в своём луче: %.2f" % _hand_rotation_weight)
+
+
+## Back to the measured Meta-like setup: mix, no manual trim, fresh direction calibration.
+func _on_ray_reset_button() -> void:
+	_hand_rotation_weight = HAND_ROTATION_WEIGHT
+	_ray_pitch_down_deg = RAY_PITCH_DOWN_DEG
+	_ray_yaw_right_deg = RAY_YAW_RIGHT_DEG
+	_calibration_boost_sec = AIM_CALIBRATION_BOOST_SEC
+	_save_settings()
+	_update_ray_info()
+	print("[ray] свой луч сброшен к настройкам как у Meta, калибровка направления заново")
+
+
 func _on_ray_source_button() -> void:
 	_use_runtime_aim = not _use_runtime_aim
 	_save_settings()
+	_update_ray_info()
 	print("[ray] источник луча рук: ", "Meta (поза прицеливания среды)" if _use_runtime_aim else "свой (по суставам)")
 
 
 func _on_ray_yaw_button(step_deg: float) -> void:
 	_ray_yaw_right_deg = clampf(_ray_yaw_right_deg + step_deg, -45.0, 45.0)
 	_save_settings()
+	_update_ray_info()
 	print("[ray] поворот луча правой руки вправо: %.1f° (левая зеркально)" % _ray_yaw_right_deg)
 
 
@@ -745,10 +792,10 @@ func _update_pointer(index: int, delta: float) -> void:
 		var yaw := _aim_offset[index].x + deg_to_rad(_ray_yaw_right_deg) * SIDE_SIGNS[index]
 		var pitch := -_aim_offset[index].y + deg_to_rad(_ray_pitch_down_deg)
 		var target := PointerMath.pitch_direction(PointerMath.yaw_direction(
-				PointerMath.blend_ray_direction(shoulder_direction, pointer.rotation_forward, HAND_ROTATION_WEIGHT), yaw), pitch)
+				PointerMath.blend_ray_direction(shoulder_direction, pointer.rotation_forward, _hand_rotation_weight), yaw), pitch)
 		# The same ray without the rotation filter and without offsets: for the tremor
 		# measurement and for comparing with the runtime's ray.
-		var unoffset_target := PointerMath.blend_ray_direction(shoulder_direction, hand_forward, HAND_ROTATION_WEIGHT)
+		var unoffset_target := PointerMath.blend_ray_direction(shoulder_direction, hand_forward, _hand_rotation_weight)
 		var unfiltered_target := PointerMath.pitch_direction(PointerMath.yaw_direction(unoffset_target, yaw), pitch)
 		var wrist_world := to_world * tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST)
 		if controller.get_has_tracking_data():
@@ -757,7 +804,8 @@ func _update_pointer(index: int, delta: float) -> void:
 					wrist_world.affine_inverse() * controller.global_position,
 					wrist_world.basis.orthonormalized().inverse() * aim_direction, aim_direction.angle_to(unfiltered_target))
 			var difference := AimStudy.step(AimStudy.angles(unoffset_target), AimStudy.angles(aim_direction))
-			_aim_offset[index] += (difference - _aim_offset[index]) * (1.0 - exp(-delta / AIM_CALIBRATION_SEC))
+			var calibration_time := AIM_CALIBRATION_FAST_SEC if _calibration_boost_sec > 0.0 else AIM_CALIBRATION_SEC
+			_aim_offset[index] += (difference - _aim_offset[index]) * (1.0 - exp(-delta / calibration_time))
 		var ray_origin := wrist_world * Vector3(AIM_ORIGIN_IN_WRIST.x * SIDE_SIGNS[index], AIM_ORIGIN_IN_WRIST.y, AIM_ORIGIN_IN_WRIST.z)
 		pointer.runtime_aim = _use_runtime_aim and controller.get_has_tracking_data()
 		if pointer.runtime_aim:
@@ -949,8 +997,24 @@ func _build_buttons() -> void:
 
 	var recenter_button := _add_button("Центр", Vector3(0.45, 0.52, -1.2), 0.6)
 	recenter_button.activated.connect(_recenter)
-	var ray_source_button := _add_button("Луч: Meta / свой", Vector3(0.13, 0.52, -1.2), 0.6)
-	ray_source_button.activated.connect(_on_ray_source_button)
+	_ray_source_button = _add_button("Луч: Meta", Vector3(0.13, 0.52, -1.2), 0.6)
+	_ray_source_button.activated.connect(_on_ray_source_button)
+
+	# Mix of our own ray: how much it follows the wrist rotation versus the hand position.
+	var less_rotation_button := _add_button("Кисть −", Vector3(0.13, 0.36, -1.2), 0.3)
+	less_rotation_button.activated.connect(_on_rotation_weight_button.bind(-ROTATION_WEIGHT_STEP))
+	var more_rotation_button := _add_button("Кисть +", Vector3(0.45, 0.36, -1.2), 0.3)
+	more_rotation_button.activated.connect(_on_rotation_weight_button.bind(ROTATION_WEIGHT_STEP))
+	var ray_reset_button := _add_button("Как у Meta", Vector3(0.77, 0.36, -1.2), 1.0)
+	ray_reset_button.activated.connect(_on_ray_reset_button)
+
+	_ray_info = Label3D.new()
+	_ray_info.position = Vector3(-0.31, 0.5, -1.2)
+	_ray_info.pixel_size = 0.001
+	_ray_info.font_size = 34
+	_ray_info.outline_size = 8
+	add_child(_ray_info)
+	_update_ray_info()
 
 	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
 	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)
