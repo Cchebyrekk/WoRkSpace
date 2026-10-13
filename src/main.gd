@@ -24,9 +24,15 @@ const RAY_SMOOTHING_SLOW_SEC := 0.2
 const RAY_SMOOTHING_FAST_SEC := 0.03
 const RAY_SPEED_SLOW := 0.1
 const RAY_SPEED_FAST := 1.0
-## The hand ray ignores direction changes smaller than this (radians) and trails
-## larger ones by it: 0.004 rad is about 7 px on the panel at 1.1 m.
-const RAY_DEADBAND := 0.004
+## Measured 14.10.2026 with a still hand, as spread on the panel per second: the
+## whole ray 3-10 px, the ray from the hand position alone 2-4 px. The tremor comes
+## from the rotation of the hand, so that part gets its own, much wider dead zone
+## and slower smoothing; the final ray only a narrow one. Coarse aiming is done
+## by turning the wrist, fine aiming by moving the hand.
+## Dead zones are in radians: 0.001 rad is about 1.7 px on the panel at 1.1 m.
+const ROTATION_DEADBAND := 0.010
+const ROTATION_SMOOTHING_SLOW_SEC := 0.25
+const RAY_DEADBAND := 0.002
 ## The wrist rotation is tracked worst exactly when the fingers close. Below this
 ## thumb-to-index distance, and while a pinch is held, the rotation's contribution
 ## is frozen and the ray moves only with the position of the hand.
@@ -108,6 +114,8 @@ class Pointer:
 	var pinch_mm := 0.0
 	## Rotation from the shoulder-to-palm line to the full hand ray; see PINCH_FREEZE_DISTANCE.
 	var rotation_offset := Quaternion.IDENTITY
+	## Filtered direction the hand itself points in (wrist towards the knuckles).
+	var rotation_forward := Vector3.ZERO
 	var on_panel := false
 	## Where the ray meets the screen panel: 0..1 from its top-left corner.
 	var panel_uv := Vector2.ZERO
@@ -590,17 +598,28 @@ func _update_pointer(index: int, delta: float) -> void:
 		var wrist := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_WRIST).origin
 		var middle_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL).origin
 		var shoulder_direction := PointerMath.hand_ray_direction(_camera.global_transform, palm, SIDE_SIGNS[index], SHOULDER_DROP, SHOULDER_HALF_WIDTH)
-		var target := PointerMath.blend_ray_direction(shoulder_direction, to_world.basis * (middle_knuckle - wrist), HAND_ROTATION_WEIGHT)
+		var hand_forward := (to_world.basis * (middle_knuckle - wrist)).normalized()
+		var hand_before := pointer.mode == "рука"
+		var previous_forward := pointer.rotation_forward if hand_before else Vector3.ZERO
+		var forward_speed := previous_forward.angle_to(hand_forward) / maxf(delta, 0.001) if hand_before else INF
+		pointer.rotation_forward = PointerMath.smooth_direction(previous_forward,
+				PointerMath.deadband_direction(previous_forward, hand_forward, ROTATION_DEADBAND), delta,
+				PointerMath.adaptive_smoothing(forward_speed, ROTATION_SMOOTHING_SLOW_SEC, RAY_SMOOTHING_FAST_SEC, RAY_SPEED_SLOW, RAY_SPEED_FAST))
 		# SIDE_SIGNS mirrors the turn: what is "right" for the right hand is "left" for the left one.
-		target = PointerMath.yaw_direction(target, deg_to_rad(_ray_yaw_right_deg) * SIDE_SIGNS[index])
-		target = PointerMath.pitch_direction(target, deg_to_rad(_ray_pitch_down_deg))
+		var yaw := deg_to_rad(_ray_yaw_right_deg) * SIDE_SIGNS[index]
+		var pitch := deg_to_rad(_ray_pitch_down_deg)
+		var target := PointerMath.pitch_direction(PointerMath.yaw_direction(
+				PointerMath.blend_ray_direction(shoulder_direction, pointer.rotation_forward, HAND_ROTATION_WEIGHT), yaw), pitch)
+		# The same ray without the rotation filter, only for the tremor measurement.
+		var unfiltered_target := PointerMath.pitch_direction(PointerMath.yaw_direction(
+				PointerMath.blend_ray_direction(shoulder_direction, hand_forward, HAND_ROTATION_WEIGHT), yaw), pitch)
 		var tip_distance := thumb_tip.distance_to(index_tip)
 		var was_hand := pointer.mode == "рука"
 		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
 			pointer.rotation_offset = Quaternion(shoulder_direction, target)
 		target = pointer.rotation_offset * shoulder_direction
 		pointer.raw_origin = palm
-		pointer.raw_direction = target
+		pointer.raw_direction = unfiltered_target
 		pointer.shoulder_direction = shoulder_direction
 		var previous := pointer.direction if was_hand else Vector3.ZERO
 		var angular_speed := previous.angle_to(target) / maxf(delta, 0.001) if was_hand else INF
