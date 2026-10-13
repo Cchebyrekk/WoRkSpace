@@ -6,7 +6,7 @@ VR-приложение для работы с ПК на Windows: монитор
 
 - Godot 4.7.2.stable.steam: `C:\Program Files (x86)\Steam\steamapps\common\Godot Engine\godot.windows.opt.tools.64.exe`
 - Windows 11 Pro, RTX 3060, активная среда OpenXR — Meta Quest Link.
-- MSVC 14.51 (VS 2026 Community). Windows SDK, CMake, SCons и Rust на момент старта **не установлены** — нативный модуль не соберётся, пока нет Windows SDK.
+- MSVC 14.51 (VS 2026 Community), Windows 11 SDK 10.0.26100 (есть C++/WinRT). SCons, CMake и Rust не установлены — SCons поставить через `py -3.12 -m pip install scons` перед первой сборкой модуля.
 - MCP-сервер `godot`: запуск проекта и чтение отладочного вывода.
 
 ## Команды
