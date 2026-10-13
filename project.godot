@@ -35,3 +35,4 @@ openxr/enabled=true
 shaders/enabled=true
 openxr/extensions/hand_tracking=true
 openxr/startup_alert=false
+openxr/extensions/hand_interaction_profile=true

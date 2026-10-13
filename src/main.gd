@@ -116,6 +116,8 @@ class Pointer:
 	var rotation_offset := Quaternion.IDENTITY
 	## Filtered direction the hand itself points in (wrist towards the knuckles).
 	var rotation_forward := Vector3.ZERO
+	## This frame's hand ray came from the runtime's aim pose.
+	var runtime_aim := false
 	var on_panel := false
 	## Where the ray meets the screen panel: 0..1 from its top-left corner.
 	var panel_uv := Vector2.ZERO
@@ -153,6 +155,10 @@ var _recentered := false
 ## device (0x887A0005) and crashes the engine; the composition layer path is fine.
 var _diag: PackedStringArray = OS.get_environment("WORKPLACE_DIAG").split(",", false)
 var _hotkey: GlobalHotkey
+## Hand ray source: true = the runtime's own aim pose (XR_EXT_hand_interaction, the
+## ray of the Quest system UI, filtered by Meta), false = the ray computed here
+## from the joints. Switchable in VR for comparison.
+var _use_runtime_aim := true
 var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 var _ray_yaw_right_deg := RAY_YAW_RIGHT_DEG
 ## Seconds until the next reconnect attempt; negative while the session is healthy.
@@ -198,6 +204,7 @@ func _ready() -> void:
 	if openxr != null:
 		_xr = openxr
 		print("[xr] расширение hand tracking поддерживается средой: ", openxr.is_hand_tracking_supported())
+		print("[xr] расширение hand interaction (поза прицеливания руки) поддерживается средой: ", openxr.is_hand_interaction_supported())
 		openxr.session_begun.connect(_on_session_begun.bind(openxr))
 		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
 			openxr.connect(event, _on_xr_event.bind(event))
@@ -222,7 +229,8 @@ func _process(delta: float) -> void:
 		_update_pointer(i, delta)
 		var controller := _controllers[i]
 		var pointer := _pointers[i]
-		_controller_visuals[i].visible = controller.get_has_tracking_data()
+		# With the hand interaction profile the controller node is tracked for bare hands too.
+		_controller_visuals[i].visible = pointer.mode == "контроллер"
 		lines.append("%s: суставов %d/%d (источник: %s) | контроллер: %s, триггер %.2f, grip %.2f, стик %s | луч: %s%s" % [
 			SIDE_LABELS[i], joints, XRHandTracker.HAND_JOINT_MAX, _hand_source_label(i),
 			"да" if controller.get_has_tracking_data() else "нет",
@@ -231,7 +239,7 @@ func _process(delta: float) -> void:
 			pointer.mode, ", нажат" if pointer.pressed else "",
 		])
 		if pointer.mode == "рука":
-			lines[-1] += " | щипок %.0f мм, направление %.2v" % [pointer.pinch_mm, pointer.direction]
+			lines[-1] += " | щипок %.0f мм, луч %s" % [pointer.pinch_mm, "Meta" if pointer.runtime_aim else "свой"]
 
 	_update_buttons(delta)
 	_update_cursor()
@@ -289,9 +297,9 @@ func _log_tremor() -> void:
 	for i in 2:
 		var pointer := _pointers[i]
 		if pointer.spread_final.count >= 20:
-			print("[jitter] %s: разброс за интервал, px — сырой луч %.1f, только положение руки %.1f, итог после фильтров %.1f (кадров %d, щипок %.0f мм)" % [
-					SIDE_LABELS[i], pointer.spread_raw.deviation(), pointer.spread_position_only.deviation(),
-					pointer.spread_final.deviation(), pointer.spread_final.count, pointer.pinch_mm])
+			print("[jitter] %s (%s): разброс за интервал, px — сырой луч %.1f, только положение руки %.1f, итог после фильтров %.1f (кадров %d, щипок %.0f мм)" % [
+					SIDE_LABELS[i], "Meta" if pointer.runtime_aim else "свой", pointer.spread_raw.deviation(),
+					pointer.spread_position_only.deviation(), pointer.spread_final.deviation(), pointer.spread_final.count, pointer.pinch_mm])
 		pointer.spread_raw.reset()
 		pointer.spread_position_only.reset()
 		pointer.spread_final.reset()
@@ -515,6 +523,11 @@ func _on_ray_pitch_button(step_deg: float) -> void:
 	print("[ray] наклон луча вниз: %.0f°" % _ray_pitch_down_deg)
 
 
+func _on_ray_source_button() -> void:
+	_use_runtime_aim = not _use_runtime_aim
+	print("[ray] источник луча рук: ", "Meta (поза прицеливания среды)" if _use_runtime_aim else "свой (по суставам)")
+
+
 func _on_ray_yaw_button(step_deg: float) -> void:
 	_ray_yaw_right_deg = clampf(_ray_yaw_right_deg + step_deg, -45.0, 45.0)
 	print("[ray] поворот луча правой руки вправо: %.1f° (левая зеркально)" % _ray_yaw_right_deg)
@@ -613,12 +626,18 @@ func _update_pointer(index: int, delta: float) -> void:
 		# The same ray without the rotation filter, only for the tremor measurement.
 		var unfiltered_target := PointerMath.pitch_direction(PointerMath.yaw_direction(
 				PointerMath.blend_ray_direction(shoulder_direction, hand_forward, HAND_ROTATION_WEIGHT), yaw), pitch)
+		var ray_origin := palm
+		pointer.runtime_aim = _use_runtime_aim and controller.get_has_tracking_data()
+		if pointer.runtime_aim:
+			target = -controller.global_basis.z.normalized()
+			unfiltered_target = target
+			ray_origin = controller.global_position
 		var tip_distance := thumb_tip.distance_to(index_tip)
 		var was_hand := pointer.mode == "рука"
 		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
 			pointer.rotation_offset = Quaternion(shoulder_direction, target)
 		target = pointer.rotation_offset * shoulder_direction
-		pointer.raw_origin = palm
+		pointer.raw_origin = ray_origin
 		pointer.raw_direction = unfiltered_target
 		pointer.shoulder_direction = shoulder_direction
 		var previous := pointer.direction if was_hand else Vector3.ZERO
@@ -627,7 +646,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.active = true
 		pointer.mode = "рука"
 		# The origin gets the same smoothing: a palm that jumps 1 cm moves the cursor about 15 px.
-		pointer.origin = pointer.origin.lerp(palm, 1.0 - exp(-delta / smoothing)) if was_hand else palm
+		pointer.origin = pointer.origin.lerp(ray_origin, 1.0 - exp(-delta / smoothing)) if was_hand else ray_origin
 		pointer.pinch_mm = tip_distance * 1000.0
 		# Dead zone first, then smoothing towards its result: the other way round a
 		# single smoothed step would always be smaller than the zone.
@@ -798,6 +817,8 @@ func _build_buttons() -> void:
 
 	var recenter_button := _add_button("Центр", Vector3(0.45, 0.52, -1.2), 0.6)
 	recenter_button.activated.connect(_recenter)
+	var ray_source_button := _add_button("Луч: Meta / свой", Vector3(0.13, 0.52, -1.2), 0.6)
+	ray_source_button.activated.connect(_on_ray_source_button)
 
 	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
 	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)
