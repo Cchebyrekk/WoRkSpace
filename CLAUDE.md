@@ -17,7 +17,9 @@ VR-приложение для работы с ПК на Windows: монитор
 - Тесты чистых функций: `& "<godot>" --headless --xr-mode off --path . -s tests/run_tests.gd`
 - Пробный прогон помощника VDD без изменений в системе: записать `<id> add|remove` в `<папка>\request.txt` и запустить `tools\vdd_helper.ps1 -Dir <папка> -DryRun`
 - Запуск в шлеме: MCP `godot.run_project` или `& "<godot>" --path .`
-- Сборка нативного модуля: пока нет (появится в срезе (б); планируется godot-cpp + SCons).
+- Сборка нативного модуля (из `native/`): `py -3.12 -m SCons platform=windows target=template_debug disable_exceptions=no -j8`. Результат — `bin/workplace_native.windows.template_debug.x86_64.dll`, в git не хранится. `disable_exceptions=no` обязателен (C++/WinRT).
+- godot-cpp в git не хранится: `git clone --depth 1 --branch master https://github.com/godotengine/godot-cpp native/godot-cpp` (собрано на коммите `b8530af`, API 4.7 выбирается в `native/SConstruct`).
+- Бэкап среза (а): git-тег `slice-a` и замороженная копия сцены — `& "<godot>" --path . res://scenes/baseline/hands_scene.tscn` (руки, лучи, кнопки, без нативного модуля). `src/baseline/hands_scene.gd` не править: это эталон для сравнения.
 
 ## Журналы для отладки
 
@@ -50,6 +52,13 @@ VR-приложение для работы с ПК на Windows: монитор
 - Число экранов меняет `tools/vdd_helper.ps1` через запланированную задачу `WoRkPlaceVddHelper` с наивысшими правами (без UAC в шлеме). Установка — один раз вручную: `tools/install_vdd_helper.ps1` от администратора; после правки помощника установку повторить. Обмен — файлы в `%ProgramData%\WoRkPlace\vdd`; помощник принимает только `add` и `remove`. «−» отключает экземпляр (`/disable-device`), «+» сначала включает отключённый, иначе создаёт новый.
 - `.ps1` держать в ASCII: PowerShell 5.1 читает файл без BOM как ANSI.
 - Мониторы идентифицировать по экземпляру адаптера или ID монитора (`MTT1337#…`), **не** по `\\.\DISPLAYnn` — эти имена меняются при каждом перезапуске драйвера.
+
+## Нативный модуль (`native/src`)
+
+- `win_backend.h/.cpp` — весь код Windows/WinRT (захват, горячая клавиша). Собирается как C++20; заголовки Godot и Windows в одном файле не смешивать.
+- `workplace_classes.h/.cpp` — классы Godot: `ScreenCapture` (монитор → `Texture2DRD`) и `GlobalHotkey`.
+- Путь кадра: WGC → D3D11-текстура с общим NT-дескриптором → `ID3D12Device::OpenSharedHandle` на устройстве Godot → `RenderingDevice.texture_create_from_extension`. Синхронизации между устройствами нет (возможен разрыв кадра) — принято для первого варианта.
+- Панель: `SubViewport` с `TextureRect` → `OpenXRCompositionLayerQuad` (дочерний узел `XROrigin3D`, `sort_order = -1`, hole punch, у главного вьюпорта `transparent_bg`).
 
 ## Виртуальные дисплеи (VDD) на этой машине
 

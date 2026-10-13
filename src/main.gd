@@ -34,6 +34,13 @@ const XR_RESTART_MAX_ATTEMPTS := 60
 const XR_LOST_TRACKERS_SEC := 3.0
 const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
 
+## Screen panel: a 1920-px-wide monitor spans this horizontal angle at this distance.
+## Larger and closer than a real monitor, because the Quest 3S has few pixels per degree.
+const PANEL_DISTANCE := 1.1
+const PANEL_WIDTH_DEG := 60.0
+const PANEL_CENTER_HEIGHT := 1.45
+const EXIT_HOTKEY_VIRTUAL_KEY := 0x7B  # F12, together with Ctrl+Alt+Shift
+
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
 const EXIT_BUTTON_HOLD_SEC := 1.0
@@ -74,6 +81,9 @@ var _status: Label3D
 var _log_timer := 0.0
 var _xr_ready := false
 var _xr: OpenXRInterface
+var _capture: ScreenCapture
+var _capture_frames_logged := 0
+var _hotkey: GlobalHotkey
 var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 var _ray_yaw_right_deg := RAY_YAW_RIGHT_DEG
 ## Seconds until the next reconnect attempt; negative while the session is healthy.
@@ -87,6 +97,12 @@ func _ready() -> void:
 	_build_world()
 	_build_rig()
 	_build_buttons()
+
+	_hotkey = GlobalHotkey.new()
+	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
+		print("[app] аварийный выход: Ctrl+Alt+Shift+F12")
+	else:
+		print("[app] не удалось занять Ctrl+Alt+Shift+F12 — сочетание уже используется")
 
 	var xr: XRInterface = XRServer.find_interface("OpenXR")
 	if xr == null or not xr.is_initialized():
@@ -117,10 +133,18 @@ func _ready() -> void:
 		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
 			openxr.connect(event, _on_xr_event.bind(event))
 
+	_build_screen_panel()
+
 
 func _process(delta: float) -> void:
+	if _hotkey != null and _hotkey.consume_pressed():
+		print("[app] нажато Ctrl+Alt+Shift+F12")
+		_quit()
+		return
 	if not _xr_ready:
 		return
+	if _capture != null:
+		_capture.update()
 	_update_xr_session(delta)
 
 	var lines: PackedStringArray = []
@@ -149,6 +173,10 @@ func _process(delta: float) -> void:
 	_log_timer += delta
 	if _log_timer >= LOG_INTERVAL_SEC:
 		_log_timer = 0.0
+		if _capture != null:
+			var frames := _capture.get_frame_count()
+			lines.append("Захват: %s, кадров %d (+%d за интервал)" % [_capture.get_size(), frames, frames - _capture_frames_logged])
+			_capture_frames_logged = frames
 		for line in lines:
 			print("[track] ", line)
 
@@ -166,6 +194,67 @@ func _quit() -> void:
 
 func _on_session_begun(openxr: OpenXRInterface) -> void:
 	print("[xr] сессия начата, частота: ", openxr.display_refresh_rate, " Гц")
+
+
+func _exit_tree() -> void:
+	if _capture != null:
+		_capture.stop()
+
+
+## One monitor as a live panel in front of the user. The picture goes through an
+## OpenXR composition layer, which the runtime samples directly and which is
+## noticeably sharper for text than a textured mesh.
+func _build_screen_panel() -> void:
+	var monitors := ScreenCapture.list_monitors()
+	print("[capture] мониторы: ", monitors)
+	var monitor_index := 0
+	for i in monitors.size():
+		if monitors[i]["primary"]:
+			monitor_index = i
+
+	_capture = ScreenCapture.new()
+	if not _capture.start(monitor_index):
+		print("[capture] ошибка: ", _capture.get_last_error())
+		_capture = null
+		return
+	var pixels := _capture.get_size()
+	print("[capture] захват монитора %d (%s) запущен, %s" % [monitor_index, monitors[monitor_index]["name"], pixels])
+
+	var picture := TextureRect.new()
+	picture.texture = _capture.get_texture()
+	picture.stretch_mode = TextureRect.STRETCH_SCALE
+	picture.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var viewport := SubViewport.new()
+	viewport.size = pixels
+	viewport.disable_3d = true
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	viewport.add_child(picture)
+	add_child(viewport)
+
+	var width := 2.0 * PANEL_DISTANCE * tan(deg_to_rad(PANEL_WIDTH_DEG * 0.5)) * (pixels.x / 1920.0)
+	var layer := OpenXRCompositionLayerQuad.new()
+	layer.layer_viewport = viewport
+	layer.quad_size = Vector2(width, width * pixels.y / pixels.x)
+	layer.position = Vector3(0.0, PANEL_CENTER_HEIGHT, -PANEL_DISTANCE)
+	# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
+	layer.sort_order = -1
+	layer.enable_hole_punch = true
+	get_viewport().transparent_bg = true
+	_origin.add_child(layer)
+	print("[capture] панель %.2f x %.2f м на расстоянии %.2f м" % [layer.quad_size.x, layer.quad_size.y, PANEL_DISTANCE])
+
+	# Diagnostic only: the same texture on an ordinary mesh, to tell a capture
+	# problem from a composition layer problem. Colours are expected to be off here.
+	var probe_mesh := QuadMesh.new()
+	probe_mesh.size = Vector2(0.48, 0.27)
+	var probe_material := StandardMaterial3D.new()
+	probe_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	probe_material.albedo_texture = _capture.get_texture()
+	var probe := MeshInstance3D.new()
+	probe.mesh = probe_mesh
+	probe.material_override = probe_material
+	probe.position = Vector3(1.05, 1.95, -PANEL_DISTANCE)
+	add_child(probe)
 
 
 func _on_xr_event(event: StringName) -> void:
@@ -399,7 +488,7 @@ func _build_world() -> void:
 	add_child(floor_instance)
 
 	_status = Label3D.new()
-	_status.position = Vector3(0.0, 1.45, -1.2)
+	_status.position = Vector3(0.0, 2.05, -1.2)
 	_status.pixel_size = 0.0012
 	_status.font_size = 36
 	_status.outline_size = 8

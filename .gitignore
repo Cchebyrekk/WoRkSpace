@@ -1,3 +1,14 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# Native module: godot-cpp is cloned separately (see CLAUDE.md), binaries are built locally
+/native/godot-cpp/
+/native/build.log
+/native/.sconsign*.dblite
+*.obj
+/bin/*.dll
+/bin/*.lib
+/bin/*.exp
+/bin/*.pdb
+/bin/*.ilk

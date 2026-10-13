@@ -1,0 +1,29 @@
+#!/usr/bin/env python
+# Build from this directory:
+#   py -3.12 -m SCons platform=windows target=template_debug disable_exceptions=no -j8
+#
+# disable_exceptions=no is required: C++/WinRT (used for Windows.Graphics.Capture)
+# reports errors through exceptions, and godot-cpp turns them off by default.
+
+env = SConscript("godot-cpp/SConstruct", {"api_version": "4.7"})
+
+env.Append(CPPPATH=["src/"])
+env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN"])
+env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32"])
+
+# The Windows-only file is built as C++20: in C++17 mode C++/WinRT pulls in
+# <experimental/coroutine>, which current MSVC rejects.
+windows_sources = ["src/win_backend.cpp"]
+windows_env = env.Clone()
+windows_env.Append(CXXFLAGS=["/std:c++20"])
+
+godot_sources = [source for source in Glob("src/*.cpp") if source.name != "win_backend.cpp"]
+objects = env.SharedObject(godot_sources) + windows_env.SharedObject(windows_sources)
+
+library = env.SharedLibrary(
+    "../bin/workplace_native{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+    source=objects,
+)
+
+env.NoCache(library)
+Default(library)
