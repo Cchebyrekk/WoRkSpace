@@ -73,6 +73,10 @@ const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
 const PANEL_DISTANCE := 1.1
 const PANEL_WIDTH_DEG := 60.0
 const PANEL_CENTER_HEIGHT := 1.45
+## A row of monitors wider than this arc is shrunk to fit, so that panels never
+## wrap around behind the user.
+const PANEL_MAX_ARC_DEG := 300.0
+const MONITOR_CHECK_SEC := 1.0
 const EXIT_HOTKEY_VIRTUAL_KEY := 0x7B  # F12, together with Ctrl+Alt+Shift
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
@@ -201,7 +205,8 @@ class Pointer:
 	## This frame's hand ray came from the runtime's aim pose.
 	var runtime_aim := false
 	var on_panel := false
-	## Where the ray meets the screen panel: 0..1 from its top-left corner.
+	## The nearest screen panel the ray hits, and where: 0..1 from its top-left corner.
+	var panel: ScreenPanel
 	var panel_uv := Vector2.ZERO
 
 
@@ -221,12 +226,15 @@ var _status: Label3D
 var _log_timer := 0.0
 var _xr_ready := false
 var _xr: OpenXRInterface
-var _capture: ScreenCapture
-var _capture_frames_logged := 0
-var _panel_viewport: SubViewport
-var _panel_layer: OpenXRCompositionLayerQuad
-## The captured monitor's rectangle on the Windows virtual desktop, in pixels.
-var _panel_monitor := Rect2i()
+## One live panel per Windows monitor, in the order of ScreenCapture.list_monitors().
+var _panels: Array[ScreenPanel] = []
+## What the monitor list looked like when the panels were built; a change rebuilds them.
+var _monitor_signature := ""
+## A changed list has to be seen twice in a row: during a topology change it flickers.
+var _pending_monitor_signature := ""
+var _monitor_check_timer := 0.0
+var _session_visible := false
+var _frames_logged := 0
 var _cursor_filter := CursorFilter.new()
 ## Index of the pointer that drives the Windows cursor, or -1.
 var _cursor_owner := -1
@@ -302,7 +310,9 @@ func _ready() -> void:
 		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
 			openxr.connect(event, _on_xr_event.bind(event))
 
-	_build_screen_panel()
+	if not _diag.is_empty():
+		print("[diag] ", _diag)
+	_rebuild_panels()
 
 
 func _process(delta: float) -> void:
@@ -312,8 +322,7 @@ func _process(delta: float) -> void:
 		return
 	if not _xr_ready:
 		return
-	if _capture != null and not _diag.has("nocopy"):
-		_capture.update()
+	_update_panels(delta)
 	_calibration_boost_sec = maxf(_calibration_boost_sec - delta, 0.0)
 	_update_xr_session(delta)
 
@@ -345,12 +354,12 @@ func _process(delta: float) -> void:
 	_log_timer += delta
 	if _log_timer >= LOG_INTERVAL_SEC:
 		_log_timer = 0.0
-		if _panel_layer != null:
-			_log_tremor()
-		if _capture != null:
-			var frames := _capture.get_frame_count()
-			lines.append("Захват: %s, кадров %d (+%d за интервал)" % [_capture.get_size(), frames, frames - _capture_frames_logged])
-			_capture_frames_logged = frames
+		_log_tremor()
+		var frames := 0
+		for panel in _panels:
+			frames += panel.capture.get_frame_count()
+		lines.append("Панелей %d, кадров захвата за интервал %d, FPS %d" % [_panels.size(), frames - _frames_logged, Engine.get_frames_per_second()])
+		_frames_logged = frames
 		for line in lines:
 			print("[track] ", line)
 
@@ -374,16 +383,16 @@ func _exit_tree() -> void:
 	# Never leave Windows with a mouse button stuck down.
 	if _cursor_filter.is_held():
 		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
-	if _capture != null:
-		_capture.stop()
+	for panel in _panels:
+		panel.capture.stop()
 
 
-## Adds where a ray meets the plane of the panel (inside it or not), in panel pixels.
-func _add_plane_point(spread: Spread, origin: Vector3, direction: Vector3) -> void:
-	var panel_transform := _panel_layer.global_transform
+## Adds where a ray meets the plane of a panel (inside it or not), in that panel's pixels.
+func _add_plane_point(spread: Spread, panel: ScreenPanel, origin: Vector3, direction: Vector3) -> void:
+	var panel_transform := panel.layer.global_transform
 	var distance := PointerMath.ray_rect_distance(origin, direction, panel_transform, Vector2(1000.0, 1000.0))
 	if distance >= 0.0:
-		spread.add(PointerMath.rect_uv(origin + direction * distance, panel_transform, _panel_layer.quad_size) * Vector2(_panel_monitor.size))
+		spread.add(panel.uv_at(origin + direction * distance) * Vector2(panel.monitor_rect.size))
 
 
 ## Once per log interval: how much each hand ray trembled on the panel, in pixels.
@@ -408,27 +417,31 @@ func _log_tremor() -> void:
 			_save_settings()
 
 
-## Drives the Windows cursor from the pointer aimed at the screen panel: the ray's
+## Drives the Windows cursor from the pointer aimed at a screen panel: the ray's
 ## hit point becomes a pixel on that monitor, a pinch or trigger the left button.
 func _update_cursor() -> void:
-	if _panel_layer == null:
+	if _panels.is_empty():
 		return
-	var panel_transform := _panel_layer.global_transform
-	var panel_size := _panel_layer.quad_size
 	for pointer in _pointers:
 		pointer.on_panel = false
+		pointer.panel = null
 		if not pointer.active:
 			continue
-		var distance := PointerMath.ray_rect_distance(pointer.origin, pointer.direction, panel_transform, panel_size)
-		if distance < 0.0:
+		var nearest := INF
+		for panel in _panels:
+			var distance := panel.hit_distance(pointer.origin, pointer.direction)
+			if distance >= 0.0 and distance < nearest:
+				nearest = distance
+				pointer.panel = panel
+		if pointer.panel == null:
 			continue
 		pointer.on_panel = true
-		pointer.panel_uv = PointerMath.rect_uv(pointer.origin + pointer.direction * distance, panel_transform, panel_size)
-		pointer.hit_distance = minf(pointer.hit_distance, distance)
+		pointer.panel_uv = pointer.panel.uv_at(pointer.origin + pointer.direction * nearest)
+		pointer.hit_distance = minf(pointer.hit_distance, nearest)
 		if pointer.mode == "рука":
-			pointer.spread_final.add(pointer.panel_uv * Vector2(_panel_monitor.size))
-			_add_plane_point(pointer.spread_raw, pointer.raw_origin, pointer.raw_direction)
-			_add_plane_point(pointer.spread_position_only, pointer.raw_origin, pointer.shoulder_direction)
+			pointer.spread_final.add(pointer.panel_uv * Vector2(pointer.panel.monitor_rect.size))
+			_add_plane_point(pointer.spread_raw, pointer.panel, pointer.raw_origin, pointer.raw_direction)
+			_add_plane_point(pointer.spread_position_only, pointer.panel, pointer.raw_origin, pointer.shoulder_direction)
 
 	# One pointer owns the cursor: whoever pressed last, otherwise whoever aims at
 	# the panel (right hand first). The owner cannot change while the button is held.
@@ -455,7 +468,7 @@ func _update_cursor() -> void:
 			_cursor_press_armed = true
 		elif not owner_pointer.pressed:
 			_cursor_press_armed = false
-		var target := Vector2(_panel_monitor.position) + owner_pointer.panel_uv * Vector2(_panel_monitor.size - Vector2i.ONE)
+		var target := owner_pointer.panel.pixel_at(owner_pointer.panel_uv) if owner_pointer.on_panel else Vector2.ZERO
 		result = _cursor_filter.update(target, owner_pointer.on_panel, owner_pointer.pressed and _cursor_press_armed, now)
 
 	var pixel := Vector2i(result.position.round())
@@ -476,69 +489,73 @@ func _update_cursor() -> void:
 				pixel, _cursor_filter.last_hold_sec, _cursor_filter.last_hold_excursion])
 
 
-## One monitor as a live panel in front of the user. The picture goes through an
-## OpenXR composition layer, which the runtime samples directly and which is
-## noticeably sharper for text than a textured mesh.
-func _build_screen_panel() -> void:
-	if not _diag.is_empty():
-		print("[diag] ", _diag)
-	if _diag.has("nocapture"):
-		return
+## Every frame: keeps the panels' pictures current and, once a second, checks
+## whether the Windows monitor layout changed (from outside or by our own buttons).
+func _update_panels(delta: float) -> void:
+	_monitor_check_timer += delta
+	if _monitor_check_timer >= MONITOR_CHECK_SEC:
+		_monitor_check_timer = 0.0
+		var signature := str(ScreenCapture.list_monitors())
+		if signature == _monitor_signature:
+			_pending_monitor_signature = ""
+		elif signature == _pending_monitor_signature:
+			print("[capture] раскладка мониторов изменилась, перестраиваю панели")
+			_rebuild_panels()
+		else:
+			_pending_monitor_signature = signature
+
+	var copy_frames := not _diag.has("nocopy")
+	for panel in _panels:
+		panel.refresh(_session_visible, copy_frames)
+
+
+## One live panel per Windows monitor, arranged like the monitors are in Windows.
+func _rebuild_panels() -> void:
+	# The cursor may be mid-drag on a panel that is about to disappear.
+	if _cursor_filter.is_held():
+		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
+	_cursor_filter = CursorFilter.new()
+	_cursor_owner = -1
+	for pointer in _pointers:
+		pointer.panel = null
+		pointer.on_panel = false
+	for panel in _panels:
+		panel.close()
+	_panels.clear()
+	_frames_logged = 0
+
 	var monitors := ScreenCapture.list_monitors()
-	print("[capture] мониторы: ", monitors)
-	var monitor_index := 0
-	for i in monitors.size():
-		if monitors[i]["primary"]:
-			monitor_index = i
-
-	_capture = ScreenCapture.new()
-	if not _capture.start(monitor_index):
-		print("[capture] ошибка: ", _capture.get_last_error())
-		_capture = null
+	_monitor_signature = str(monitors)
+	_pending_monitor_signature = ""
+	if _diag.has("nocapture") or _diag.has("nolayer"):
 		return
-	var pixels := _capture.get_size()
-	_panel_monitor = Rect2i(monitors[monitor_index]["position"], pixels)
-	print("[capture] захват монитора %d (%s) запущен, %s" % [monitor_index, monitors[monitor_index]["name"], pixels])
-
-	if not _diag.has("nolayer"):
-		_build_panel_layer(pixels)
-
-
-func _build_panel_layer(pixels: Vector2i) -> void:
-	var picture := TextureRect.new()
-	picture.texture = _capture.get_texture()
-	picture.stretch_mode = TextureRect.STRETCH_SCALE
-	picture.set_anchors_preset(Control.PRESET_FULL_RECT)
-	var viewport := SubViewport.new()
-	viewport.size = pixels
-	viewport.disable_3d = true
-	# Stays off until the session is visible: rendering the layer earlier makes
-	# OpenXR acquire its swapchain image twice ("image_acquired" errors).
-	viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	viewport.add_child(picture)
-	add_child(viewport)
-	_panel_viewport = viewport
-
-	var width := 2.0 * PANEL_DISTANCE * tan(deg_to_rad(PANEL_WIDTH_DEG * 0.5)) * (pixels.x / 1920.0)
-	var layer := OpenXRCompositionLayerQuad.new()
-	layer.layer_viewport = viewport
-	layer.quad_size = Vector2(width, width * pixels.y / pixels.x)
-	# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
-	if not _diag.has("nohole"):
-		layer.sort_order = -1
-		layer.enable_hole_punch = true
+	var hole_punch := not _diag.has("nohole")
+	for i in monitors.size():
+		var panel := ScreenPanel.create(i, monitors[i], _origin, hole_punch)
+		if panel != null:
+			add_child(panel)
+			_panels.append(panel)
+	if hole_punch and not _panels.is_empty():
 		get_viewport().transparent_bg = true
-	_origin.add_child(layer)
-	_panel_layer = layer
-	_place_panel()
-	print("[capture] панель %.2f x %.2f м на расстоянии %.2f м" % [layer.quad_size.x, layer.quad_size.y, PANEL_DISTANCE])
+	print("[capture] мониторов %d, панелей %d" % [monitors.size(), _panels.size()])
+	_place_panels()
 
 
-## The layer has to be a child of the origin, but it belongs at a fixed place in
-## the world (in front of the user, facing them), so it is positioned globally.
-func _place_panel() -> void:
-	if _panel_layer != null:
-		_panel_layer.global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, PANEL_CENTER_HEIGHT, -PANEL_DISTANCE))
+## Puts the panels on an arc around the user, mirroring the Windows layout.
+func _place_panels() -> void:
+	var rects: Array[Rect2i] = []
+	var primary_index := 0
+	for i in _panels.size():
+		rects.append(_panels[i].monitor_rect)
+		if _panels[i].primary:
+			primary_index = i
+	var placements := PanelLayout.arrange(rects, primary_index, Vector3(0.0, PANEL_CENTER_HEIGHT, 0.0),
+			PANEL_DISTANCE, PANEL_WIDTH_DEG, PANEL_MAX_ARC_DEG)
+	for i in _panels.size():
+		_panels[i].place(placements[i])
+		print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, %.2f x %.2f м" % [
+				_panels[i].monitor_name, " (основной)" if _panels[i].primary else "", rects[i].size, rects[i].position,
+				rad_to_deg(placements[i].heading), rad_to_deg(placements[i].elevation), placements[i].size.x, placements[i].size.y])
 
 
 ## Turns and shifts the play space so that the user stands at the world origin
@@ -553,7 +570,7 @@ func _recenter() -> void:
 	var yaw := PI - atan2(forward.x, forward.z)
 	var turn := Basis(Vector3.UP, yaw)
 	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
-	_place_panel()
+	_place_panels()
 	_recentered = true
 	print("[xr] сцена выровнена по взгляду, поворот %.0f°" % rad_to_deg(yaw))
 
@@ -563,11 +580,10 @@ func _on_xr_event(event: StringName) -> void:
 	# A moment after focus, so that the head pose is valid.
 	if event == &"session_focussed" and not _recentered:
 		get_tree().create_timer(0.5).timeout.connect(_recenter)
-	if _panel_viewport != null:
-		if event == &"session_visible" or event == &"session_focussed":
-			_panel_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-		elif event == &"session_stopping":
-			_panel_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	if event == &"session_visible" or event == &"session_focussed":
+		_session_visible = true
+	elif event == &"session_stopping":
+		_session_visible = false
 	if event == &"session_loss_pending" or event == &"instance_exiting":
 		_schedule_reconnect()
 

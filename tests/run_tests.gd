@@ -14,6 +14,7 @@ func _init() -> void:
 	_test_rect_uv()
 	_test_cursor_filter()
 	_test_aim_study()
+	_test_panel_layout()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -153,6 +154,67 @@ func _test_aim_study() -> void:
 	_check(absf(weights.x - 0.7) < 0.01 and absf(weights.y - 0.3) < 0.01, "состав луча восстанавливается: %.3f и %.3f" % [weights.x, weights.y])
 	_check(study.mean_origin_in_wrist().is_equal_approx(Vector3(0.01, 0.02, 0.03)), "среднее начало луча")
 	_check(is_equal_approx(study.mean_angle_to_own(), 0.25), "средний угол до своего луча")
+
+
+func _test_panel_layout() -> void:
+	var eye := Vector3(0.0, 1.45, 0.0)
+	var distance := 1.1
+
+	# One 1920x1080 monitor: straight ahead, 60 degrees wide, facing the user.
+	var single: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080)]
+	var placed := PanelLayout.arrange(single, 0, eye, distance, 60.0, 300.0)
+	_check(placed.size() == 1, "одна панель на один монитор")
+	_check(placed[0].transform.origin.is_equal_approx(eye + Vector3(0.0, 0.0, -distance)), "единственный монитор прямо перед глазами")
+	_check(is_equal_approx(placed[0].size.x, 2.0 * distance * tan(deg_to_rad(30.0))), "1920 пикселей занимают 60 градусов")
+	_check(is_equal_approx(placed[0].size.y / placed[0].size.x, 1080.0 / 1920.0), "пропорции экрана сохранены")
+	_check(placed[0].transform.basis.z.is_equal_approx(Vector3.BACK), "панель лицом к пользователю")
+
+	# Three in a row with the primary in the middle: left is left, right is right, edges meet.
+	var row: Array[Rect2i] = [Rect2i(1920, 0, 1920, 1080), Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080)]
+	placed = PanelLayout.arrange(row, 2, eye, distance, 60.0, 300.0)
+	_check(is_zero_approx(placed[2].heading), "основной монитор по центру")
+	_check(is_equal_approx(placed[0].heading, deg_to_rad(60.0)) and placed[0].transform.origin.x > 0.0, "правый монитор справа на 60 градусов")
+	_check(is_equal_approx(placed[1].heading, deg_to_rad(-60.0)) and placed[1].transform.origin.x < 0.0, "левый монитор слева")
+	var centre_right_edge := placed[2].transform * Vector3(placed[2].size.x * 0.5, 0.0, 0.0)
+	var right_left_edge := placed[0].transform * Vector3(-placed[0].size.x * 0.5, 0.0, 0.0)
+	_check(centre_right_edge.is_equal_approx(right_left_edge), "соседние панели стыкуются краями")
+	_check((placed[0].transform.basis.z).dot(eye - placed[0].transform.origin) > 0.0, "боковая панель повёрнута к пользователю")
+	_check(is_equal_approx(placed[0].transform.origin.distance_to(eye), distance), "все панели на одном расстоянии")
+
+	# Two rows: the upper monitor is above, a half-shifted one sits half-way sideways.
+	var rows: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(960, -1080, 1920, 1080)]
+	placed = PanelLayout.arrange(rows, 0, eye, distance, 60.0, 300.0)
+	_check(placed[1].elevation > 0.0 and placed[1].transform.origin.y > eye.y, "монитор выше в Windows — выше в VR")
+	_check(is_equal_approx(placed[1].heading, deg_to_rad(30.0)), "сдвиг на пол-экрана — сдвиг на половину угла")
+	var lower_top := placed[0].transform.origin.y + placed[0].size.y * 0.5
+	var upper_bottom := (placed[1].transform * Vector3(0.0, -placed[1].size.y * 0.5, 0.0)).y
+	_check(absf(upper_bottom - lower_top) < 0.03, "ряды стыкуются по вертикали")
+
+	# A smaller monitor keeps its relative size.
+	var mixed: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1280, 720)]
+	placed = PanelLayout.arrange(mixed, 0, eye, distance, 60.0, 300.0)
+	_check(placed[1].size.x < placed[0].size.x and is_equal_approx(placed[1].size.y / placed[1].size.x, 720.0 / 1280.0), "маленький монитор — маленькая панель")
+
+	# Eight in a row would be 480 degrees: shrunk to the allowed arc, order kept, nothing behind.
+	var wide: Array[Rect2i] = []
+	for i in 8:
+		wide.append(Rect2i(i * 1920, 0, 1920, 1080))
+	placed = PanelLayout.arrange(wide, 0, eye, distance, 60.0, 300.0)
+	var ordered := true
+	for i in range(1, 8):
+		ordered = ordered and placed[i].heading > placed[i - 1].heading
+	_check(ordered, "восемь в ряд: порядок слева направо сохранён")
+	_check(is_equal_approx(placed[7].heading - placed[0].heading, deg_to_rad(300.0 * 7.0 / 8.0)), "восемь в ряд: ряд ужат до 300 градусов")
+	_check(is_equal_approx(placed[0].heading, -placed[7].heading), "восемь в ряд: дуга симметрична")
+	_check(placed[0].size.x < 2.0 * distance * tan(deg_to_rad(30.0)), "восемь в ряд: панели стали меньше")
+
+	# A primary at the edge of a row that fits stays straight ahead.
+	var five: Array[Rect2i] = []
+	for i in 5:
+		five.append(Rect2i(i * 1920, 0, 1920, 1080))
+	placed = PanelLayout.arrange(five, 2, eye, distance, 60.0, 300.0)
+	_check(is_zero_approx(placed[2].heading) and is_equal_approx(placed[4].heading, deg_to_rad(120.0)), "пять в ряд: основной по центру, масштаб не меняется")
+	_check(PanelLayout.arrange([] as Array[Rect2i], 0, eye, distance, 60.0, 300.0).is_empty(), "нет мониторов — нет панелей")
 
 
 func _test_recenter_math() -> void:
