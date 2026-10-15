@@ -12,8 +12,6 @@ const RAY_LENGTH := 2.0
 const LOG_INTERVAL_SEC := 1.0
 
 # Tunables for the hand pointer; they move to a settings resource with the full gesture set.
-const PINCH_PRESS_DISTANCE := 0.018
-const PINCH_RELEASE_DISTANCE := 0.035
 const SHOULDER_DROP := 0.2
 const SHOULDER_HALF_WIDTH := 0.18
 ## 0 = ray follows the shoulder-to-hand line only, 1 = the rotation of the hand only.
@@ -78,6 +76,29 @@ const PANEL_CENTER_HEIGHT := 1.45
 const PANEL_MAX_ARC_DEG := 300.0
 const MONITOR_CHECK_SEC := 1.0
 const EXIT_HOTKEY_VIRTUAL_KEY := 0x7B  # F12, together with Ctrl+Alt+Shift
+
+## Controller stick: wheel units per second at full deflection, and the dead zone.
+const CONTROLLER_SCROLL_SPEED := 1200.0
+const CONTROLLER_STICK_DEADZONE := 0.2
+## The press is placed where the pointer was this long before the fingers touched
+## (the recognition window comes on top, see _update_cursor).
+const CURSOR_LOOKBACK_SEC := 0.1
+const CLICK_LABELS := {-1: "—", 0: "ЛКМ", 1: "ПКМ", 2: "СКМ"}
+
+## Tunables on the settings panel: [section, property, label, display scale, unit, step, min, max].
+## Values are stored in SI units (metres, seconds); the scale converts them for display.
+const TUNABLES := [
+	["gestures", "pinch_press", "Щипок: сжатие", 1000.0, "мм", 0.001, 0.008, 0.035],
+	["gestures", "pinch_release", "Щипок: разжатие", 1000.0, "мм", 0.002, 0.02, 0.07],
+	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
+	["gestures", "scroll_together", "Прокрутка: пальцы вместе", 1000.0, "мм", 0.002, 0.008, 0.04],
+	["gestures", "scroll_ring_curl", "Прокрутка: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
+	["gestures", "scroll_dwell", "Прокрутка: задержка", 1000.0, "мс", 0.05, 0.0, 0.6],
+	["gestures", "scroll_speed", "Прокрутка: скорость", 1.0, "", 250.0, 250.0, 8000.0],
+	["cursor", "drag_threshold", "Перетаскивание: порог", 1.0, "px", 5.0, 5.0, 150.0],
+	["cursor", "drag_delay_sec", "Перетаскивание: задержка", 1000.0, "мс", 0.05, 0.0, 1.0],
+	["cursor", "double_click_sec", "Двойной щелчок: окно", 1000.0, "мс", 0.1, 0.3, 2.0],
+]
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
 const SCREEN_BUTTON_HOLD_SEC := 0.6
@@ -204,6 +225,14 @@ class Pointer:
 	var rotation_forward := Vector3.ZERO
 	## This frame's hand ray came from the runtime's aim pose.
 	var runtime_aim := false
+	var gestures := HandGestures.new()
+	## The mouse button this pointer holds (hand gesture or controller button), or NONE.
+	var button := HandGestures.Click.NONE
+	## A hand gesture is being recognised, or the wheel pose is on: keep the cursor still.
+	var pending := false
+	var scrolling := false
+	## Wheel units produced this frame; positive scrolls up.
+	var scroll := 0.0
 	var on_panel := false
 	## The nearest screen panel the ray hits, and where: 0..1 from its top-left corner.
 	var panel: ScreenPanel
@@ -236,6 +265,15 @@ var _monitor_check_timer := 0.0
 var _session_visible := false
 var _frames_logged := 0
 var _cursor_filter := CursorFilter.new()
+## The button the Windows cursor currently holds, released with the same button.
+var _cursor_button := HandGestures.Click.NONE
+## Fractions of a wheel unit carried over between frames.
+var _scroll_remainder := 0.0
+var _scroll_logged := 0.0
+## Shared by both hands' recognisers; tuned on the settings panel.
+var _gesture_settings := HandGestures.Settings.new()
+var _settings_root: Node3D
+var _settings_values: Array[Label3D] = []
 ## Index of the pointer that drives the Windows cursor, or -1.
 var _cursor_owner := -1
 var _cursor_press_armed := false
@@ -270,9 +308,13 @@ var _hand_trackers_missing_sec := 0.0
 func _ready() -> void:
 	_build_world()
 	_build_rig()
+	for pointer in _pointers:
+		pointer.gestures.settings = _gesture_settings
 	_build_buttons()
+	_build_settings_panel()
 	_load_settings()
 	_update_ray_info()
+	_refresh_settings_panel()
 
 	_hotkey = GlobalHotkey.new()
 	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
@@ -339,7 +381,7 @@ func _process(delta: float) -> void:
 			"да" if controller.get_has_tracking_data() else "нет",
 			controller.get_float(&"trigger"), controller.get_float(&"grip"),
 			controller.get_vector2(&"primary"),
-			pointer.mode, ", нажат" if pointer.pressed else "",
+			pointer.mode, (", " + CLICK_LABELS[pointer.button]) if pointer.pressed else (", колесо" if pointer.scrolling else (", распознаю" if pointer.pending else "")),
 		])
 		if pointer.mode == "рука":
 			lines[-1] += " | щипок %.0f мм, луч %s" % [pointer.pinch_mm, "Meta" if pointer.runtime_aim else "свой"]
@@ -359,6 +401,9 @@ func _process(delta: float) -> void:
 		for panel in _panels:
 			frames += panel.capture.get_frame_count()
 		lines.append("Панелей %d, кадров захвата за интервал %d, FPS %d" % [_panels.size(), frames - _frames_logged, Engine.get_frames_per_second()])
+		if _scroll_logged != 0.0:
+			lines.append("Колесо за интервал: %+d (%.1f щелчка)" % [int(_scroll_logged), _scroll_logged / 120.0])
+			_scroll_logged = 0.0
 		_frames_logged = frames
 		for line in lines:
 			print("[track] ", line)
@@ -381,8 +426,7 @@ func _on_session_begun(openxr: OpenXRInterface) -> void:
 
 func _exit_tree() -> void:
 	# Never leave Windows with a mouse button stuck down.
-	if _cursor_filter.is_held():
-		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
+	_release_cursor_button()
 	for panel in _panels:
 		panel.capture.stop()
 
@@ -457,36 +501,61 @@ func _update_cursor() -> void:
 					break
 
 	var now := Time.get_ticks_usec() / 1000000.0
+	# A hand press is only decided after the recognition window, so the press point
+	# is looked up that much further back.
+	_cursor_filter.lookback_sec = CURSOR_LOOKBACK_SEC + _gesture_settings.confirm_delay
 	var result: CursorFilter.Result
+	var owner_pointer: Pointer = null
 	if _cursor_owner < 0:
 		_cursor_press_armed = false
 		result = _cursor_filter.update(Vector2.ZERO, false, false, now)
 	else:
-		var owner_pointer := _pointers[_cursor_owner]
+		owner_pointer = _pointers[_cursor_owner]
 		# A press counts only if it began on the panel, not if a held pinch wandered onto it.
 		if owner_pointer.on_panel and owner_pointer.just_pressed:
 			_cursor_press_armed = true
 		elif not owner_pointer.pressed:
 			_cursor_press_armed = false
 		var target := owner_pointer.panel.pixel_at(owner_pointer.panel_uv) if owner_pointer.on_panel else Vector2.ZERO
-		result = _cursor_filter.update(target, owner_pointer.on_panel, owner_pointer.pressed and _cursor_press_armed, now)
+		result = _cursor_filter.update(target, owner_pointer.on_panel, owner_pointer.pressed and _cursor_press_armed, now,
+				owner_pointer.pending or owner_pointer.scrolling)
 
 	var pixel := Vector2i(result.position.round())
 	if result.move:
 		MouseInput.move_to(pixel)
 	if result.press:
-		if result.double_click:
+		_cursor_button = owner_pointer.button
+		var mouse_button := _cursor_button as MouseInput.Button
+		if result.double_click and _cursor_button == HandGestures.Click.LEFT:
 			# A full click first: the press that follows is then the second one of a
 			# double click by Windows' own timing, however slow the hand was.
-			MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
-			MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
-		MouseInput.set_button(MouseInput.BUTTON_LEFT, true)
-		print("[cursor] %s: нажатие в %s, луч в этот момент в %.0f px от точки%s" % [SIDE_LABELS[_cursor_owner], pixel,
-				_cursor_filter.last_press_offset, ", двойной щелчок" if result.double_click else ""])
+			MouseInput.set_button(mouse_button, true)
+			MouseInput.set_button(mouse_button, false)
+		MouseInput.set_button(mouse_button, true)
+		print("[cursor] %s: %s в %s, луч в этот момент в %.0f px от точки%s" % [SIDE_LABELS[_cursor_owner],
+				CLICK_LABELS[_cursor_button], pixel, _cursor_filter.last_press_offset,
+				", двойной щелчок" if result.double_click and _cursor_button == HandGestures.Click.LEFT else ""])
 	if result.release:
-		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
+		_release_cursor_button()
 		print("[cursor] отпускание в %s через %.2f с, за время удержания луч уходил на %.0f px" % [
 				pixel, _cursor_filter.last_hold_sec, _cursor_filter.last_hold_excursion])
+
+	# The wheel goes to wherever the cursor is, from the pointer that owns it.
+	if owner_pointer != null and owner_pointer.on_panel and owner_pointer.scrolling:
+		_scroll_remainder += owner_pointer.scroll
+		var whole := int(_scroll_remainder)
+		if whole != 0:
+			MouseInput.scroll(whole)
+			_scroll_remainder -= whole
+			_scroll_logged += whole
+	else:
+		_scroll_remainder = 0.0
+
+
+func _release_cursor_button() -> void:
+	if _cursor_button != HandGestures.Click.NONE:
+		MouseInput.set_button(_cursor_button as MouseInput.Button, false)
+		_cursor_button = HandGestures.Click.NONE
 
 
 ## Every frame: keeps the panels' pictures current and, once a second, checks
@@ -513,9 +582,13 @@ func _update_panels(delta: float) -> void:
 ## One live panel per Windows monitor, arranged like the monitors are in Windows.
 func _rebuild_panels() -> void:
 	# The cursor may be mid-drag on a panel that is about to disappear.
-	if _cursor_filter.is_held():
-		MouseInput.set_button(MouseInput.BUTTON_LEFT, false)
+	_release_cursor_button()
+	# A fresh filter, but with the tuned values of the old one.
+	var tuned := _cursor_filter
 	_cursor_filter = CursorFilter.new()
+	for tunable: Array in TUNABLES:
+		if tunable[0] == "cursor":
+			_cursor_filter.set(tunable[1], tuned.get(tunable[1]))
 	_cursor_owner = -1
 	for pointer in _pointers:
 		pointer.panel = null
@@ -658,6 +731,10 @@ func _load_settings() -> void:
 	_hand_rotation_weight = config.get_value("ray", "rotation_weight", _hand_rotation_weight)
 	_aim_offset[0] = config.get_value("ray", "aim_offset_left", _aim_offset[0])
 	_aim_offset[1] = config.get_value("ray", "aim_offset_right", _aim_offset[1])
+	for tunable: Array in TUNABLES:
+		var target := _tunable_target(tunable[0])
+		target.set(tunable[1], config.get_value(tunable[0], tunable[1], target.get(tunable[1])))
+	_gesture_settings.scroll_apart = config.get_value("gestures", "scroll_apart", _gesture_settings.scroll_apart)
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
 
@@ -670,6 +747,9 @@ func _save_settings() -> void:
 	config.set_value("ray", "rotation_weight", _hand_rotation_weight)
 	config.set_value("ray", "aim_offset_left", _aim_offset[0])
 	config.set_value("ray", "aim_offset_right", _aim_offset[1])
+	for tunable: Array in TUNABLES:
+		config.set_value(tunable[0], tunable[1], _tunable_target(tunable[0]).get(tunable[1]))
+	config.set_value("gestures", "scroll_apart", _gesture_settings.scroll_apart)
 	var error := config.save(SETTINGS_PATH)
 	if error != OK:
 		print("[settings] не удалось сохранить: ", error_string(error))
@@ -829,7 +909,9 @@ func _update_pointer(index: int, delta: float) -> void:
 			target = -controller.global_basis.z.normalized()
 			unfiltered_target = target
 			ray_origin = controller.global_position
-		var tip_distance := thumb_tip.distance_to(index_tip)
+		var middle_tip := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP).origin
+		# Any finger closing on the thumb freezes the rotation part of the ray.
+		var tip_distance := minf(thumb_tip.distance_to(index_tip), thumb_tip.distance_to(middle_tip))
 		var was_hand := pointer.mode == "рука"
 		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
 			pointer.rotation_offset = Quaternion(shoulder_direction, target)
@@ -849,24 +931,65 @@ func _update_pointer(index: int, delta: float) -> void:
 		# single smoothed step would always be smaller than the zone.
 		pointer.direction = PointerMath.smooth_direction(previous,
 				PointerMath.deadband_direction(previous, target, RAY_DEADBAND), delta, smoothing)
-		pointer.pressed = PointerMath.pinch_state(was_pressed, thumb_tip.distance_to(index_tip), PINCH_PRESS_DISTANCE, PINCH_RELEASE_DISTANCE)
+
+		var frame := HandGestures.Frame.new()
+		frame.time = Time.get_ticks_usec() / 1000000.0
+		frame.thumb_index = thumb_tip.distance_to(index_tip)
+		frame.thumb_middle = thumb_tip.distance_to(middle_tip)
+		frame.index_middle = index_tip.distance_to(middle_tip)
+		frame.index_straightness = HandGestures.straightness(
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_INTERMEDIATE).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_DISTAL).origin, index_tip)
+		frame.middle_straightness = HandGestures.straightness(
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_INTERMEDIATE).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_DISTAL).origin, middle_tip)
+		frame.ring_to_palm = tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin.distance_to(
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin)
+		frame.height = palm.y
+		var gesture := pointer.gestures.update(frame)
+		pointer.button = gesture.button
+		pointer.pending = gesture.pending
+		pointer.scrolling = gesture.scrolling
+		pointer.scroll = gesture.scroll
 	elif controller.get_has_tracking_data():
 		pointer.active = true
 		pointer.mode = "контроллер"
 		pointer.origin = controller.global_position
 		pointer.direction = -controller.global_basis.z.normalized()
-		pointer.pressed = controller.is_button_pressed(&"trigger_click")
+		pointer.pending = false
+		if controller.is_button_pressed(&"trigger_click"):
+			pointer.button = HandGestures.Click.LEFT
+		elif controller.is_button_pressed(&"grip_click"):
+			pointer.button = HandGestures.Click.RIGHT
+		else:
+			pointer.button = HandGestures.Click.NONE
+		var stick := controller.get_vector2(&"primary").y
+		pointer.scrolling = absf(stick) > CONTROLLER_STICK_DEADZONE
+		pointer.scroll = stick * CONTROLLER_SCROLL_SPEED * delta if pointer.scrolling else 0.0
 	else:
 		pointer.active = false
 		pointer.mode = "нет"
-		pointer.pressed = false
+		pointer.button = HandGestures.Click.NONE
+		pointer.pending = false
+		pointer.scrolling = false
+		pointer.scroll = 0.0
+	pointer.pressed = pointer.button != HandGestures.Click.NONE
 	pointer.just_pressed = pointer.pressed and not was_pressed
+	if pointer.pressed != was_pressed:
+		print("[gesture] %s (%s): %s" % [SIDE_LABELS[index], pointer.mode,
+				("нажата " + CLICK_LABELS[pointer.button]) if pointer.pressed else "отпущено"])
 
 
 func _update_buttons(delta: float) -> void:
 	for button in _screen_buttons:
 		button.enabled = not _screens_busy()
 	for button in _buttons:
+		# Buttons of a hidden panel cannot be pressed.
+		if not button.is_visible_in_tree():
+			button.update(false, false, false, delta)
+			continue
 		var hovered := false
 		var pressed := false
 		var just_pressed := false
@@ -1045,11 +1168,97 @@ func _build_buttons() -> void:
 
 
 func _add_button(text: String, at: Vector3, hold_time: float) -> VrButton:
-	var button := VrButton.new(text, BUTTON_SIZE, hold_time)
+	return _add_button_to(self, text, at, BUTTON_SIZE, hold_time)
+
+
+func _add_button_to(parent: Node3D, text: String, at: Vector3, size: Vector2, hold_time: float) -> VrButton:
+	var button := VrButton.new(text, size, hold_time)
 	button.position = at
-	add_child(button)
+	parent.add_child(button)
 	_buttons.append(button)
 	return button
+
+
+## Settings panel to the user's front left: every gesture and cursor tunable with
+## − / + buttons. Shown and hidden with the "Настройки" button; saved on each change.
+func _build_settings_panel() -> void:
+	_settings_root = Node3D.new()
+	_settings_root.position = Vector3(-0.85, 1.05, -0.85)
+	# Turned to face the user standing at the origin.
+	_settings_root.rotation = Vector3(0.0, deg_to_rad(45.0), 0.0)
+	_settings_root.visible = false
+	add_child(_settings_root)
+
+	_settings_label("Жесты и курсор", Vector3(0.0, 0.42, 0.0), 40)
+	var small := Vector2(0.07, 0.06)
+	for i in TUNABLES.size():
+		var y := 0.32 - i * 0.075
+		var name_label := _settings_label(TUNABLES[i][2], Vector3(-0.06, y, 0.0), 28)
+		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		_add_button_to(_settings_root, "−", Vector3(0.0, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
+		_settings_values.append(_settings_label("", Vector3(0.13, y, 0.0), 28))
+		_add_button_to(_settings_root, "+", Vector3(0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+	_add_button_to(_settings_root, "По умолчанию", Vector3(0.0, 0.32 - TUNABLES.size() * 0.075 - 0.02, 0.0),
+			Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
+
+	_add_button("Настройки", Vector3(0.77, 0.52, -1.2), 0.4).activated.connect(_on_settings_toggle)
+
+
+func _settings_label(text: String, at: Vector3, font_size: int) -> Label3D:
+	var label := Label3D.new()
+	label.text = text
+	label.position = at + Vector3(0.0, 0.0, 0.002)
+	label.pixel_size = 0.001
+	label.font_size = font_size
+	label.outline_size = 8
+	_settings_root.add_child(label)
+	return label
+
+
+func _on_settings_toggle() -> void:
+	_settings_root.visible = not _settings_root.visible
+
+
+func _tunable_target(section: String) -> Object:
+	return _gesture_settings if section == "gestures" else _cursor_filter
+
+
+func _on_tunable_button(index: int, direction: float) -> void:
+	var tunable: Array = TUNABLES[index]
+	var target := _tunable_target(tunable[0])
+	var value := snappedf(clampf(float(target.get(tunable[1])) + direction * float(tunable[5]), tunable[6], tunable[7]), tunable[5])
+	# Keep each hysteresis pair ordered: a finger has to let go further out than it touches.
+	match tunable[1]:
+		"pinch_press":
+			value = minf(value, _gesture_settings.pinch_release - 0.005)
+		"pinch_release":
+			value = maxf(value, _gesture_settings.pinch_press + 0.005)
+		"scroll_together":
+			_gesture_settings.scroll_apart = value + 0.01
+	target.set(tunable[1], value)
+	_save_settings()
+	_refresh_settings_panel()
+	print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
+
+
+func _on_tunables_default() -> void:
+	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new()}
+	for tunable: Array in TUNABLES:
+		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
+	_gesture_settings.scroll_apart = (defaults["gestures"] as HandGestures.Settings).scroll_apart
+	_save_settings()
+	_refresh_settings_panel()
+	print("[settings] жесты и курсор — значения по умолчанию")
+
+
+func _refresh_settings_panel() -> void:
+	for i in mini(TUNABLES.size(), _settings_values.size()):
+		var tunable: Array = TUNABLES[i]
+		var value := float(_tunable_target(tunable[0]).get(tunable[1]))
+		if tunable[1] == "scroll_ring_curl" and value <= 0.0:
+			_settings_values[i].text = "не нужно"
+		else:
+			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
 
 
 func _flat_material(color: Color) -> StandardMaterial3D:

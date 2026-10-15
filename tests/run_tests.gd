@@ -15,6 +15,7 @@ func _init() -> void:
 	_test_cursor_filter()
 	_test_aim_study()
 	_test_panel_layout()
+	_test_hand_gestures()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -223,6 +224,131 @@ func _test_panel_layout() -> void:
 	placed = PanelLayout.arrange(five, 2, eye, distance, 60.0, 300.0)
 	_check(is_zero_approx(placed[2].heading) and is_equal_approx(placed[4].heading, deg_to_rad(120.0)), "пять в ряд: основной по центру, масштаб не меняется")
 	_check(PanelLayout.arrange([] as Array[Rect2i], 0, eye, distance, 60.0, 300.0).is_empty(), "нет мониторов — нет панелей")
+
+
+func _hand(time: float, thumb_index: float, thumb_middle := 0.06, index_middle := 0.03, ring_to_palm := 0.05, height := 1.0) -> HandGestures.Frame:
+	var frame := HandGestures.Frame.new()
+	frame.time = time
+	frame.thumb_index = thumb_index
+	frame.thumb_middle = thumb_middle
+	frame.index_middle = index_middle
+	frame.index_straightness = 0.95
+	frame.middle_straightness = 0.95
+	frame.ring_to_palm = ring_to_palm
+	frame.height = height
+	return frame
+
+
+## The wheel pose: index and middle together and straight, thumb away, ring curled.
+func _wheel(time: float, height: float, ring_to_palm := 0.05) -> HandGestures.Frame:
+	return _hand(time, 0.08, 0.08, 0.012, ring_to_palm, height)
+
+
+func _test_hand_gestures() -> void:
+	const NONE := HandGestures.Click.NONE
+	const LEFT := HandGestures.Click.LEFT
+	const RIGHT := HandGestures.Click.RIGHT
+	const MIDDLE := HandGestures.Click.MIDDLE
+
+	var gestures := HandGestures.new()
+	var out := gestures.update(_hand(0.0, 0.06))
+	_check(out.button == NONE and not out.pending and not out.scrolling, "открытая рука — ничего")
+	out = gestures.update(_hand(0.10, 0.012))
+	_check(out.pending and out.button == NONE, "касание: сначала ожидание, кнопки ещё нет")
+	out = gestures.update(_hand(0.20, 0.012))
+	_check(out.pending and out.button == NONE, "до конца окна кнопка не нажимается")
+	out = gestures.update(_hand(0.23, 0.012))
+	_check(out.button == LEFT and not out.pending, "большой + указательный — левая кнопка")
+	out = gestures.update(_hand(0.50, 0.025))
+	_check(out.button == LEFT, "между порогами сжатия и разжатия кнопка держится")
+	out = gestures.update(_hand(0.60, 0.04))
+	_check(out.button == NONE, "пальцы разведены — кнопка отпущена")
+
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.06, 0.012))
+	out = gestures.update(_hand(0.13, 0.06, 0.012))
+	_check(out.button == RIGHT, "большой + средний — правая кнопка")
+
+	# A three-finger pinch starts as a two-finger one: the middle finger joins within the window.
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.012, 0.06))
+	out = gestures.update(_hand(0.05, 0.012, 0.012))
+	_check(out.pending and out.button == NONE, "три пальца: в окне ещё не решено")
+	out = gestures.update(_hand(0.13, 0.012, 0.012))
+	_check(out.button == MIDDLE, "большой + указательный + средний — средняя кнопка, а не левая")
+	out = gestures.update(_hand(0.30, 0.012, 0.04))
+	_check(out.button == MIDDLE, "средняя держится, пока хоть один палец касается")
+	out = gestures.update(_hand(0.35, 0.04, 0.04))
+	_check(out.button == NONE, "средняя отпущена, когда разведены оба")
+
+	# A finger joining after the window does not change the button.
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.012, 0.06))
+	out = gestures.update(_hand(0.13, 0.012, 0.06))
+	_check(out.button == LEFT, "левая нажата")
+	out = gestures.update(_hand(0.20, 0.012, 0.012))
+	_check(out.button == LEFT, "средний палец после окна — всё ещё левая")
+
+	# A pinch shorter than the window is still a click: pressed for one frame, then released.
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.012))
+	out = gestures.update(_hand(0.05, 0.05))
+	_check(out.button == LEFT, "быстрое касание — щелчок")
+	out = gestures.update(_hand(0.07, 0.05))
+	_check(out.button == NONE and not out.pending, "и сразу отпускание")
+
+	# Fingers hovering between the two thresholds never start a press.
+	gestures = HandGestures.new()
+	var touched := false
+	for i in 10:
+		out = gestures.update(_hand(i * 0.05, 0.025))
+		touched = touched or out.pending or out.button != NONE
+	_check(not touched, "пальцы между порогами без касания — нажатия нет")
+
+	# Wheel: the pose has to be held before the hand's movement turns the wheel.
+	gestures = HandGestures.new()
+	out = gestures.update(_wheel(0.0, 1.0))
+	_check(out.scrolling and is_zero_approx(out.scroll), "поза прокрутки: курсор стоит, колесо ещё нет")
+	out = gestures.update(_wheel(0.10, 1.02))
+	_check(is_zero_approx(out.scroll), "движение до конца задержки не крутит колесо")
+	gestures.update(_wheel(0.20, 1.02))
+	var total := 0.0
+	for i in range(1, 11):
+		total += gestures.update(_wheel(0.20 + i * 0.05, 1.02 + i * 0.01)).scroll
+	_check(is_equal_approx(total, 0.1 * gestures.settings.scroll_speed), "рука вверх на 10 см — колесо вверх пропорционально пути")
+	var down := 0.0
+	for i in range(1, 6):
+		down += gestures.update(_wheel(0.70 + i * 0.05, 1.12 - i * 0.02)).scroll
+	_check(down < 0.0 and is_equal_approx(down, -0.1 * gestures.settings.scroll_speed), "рука вниз — колесо вниз")
+	var drift := 0.0
+	for i in range(1, 11):
+		drift += gestures.update(_wheel(0.95 + i * 0.05, 1.02 + i * 0.001)).scroll
+	_check(is_zero_approx(drift), "медленный дрейф руки колесо не крутит")
+
+	# A relaxed open hand also has index and middle together, but the ring finger is straight.
+	gestures = HandGestures.new()
+	var any_scroll := false
+	for i in 10:
+		out = gestures.update(_wheel(i * 0.05, 1.0 + i * 0.02, 0.12))
+		any_scroll = any_scroll or out.scrolling or not is_zero_approx(out.scroll)
+	_check(not any_scroll, "расслабленная открытая ладонь не прокручивает")
+
+	# The thumb coming in while scrolling must not click.
+	gestures = HandGestures.new()
+	gestures.update(_wheel(0.0, 1.0))
+	gestures.update(_wheel(0.2, 1.0))
+	var clicked := false
+	for i in 6:
+		out = gestures.update(_hand(0.25 + i * 0.05, 0.012, 0.06, 0.012))
+		clicked = clicked or out.button != NONE or out.pending
+	_check(not clicked, "большой палец во время прокрутки — щелчка нет")
+	gestures.update(_hand(0.6, 0.06))
+	gestures.update(_hand(0.7, 0.012))
+	out = gestures.update(_hand(0.83, 0.012))
+	_check(out.button == LEFT, "после разведения пальцев щелчки снова работают")
+
+	_check(is_equal_approx(HandGestures.straightness(Vector3.ZERO, Vector3(0, 0.04, 0), Vector3(0, 0.07, 0), Vector3(0, 0.09, 0)), 1.0), "прямой палец — 1")
+	_check(HandGestures.straightness(Vector3.ZERO, Vector3(0, 0.04, 0), Vector3(0, 0.04, 0.03), Vector3(0, 0.02, 0.03)) < 0.6, "согнутый палец — заметно меньше 1")
 
 
 func _test_recenter_math() -> void:

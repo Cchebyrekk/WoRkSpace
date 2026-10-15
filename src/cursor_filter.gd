@@ -61,7 +61,8 @@ func is_held() -> bool:
 
 ## `target` is only meaningful while `on_screen` is true. A press counts only if
 ## it starts on the screen; one that started elsewhere and wandered in is ignored.
-func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Result:
+## `freeze` keeps an unpressed cursor still, e.g. while a gesture is being recognised.
+func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze := false) -> Result:
 	var result := Result.new()
 	var just_pressed := pressed and not _was_pressed
 	_was_pressed = pressed
@@ -100,7 +101,7 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float) -> Res
 				_dragging = true
 			if _dragging:
 				_move(result, target)
-	elif on_screen and not pressed:
+	elif on_screen and not pressed and not freeze:
 		_move(result, target)
 
 	result.position = _position
