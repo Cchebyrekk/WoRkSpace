@@ -18,8 +18,9 @@ class Placement:
 ## `degrees_per_1920_px` sets the scale: the horizontal angle a 1920-pixel-wide
 ## monitor covers. If the whole layout would span more than `max_arc_degrees`, it
 ## is shrunk to fit, because panels must not wrap around behind the user.
-## The primary monitor is straight ahead unless that would push the far end of
-## the layout past the allowed arc.
+## The group of monitors is centred left-to-right in front of the user (with three
+## in a row the middle one is straight ahead, wherever the primary is); vertically
+## the primary monitor's row is at eye level.
 static func arrange(monitors: Array[Rect2i], primary_index: int, eye: Vector3, distance: float,
 		degrees_per_1920_px: float, max_arc_degrees: float) -> Array[Placement]:
 	var placements: Array[Placement] = []
@@ -41,10 +42,7 @@ static func arrange(monitors: Array[Rect2i], primary_index: int, eye: Vector3, d
 	var vertical_pixels_per_radian := 1080.0 / (2.0 * atan(metres_per_pixel * 540.0 / distance))
 
 	var primary := monitors[clampi(primary_index, 0, monitors.size() - 1)]
-	var half_arc_pixels := max_arc * pixels_per_radian * 0.5
-	var reference := Vector2(
-			clampf(primary.position.x + primary.size.x * 0.5, bounds.end.x - half_arc_pixels, bounds.position.x + half_arc_pixels),
-			primary.position.y + primary.size.y * 0.5)
+	var reference := Vector2(bounds.position.x + bounds.size.x * 0.5, primary.position.y + primary.size.y * 0.5)
 
 	for monitor in monitors:
 		var centre := Vector2(monitor.position) + Vector2(monitor.size) * 0.5

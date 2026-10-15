@@ -14,8 +14,12 @@ var primary := false
 var capture: ScreenCapture
 var layer: OpenXRCompositionLayerQuad
 
+## A panel keeps being redrawn every frame for this long after its picture last changed.
+const ACTIVE_HOLD_SEC := 1.0
+
 var _viewport: SubViewport
 var _rendered_frame := 0
+var _active_until := 0.0
 
 
 ## `monitor` is an entry of ScreenCapture.list_monitors() and `monitor_index` its
@@ -62,17 +66,24 @@ func place(placement: PanelLayout.Placement) -> void:
 	layer.global_transform = placement.transform
 
 
-## Call every frame. Brings the texture up to date and, while the session is
-## visible, redraws the layer once per new captured frame: an idle monitor costs
-## nothing. Drawing before the session is visible makes OpenXR acquire the
-## layer's swapchain image twice ("image_acquired" errors).
-func refresh(session_visible: bool, copy_frames: bool) -> void:
+## Call every frame. Brings the texture up to date and decides whether the layer
+## is redrawn. A panel whose picture changes is redrawn on every frame until it has
+## been still for ACTIVE_HOLD_SEC; then it stops and keeps showing the last picture,
+## so an idle monitor costs nothing. Redrawing only on frames that bring a new
+## picture made busy panels flicker: the capture (~60 Hz) and the headset (72 Hz)
+## do not line up, and on the frames in between the layer showed an older image.
+## Drawing before the session is visible makes OpenXR acquire the layer's
+## swapchain image twice ("image_acquired" errors).
+func refresh(session_visible: bool, copy_frames: bool, now: float) -> void:
 	if copy_frames:
 		capture.update()
 	var frame := capture.get_frame_count()
-	if session_visible and frame != _rendered_frame:
+	if frame != _rendered_frame:
 		_rendered_frame = frame
-		_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		_active_until = now + ACTIVE_HOLD_SEC
+	var mode := SubViewport.UPDATE_ALWAYS if session_visible and now < _active_until else SubViewport.UPDATE_DISABLED
+	if _viewport.render_target_update_mode != mode:
+		_viewport.render_target_update_mode = mode
 
 
 ## Distance along the ray to this panel, or -1.0 on a miss.

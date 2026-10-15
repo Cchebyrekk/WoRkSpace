@@ -505,8 +505,9 @@ func _update_panels(delta: float) -> void:
 			_pending_monitor_signature = signature
 
 	var copy_frames := not _diag.has("nocopy")
+	var now := Time.get_ticks_msec() / 1000.0
 	for panel in _panels:
-		panel.refresh(_session_visible, copy_frames)
+		panel.refresh(_session_visible, copy_frames, now)
 
 
 ## One live panel per Windows monitor, arranged like the monitors are in Windows.

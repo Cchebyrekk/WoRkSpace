@@ -185,7 +185,8 @@ func _test_panel_layout() -> void:
 	var rows: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(960, -1080, 1920, 1080)]
 	placed = PanelLayout.arrange(rows, 0, eye, distance, 60.0, 300.0)
 	_check(placed[1].elevation > 0.0 and placed[1].transform.origin.y > eye.y, "монитор выше в Windows — выше в VR")
-	_check(is_equal_approx(placed[1].heading, deg_to_rad(30.0)), "сдвиг на пол-экрана — сдвиг на половину угла")
+	_check(is_equal_approx(placed[1].heading - placed[0].heading, deg_to_rad(30.0)), "сдвиг на пол-экрана — сдвиг на половину угла")
+	_check(is_zero_approx(placed[0].elevation), "ряд основного монитора — на уровне глаз")
 	var lower_top := placed[0].transform.origin.y + placed[0].size.y * 0.5
 	var upper_bottom := (placed[1].transform * Vector3(0.0, -placed[1].size.y * 0.5, 0.0)).y
 	_check(absf(upper_bottom - lower_top) < 0.03, "ряды стыкуются по вертикали")
@@ -208,7 +209,14 @@ func _test_panel_layout() -> void:
 	_check(is_equal_approx(placed[0].heading, -placed[7].heading), "восемь в ряд: дуга симметрична")
 	_check(placed[0].size.x < 2.0 * distance * tan(deg_to_rad(30.0)), "восемь в ряд: панели стали меньше")
 
-	# A primary at the edge of a row that fits stays straight ahead.
+	# The group is centred, not the primary: three in a row with the primary on the
+	# left still put the middle one straight ahead (reported by the user on 15.10.2026).
+	var three: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080), Rect2i(3840, 0, 1920, 1080)]
+	placed = PanelLayout.arrange(three, 0, eye, distance, 60.0, 300.0)
+	_check(is_zero_approx(placed[1].heading), "три в ряд, основной слева: средний прямо перед глазами")
+	_check(is_equal_approx(placed[0].heading, deg_to_rad(-60.0)), "три в ряд: основной слева на 60 градусов")
+
+	# A centred group in a row that fits keeps the full scale.
 	var five: Array[Rect2i] = []
 	for i in 5:
 		five.append(Rect2i(i * 1920, 0, 1920, 1080))
