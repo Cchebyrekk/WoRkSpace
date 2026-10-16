@@ -415,6 +415,55 @@ func _test_hand_gestures() -> void:
 	_check(stick.scroll(Vector3(0.06, 1.3, -0.4), 1.0).x < 0.0, "инверсия горизонтали")
 	_check(stick.marker(Vector3(0.0, 1.6, -0.4)).distance_to(stick.origin) <= stick.full_offset + 0.0001, "отметка не выходит за круг")
 
+	# Extra gestures. Right hand held up with its back to a viewer at +Z: the palm faces away (-Z).
+	var normal := ExtraGestures.palm_normal(Vector3.ZERO, Vector3(-0.02, 0.09, 0.0), Vector3(0.04, 0.08, 0.0), 1.0)
+	_check(normal.z < -0.9, "нормаль ладони правой руки")
+	_check(ExtraGestures.palm_normal(Vector3.ZERO, Vector3(0.02, 0.09, 0.0), Vector3(-0.04, 0.08, 0.0), -1.0).z < -0.9, "нормаль ладони левой руки (зеркально)")
+
+	_check(ExtraGestures.Radial.item_at(Vector2(0.0, 0.05), 0.03, 8) == 0, "меню: вверх — первый пункт")
+	_check(ExtraGestures.Radial.item_at(Vector2(0.05, 0.0), 0.03, 8) == 2, "меню: вправо — третий пункт (по часовой)")
+	_check(ExtraGestures.Radial.item_at(Vector2(-0.04, 0.04), 0.03, 8) == 7, "меню: вверх-влево — последний пункт")
+	_check(ExtraGestures.Radial.item_at(Vector2(0.0, 0.01), 0.03, 8) == -1, "меню: у центра ничего не выбрано")
+	var menu := ExtraGestures.Radial.new()
+	menu.open(Vector3(0.0, 1.3, -0.4), Vector3(0.0, 1.6, 0.0))
+	_check(menu.selection(menu.item_position(5)) == 5, "меню: рука у пункта выбирает его")
+
+	var swipe := ExtraGestures.Swipe.new()
+	var fired := 0
+	for i in 8:
+		fired += swipe.update(i * 0.03, i * 0.03, true)
+	_check(fired == 1, "быстрое смахивание вправо срабатывает один раз")
+	fired = 0
+	for i in 8:
+		fired += swipe.update(1.0 + i * 0.03, 0.3 - i * 0.03, true)
+	_check(fired == -1, "смахивание влево")
+	fired = 0
+	for i in 40:
+		fired += swipe.update(3.0 + i * 0.03, i * 0.005, true)
+	_check(fired == 0, "медленное движение — не смахивание")
+	fired = 0
+	for i in 8:
+		fired += swipe.update(5.0 + i * 0.03, i * 0.03, false)
+	_check(fired == 0, "сжатая рука не смахивает")
+
+	var pause := ExtraGestures.Pause.new()
+	var toggles := 0
+	for i in 30:
+		if pause.update(i * 0.05, Vector3(-0.1, 1.2, -0.3), Vector3.RIGHT, Vector3(0.1, 1.2, -0.3), Vector3.LEFT):
+			toggles += 1
+	_check(toggles == 1, "ладони друг к другу — пауза переключается один раз")
+	_check(not pause.update(2.0, Vector3(-0.1, 1.2, -0.3), Vector3.FORWARD, Vector3(0.1, 1.2, -0.3), Vector3.FORWARD), "ладони не друг к другу — паузы нет")
+
+	var recording := PackedFloat32Array()
+	for touch in 5:
+		for i in 10:
+			recording.append(0.06 + 0.005 * sin(i))
+		for i in 8:
+			recording.append(0.009 + 0.002 * sin(i))
+	var thresholds := ExtraGestures.calibrate(recording)
+	_check(thresholds.x > 0.012 and thresholds.x < thresholds.y and thresholds.y < 0.055, "калибровка: пороги между касанием и раскрытием")
+	_check(ExtraGestures.calibrate(PackedFloat32Array([0.05, 0.05, 0.05])) == Vector2.ZERO, "калибровка: мало данных — отказ")
+
 	# The thumb coming in while the disc is up must not click.
 	gestures = HandGestures.new()
 	gestures.update(_disc_pose(0.0))
