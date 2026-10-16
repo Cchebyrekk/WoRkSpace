@@ -80,6 +80,9 @@ const EXIT_HOTKEY_VIRTUAL_KEY := 0x7B  # F12, together with Ctrl+Alt+Shift
 ## Controller stick: wheel units per second at full deflection, and the dead zone.
 const CONTROLLER_SCROLL_SPEED := 1200.0
 const CONTROLLER_STICK_DEADZONE := 0.2
+## Controller radial menu (held B/Y): the stick picks an item once deflected this far;
+## below that, moving the controller does, as with the hand.
+const CONTROLLER_MENU_STICK := 0.5
 ## The press is placed where the pointer was this long before the fingers touched
 ## (the recognition window comes on top, see _update_cursor).
 const CURSOR_LOOKBACK_SEC := 0.1
@@ -286,6 +289,9 @@ class Pointer:
 	var menu := ExtraGestures.Radial.new()
 	var menu_open := false
 	var menu_selected := -1
+	## Pointer mode that opened the menu: if the hand and the controller swap while
+	## it is open, it closes without running anything.
+	var menu_mode := ""
 	var swipe := ExtraGestures.Swipe.new()
 	## For the log and the rest decision: palm below the eyes (m) and ray angle to the horizon (rad).
 	var palm_drop := 0.0
@@ -1230,8 +1236,9 @@ func _update_pointer(index: int, delta: float) -> void:
 		if not pointer.menu_open and not is_nan(gesture.anchor_time) and gesture.button == HandGestures.Click.RIGHT and facing_user:
 			pointer.menu_open = true
 			pointer.menu.open(pointer.pinch_point, _camera.global_position)
+			pointer.menu_mode = "рука"
 			print("[gesture] %s: круговое меню" % SIDE_LABELS[index])
-		if pointer.menu_open:
+		if pointer.menu_open and pointer.menu_mode == pointer.mode:
 			if gesture.button == HandGestures.Click.RIGHT:
 				pointer.menu_selected = pointer.menu.selection(pointer.pinch_point)
 			else:
@@ -1271,9 +1278,36 @@ func _update_pointer(index: int, delta: float) -> void:
 		else:
 			pointer.button = HandGestures.Click.NONE
 		pointer.anchor_time = NAN
-		var stick := controller.get_vector2(&"primary").y
+		var stick_vector := controller.get_vector2(&"primary")
+		var stick := stick_vector.y
 		pointer.scrolling = absf(stick) > CONTROLLER_STICK_DEADZONE
 		pointer.scroll = stick * CONTROLLER_SCROLL_SPEED * delta if pointer.scrolling else 0.0
+
+		# Radial menu: hold B/Y, pick an item with the stick or by moving the
+		# controller, let go to run it.
+		var menu_held := controller.is_button_pressed(&"by_button")
+		if not pointer.menu_open and menu_held and not was_pressed:
+			pointer.menu_open = true
+			pointer.menu_mode = pointer.mode
+			pointer.menu.open(controller.global_position, _camera.global_position)
+			print("[gesture] %s: круговое меню (контроллер)" % SIDE_LABELS[index])
+		if pointer.menu_open and pointer.menu_mode == pointer.mode:
+			if menu_held:
+				if stick_vector.length() > CONTROLLER_MENU_STICK:
+					pointer.menu_selected = ExtraGestures.Radial.item_at(stick_vector, 0.0, ExtraGestures.Radial.ITEMS.size())
+				else:
+					pointer.menu_selected = pointer.menu.selection(controller.global_position)
+			else:
+				pointer.menu_open = false
+				if pointer.menu_selected >= 0:
+					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
+					MouseInput.press_keys(PackedInt32Array(item[1]))
+					print("[gesture] %s: меню — %s (контроллер)" % [SIDE_LABELS[index], item[0]])
+				pointer.menu_selected = -1
+			pointer.button = HandGestures.Click.NONE
+			pointer.pending = pointer.menu_open
+			pointer.scrolling = false
+			pointer.scroll = 0.0
 	else:
 		pointer.active = false
 		pointer.mode = "нет"
@@ -1281,6 +1315,10 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.pending = false
 		pointer.scrolling = false
 		pointer.scroll = 0.0
+	if pointer.menu_open and pointer.menu_mode != pointer.mode:
+		# Switched between hand and controller (or lost tracking): close without running.
+		pointer.menu_open = false
+		pointer.menu_selected = -1
 	pointer.pressed = pointer.button != HandGestures.Click.NONE
 	pointer.just_pressed = pointer.pressed and not was_pressed
 	if pointer.pressed != was_pressed:
