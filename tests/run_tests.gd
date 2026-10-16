@@ -399,6 +399,22 @@ func _test_hand_gestures() -> void:
 	var press := anchored.update(Vector2(95.0, 10.0), true, true, 0.4, false, 0.1)
 	_check(press.press and press.position == Vector2(10.0, 10.0), "нажатие ставится на момент начала жеста")
 
+	# Scroll stick: direction and speed from the offset to where the pose formed.
+	var stick := ScrollStick.new()
+	stick.start(Vector3(0.0, 1.3, -0.4), Vector3(0.0, 1.6, 0.0))
+	_check(stick.scroll(Vector3(0.0, 1.31, -0.4), 1.0) == Vector2.ZERO, "в мёртвой зоне прокрутки нет")
+	var up_wheel := stick.scroll(Vector3(0.0, 1.3 + stick.full_offset, -0.4), 0.5)
+	_check(up_wheel.x == 0.0 and is_equal_approx(up_wheel.y, stick.max_speed * 0.5), "рука вверх до упора — полная скорость вверх")
+	var half := stick.scroll(Vector3(0.0, 1.3 - (stick.dead_zone + stick.full_offset) * 0.5, -0.4), 1.0)
+	_check(is_equal_approx(half.y, -stick.max_speed * 0.5), "вниз наполовину — половина скорости вниз")
+	var sideways := stick.scroll(Vector3(0.05, 1.32, -0.4), 1.0)
+	_check(sideways.y == 0.0 and sideways.x > 0.0, "вправо сильнее, чем вверх — только вправо")
+	stick.invert_vertical = true
+	_check(stick.scroll(Vector3(0.0, 1.38, -0.4), 1.0).y < 0.0, "инверсия вертикали")
+	stick.invert_horizontal = true
+	_check(stick.scroll(Vector3(0.06, 1.3, -0.4), 1.0).x < 0.0, "инверсия горизонтали")
+	_check(stick.marker(Vector3(0.0, 1.6, -0.4)).distance_to(stick.origin) <= stick.full_offset + 0.0001, "отметка не выходит за круг")
+
 	# The thumb coming in while the disc is up must not click.
 	gestures = HandGestures.new()
 	gestures.update(_disc_pose(0.0))
