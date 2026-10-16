@@ -95,7 +95,11 @@ const TUNABLES := [
 	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
 	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
-	["gestures", "disc_dwell", "Диск: задержка", 1000.0, "мс", 0.05, 0.0, 0.6],
+	["gestures", "scroll_mode", "Прокрутка: способ", 1.0, "", 1.0, 0.0, 1.0],
+	["gestures", "stick_speed", "Направление: скорость", 1.0 / 120.0, "щелч/с", 120.0, 120.0, 9600.0],
+	["gestures", "invert_vertical", "Направление: инверсия вверх-вниз", 1.0, "", 1.0, 0.0, 1.0],
+	["gestures", "invert_horizontal", "Направление: инверсия влево-вправо", 1.0, "", 1.0, 0.0, 1.0],
+	["gestures", "disc_dwell", "Прокрутка: задержка позы", 1000.0, "мс", 0.05, 0.0, 0.6],
 	["gestures", "disc_radius", "Диск: радиус", 1000.0, "мм", 0.01, 0.03, 0.15],
 	["gestures", "disc_turn_units", "Диск: щелчков за оборот", 1.0 / 120.0, "", 120.0, 120.0, 4800.0],
 	["gestures", "disc_align", "Диск: пальцы по линии кисти", 100.0, "%", 0.05, 0.3, 1.0],
@@ -243,6 +247,12 @@ class Pointer:
 	## Wheel units produced this frame; positive scrolls up.
 	var scroll := 0.0
 	var disc := ScrollDisc.new()
+	var stick := ScrollStick.new()
+	## The scroll pose uses the stick (not the disc) this time.
+	var using_stick := false
+	var fingertips := Vector3.ZERO
+	## Horizontal wheel units produced this frame; positive scrolls right.
+	var hscroll := 0.0
 	var disc_shown := false
 	var engagement := HandEngagement.new()
 	## For the log and the rest decision: palm below the eyes (m) and ray angle to the horizon (rad).
@@ -288,6 +298,7 @@ var _cursor_filter := CursorFilter.new()
 var _cursor_button := HandGestures.Click.NONE
 ## Fractions of a wheel unit carried over between frames.
 var _scroll_remainder := 0.0
+var _hscroll_remainder := 0.0
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
@@ -580,14 +591,20 @@ func _update_cursor() -> void:
 		if pointer.scrolling:
 			any_scrolling = true
 			_scroll_remainder += pointer.scroll
+			_hscroll_remainder += pointer.hscroll
 	if any_scrolling:
 		var whole := int(_scroll_remainder)
 		if whole != 0:
 			MouseInput.scroll(whole)
 			_scroll_remainder -= whole
 			_scroll_logged += whole
+		var sideways := int(_hscroll_remainder)
+		if sideways != 0:
+			MouseInput.scroll_horizontal(sideways)
+			_hscroll_remainder -= sideways
 	else:
 		_scroll_remainder = 0.0
+		_hscroll_remainder = 0.0
 
 
 func _release_cursor_button() -> void:
@@ -1009,13 +1026,27 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.scrolling = gesture.disc_pending or gesture.disc
 		pointer.scroll = 0.0
 		var fingertips := to_world * ((index_tip + middle_tip) * 0.5)
+		pointer.fingertips = fingertips
+		pointer.hscroll = 0.0
 		if gesture.disc_started:
-			pointer.disc.radius = _gesture_settings.disc_radius
-			pointer.disc.turn_units = _gesture_settings.disc_turn_units
-			pointer.disc.start(fingertips, _camera.global_position)
-			print("[gesture] %s: диск прокрутки" % SIDE_LABELS[index])
+			pointer.using_stick = _gesture_settings.scroll_mode == 0
+			if pointer.using_stick:
+				pointer.stick.max_speed = _gesture_settings.stick_speed
+				pointer.stick.invert_vertical = _gesture_settings.invert_vertical != 0
+				pointer.stick.invert_horizontal = _gesture_settings.invert_horizontal != 0
+				pointer.stick.start(fingertips, _camera.global_position)
+			else:
+				pointer.disc.radius = _gesture_settings.disc_radius
+				pointer.disc.turn_units = _gesture_settings.disc_turn_units
+				pointer.disc.start(fingertips, _camera.global_position)
+			print("[gesture] %s: прокрутка (%s)" % [SIDE_LABELS[index], "направление" if pointer.using_stick else "диск"])
 		if gesture.disc:
-			pointer.scroll = pointer.disc.turn(fingertips)
+			if pointer.using_stick:
+				var wheel := pointer.stick.scroll(fingertips, delta)
+				pointer.scroll = wheel.y
+				pointer.hscroll = wheel.x
+			else:
+				pointer.scroll = pointer.disc.turn(fingertips)
 		pointer.disc_shown = gesture.disc
 		pointer.disc_pose_started = pointer.scrolling and not was_scrolling
 		if resting:
@@ -1084,11 +1115,17 @@ func _update_rays() -> void:
 		if not pointer.disc_shown:
 			continue
 		var torus := _disc_rings[i].mesh as TorusMesh
-		if not is_equal_approx(torus.outer_radius, pointer.disc.radius + 0.003):
-			torus.inner_radius = pointer.disc.radius - 0.003
-			torus.outer_radius = pointer.disc.radius + 0.003
-		_disc_rings[i].global_transform = Transform3D(pointer.disc.basis(), pointer.disc.center)
-		_disc_markers[i].global_position = pointer.disc.marker()
+		# The stick's ring marks full speed; the disc's ring is the track to follow.
+		var radius := pointer.stick.full_offset if pointer.using_stick else pointer.disc.radius
+		if not is_equal_approx(torus.outer_radius, radius + 0.003):
+			torus.inner_radius = radius - 0.003
+			torus.outer_radius = radius + 0.003
+		if pointer.using_stick:
+			_disc_rings[i].global_transform = Transform3D(pointer.stick.basis(), pointer.stick.origin)
+			_disc_markers[i].global_position = pointer.stick.marker(pointer.fingertips)
+		else:
+			_disc_rings[i].global_transform = Transform3D(pointer.disc.basis(), pointer.disc.center)
+			_disc_markers[i].global_position = pointer.disc.marker()
 
 	for i in 2:
 		var pointer := _pointers[i]
@@ -1369,6 +1406,10 @@ func _refresh_settings_panel() -> void:
 		var value := float(_tunable_target(tunable[0]).get(tunable[1]))
 		if tunable[1] == "disc_ring_curl" and value <= 0.0:
 			_settings_values[i].text = "не нужно"
+		elif tunable[1] == "scroll_mode":
+			_settings_values[i].text = "диск" if value >= 0.5 else "направление"
+		elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
+			_settings_values[i].text = "да" if value >= 0.5 else "нет"
 		else:
 			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
 

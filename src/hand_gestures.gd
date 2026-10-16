@@ -52,6 +52,14 @@ class Settings:
 	## (120 = one notch) per full turn.
 	var disc_radius := 0.06
 	var disc_turn_units := 960.0
+	## What the scroll pose does: 0 = scroll in the direction the hand moves from
+	## where the pose formed (ScrollStick), 1 = turn the disc (ScrollDisc).
+	var scroll_mode := 0
+	## ScrollStick: 1 = inverted.
+	var invert_vertical := 0
+	var invert_horizontal := 0
+	## ScrollStick: wheel units per second at full offset (120 = one notch).
+	var stick_speed := 2400.0
 
 
 ## One frame of hand data. Distances in metres; `*_align` are cosines between the
