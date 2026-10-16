@@ -20,6 +20,7 @@ VR-приложение для работы с ПК на Windows: монитор
 - Сборка нативного модуля (из `native/`): `py -3.12 -m SCons platform=windows target=template_debug disable_exceptions=no -j8`. Результат — `bin/workplace_native.windows.template_debug.x86_64.dll`, в git не хранится. `disable_exceptions=no` обязателен (C++/WinRT).
 - godot-cpp в git не хранится: `git clone --depth 1 --branch master https://github.com/godotengine/godot-cpp native/godot-cpp` (собрано на коммите `b8530af`, API 4.7 выбирается в `native/SConstruct`).
 - Бэкап среза (a): git-тег `slice-a` и замороженная копия сцены — `& "<godot>" --path . res://scenes/baseline/hands_scene.tscn` (руки, лучи, кнопки, без нативного модуля). `src/baseline/hands_scene.gd` не править: это эталон для сравнения.
+- Бэкап среза (e): git-тег `slice-e` и полная замороженная копия — `& "<godot>" --path . res://scenes/baseline/slice_e.tscn`. Скрипты в `src/baseline/slice_e/` — копии всех `src/*.gd` с классами под суффиксом `E` (`HandGesturesE`, `PanelLayoutE`…), поэтому правка основных классов копию не ломает. Общие с основной версией: нативный модуль, `tools/*.ps1` (менять только с обратной совместимостью), `user://settings.cfg`. Самоперезапуск после потери Link запускает основную сцену, а не копию. Не править.
 
 ## Журналы для отладки
 
