@@ -43,6 +43,10 @@ public:
 void mouse_move(int32_t x, int32_t y);
 void mouse_button(int32_t button, bool down); // 0 left, 1 right, 2 middle
 void mouse_wheel(int32_t delta); // 120 is one notch, positive scrolls up
+void mouse_hwheel(int32_t delta); // 120 is one notch, positive scrolls right
+// Presses the Windows virtual keys in order, then releases them in reverse (a shortcut such as Ctrl+Shift+Z).
+void press_keys(const std::vector<uint16_t> &virtual_keys);
+void key_event(uint16_t virtual_key, bool down);
 
 // System-wide hotkey that fires even when the Godot window is not focused.
 class HotkeyBackend {

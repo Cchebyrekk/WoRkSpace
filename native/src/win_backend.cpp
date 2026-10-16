@@ -250,6 +250,51 @@ void mouse_wheel(int32_t delta) {
 	SendInput(1, &input, sizeof(INPUT));
 }
 
+void mouse_hwheel(int32_t delta) {
+	INPUT input{};
+	input.type = INPUT_MOUSE;
+	input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+	input.mi.mouseData = static_cast<DWORD>(delta);
+	SendInput(1, &input, sizeof(INPUT));
+}
+
+static INPUT key_input(uint16_t virtual_key, bool down) {
+	INPUT input{};
+	input.type = INPUT_KEYBOARD;
+	input.ki.wVk = virtual_key;
+	input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC));
+	input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+	// Arrows, navigation keys and the Windows keys live on the extended part of the keyboard.
+	switch (virtual_key) {
+		case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
+		case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
+		case VK_INSERT: case VK_DELETE: case VK_LWIN: case VK_RWIN: case VK_APPS:
+			input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+			break;
+		default:
+			break;
+	}
+	return input;
+}
+
+void key_event(uint16_t virtual_key, bool down) {
+	INPUT input = key_input(virtual_key, down);
+	SendInput(1, &input, sizeof(INPUT));
+}
+
+void press_keys(const std::vector<uint16_t> &virtual_keys) {
+	std::vector<INPUT> inputs;
+	for (uint16_t key : virtual_keys) {
+		inputs.push_back(key_input(key, true));
+	}
+	for (auto key = virtual_keys.rbegin(); key != virtual_keys.rend(); ++key) {
+		inputs.push_back(key_input(*key, false));
+	}
+	if (!inputs.empty()) {
+		SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+	}
+}
+
 class Win32Hotkey : public HotkeyBackend {
 	std::thread thread;
 	std::atomic<DWORD> thread_id{ 0 };

@@ -170,6 +170,9 @@ void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("move_to", "position"), &MouseInput::move_to);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("set_button", "button", "pressed"), &MouseInput::set_button);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll", "delta"), &MouseInput::scroll);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll_horizontal", "delta"), &MouseInput::scroll_horizontal);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("press_keys", "virtual_keys"), &MouseInput::press_keys);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("set_key", "virtual_key", "pressed"), &MouseInput::set_key);
 
 	BIND_ENUM_CONSTANT(BUTTON_LEFT);
 	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
@@ -186,6 +189,22 @@ void MouseInput::set_button(Button p_button, bool p_pressed) {
 
 void MouseInput::scroll(int p_delta) {
 	workplace::mouse_wheel(p_delta);
+}
+
+void MouseInput::scroll_horizontal(int p_delta) {
+	workplace::mouse_hwheel(p_delta);
+}
+
+void MouseInput::press_keys(const PackedInt32Array &p_virtual_keys) {
+	std::vector<uint16_t> keys;
+	for (int64_t i = 0; i < p_virtual_keys.size(); i++) {
+		keys.push_back(static_cast<uint16_t>(p_virtual_keys[i]));
+	}
+	workplace::press_keys(keys);
+}
+
+void MouseInput::set_key(int p_virtual_key, bool p_pressed) {
+	workplace::key_event(static_cast<uint16_t>(p_virtual_key), p_pressed);
 }
 
 void GlobalHotkey::_bind_methods() {

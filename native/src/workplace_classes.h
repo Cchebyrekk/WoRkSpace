@@ -69,6 +69,11 @@ public:
 	static void set_button(Button p_button, bool p_pressed);
 	// 120 is one wheel notch; positive scrolls up.
 	static void scroll(int p_delta);
+	// 120 is one notch; positive scrolls right.
+	static void scroll_horizontal(int p_delta);
+	// Windows virtual-key codes pressed in order and released in reverse, e.g. [0x11, 0x5A] for Ctrl+Z.
+	static void press_keys(const PackedInt32Array &p_virtual_keys);
+	static void set_key(int p_virtual_key, bool p_pressed);
 };
 
 // System-wide keyboard shortcut that works while another window has focus.
