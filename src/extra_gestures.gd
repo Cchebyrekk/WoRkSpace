@@ -30,7 +30,7 @@ class Radial:
 	var centre := Vector3.ZERO
 	var right := Vector3.RIGHT
 	var up := Vector3.UP
-	var radius := 0.1
+	var radius := 0.13
 	## Closer to the centre than this nothing is selected.
 	var dead_zone := 0.03
 
@@ -116,6 +116,33 @@ class Pause:
 	func reset() -> void:
 		_since = NAN
 		_fired = false
+
+
+## Thresholds of the scroll pose from frames recorded while the user holds it
+## (and moves the hand around). Each sample: [index_straightness,
+## middle_straightness, index_align, middle_align, index_middle, thumb_spread,
+## ring_to_palm]. Returns HandGestures.Settings property names with values, or
+## an empty dictionary if the recording is too short. Each threshold sits a margin
+## outside what nearly all recorded frames showed, so the pose holds while used.
+static func calibrate_pose(samples: Array[PackedFloat32Array]) -> Dictionary:
+	if samples.size() < 30:
+		return {}
+	var columns: Array[PackedFloat32Array] = []
+	for feature in 7:
+		var column := PackedFloat32Array()
+		for sample in samples:
+			column.append(sample[feature])
+		column.sort()
+		columns.append(column)
+	var low := func(feature: int) -> float: return columns[feature][int(columns[feature].size() * 0.1)]
+	var high := func(feature: int) -> float: return columns[feature][int(columns[feature].size() * 0.9)]
+	return {
+		"disc_straightness": clampf(minf(low.call(0), low.call(1)) - 0.05, 0.5, 0.95),
+		"disc_align": clampf(minf(low.call(2), low.call(3)) - 0.05, 0.3, 0.98),
+		"disc_together": clampf(high.call(4) + 0.005, 0.01, 0.06),
+		"disc_thumb_spread": clampf(low.call(5) - 0.01, 0.02, 0.12),
+		"disc_ring_curl": clampf(high.call(6) + 0.01, 0.03, 0.15),
+	}
 
 
 ## Thresholds from a recording of one contact (e.g. thumb to index tip, metres)

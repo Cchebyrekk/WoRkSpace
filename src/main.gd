@@ -95,6 +95,10 @@ const SWIPE_KEYS := [
 ]
 const VK_CONTROL := 0x11
 const CALIBRATION_SEC := 8.0
+const POSE_CALIBRATION_SEC := 6.0
+## _calibrating value for recording the scroll pose rather than a contact.
+const CALIBRATE_POSE := 3
+const MENU_BACKGROUND_COLOR := Color(0.05, 0.06, 0.09, 0.75)
 
 ## Tunables on the settings panel: [section, property, label, display scale, unit, step, min, max].
 ## Values are stored in SI units (metres, seconds); the scale converts them for display.
@@ -104,6 +108,9 @@ const TUNABLES := [
 	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
 	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
+	["pause", "max_gap", "Пауза: ладони ближе чем", 100.0, "см", 0.05, 0.1, 0.8],
+	["pause", "hold_sec", "Пауза: удерживать", 1000.0, "мс", 0.1, 0.2, 2.0],
+	["pause", "facing", "Пауза: ладони друг к другу", 100.0, "%", 0.05, 0.3, 0.95],
 	["gestures", "swipe_mode", "Смахивание", 1.0, "", 1.0, 0.0, 1.0],
 	["gestures", "swipe_distance", "Смахивание: путь руки", 100.0, "см", 0.02, 0.08, 0.4],
 	["gestures", "zoom_speed", "Масштаб: скорость", 1.0 / 120.0, "щелч/м", 120.0, 120.0, 6000.0],
@@ -274,6 +281,8 @@ class Pointer:
 	var pinch_point := Vector3.ZERO
 	## Thumb to index tip, to middle tip, to the side of the index (metres).
 	var contact_distances := Vector3.ONE
+	## The scroll pose's measurements, for calibrating it (see ExtraGestures.calibrate_pose).
+	var pose_features := PackedFloat32Array()
 	var menu := ExtraGestures.Radial.new()
 	var menu_open := false
 	var menu_selected := -1
@@ -332,6 +341,9 @@ var _zoom_remainder := 0.0
 var _calibrating := -1
 var _calibration_end := 0.0
 var _calibration_samples := PackedFloat32Array()
+var _pose_samples: Array[PackedFloat32Array] = []
+## Per hand: the radial menu's dark background disc.
+var _menu_backgrounds: Array[MeshInstance3D] = []
 var _calibration_status: Label3D
 ## Per hand: the radial menu's labels.
 var _menu_labels: Array = [[], []]
@@ -466,7 +478,7 @@ func _process(delta: float) -> void:
 	_update_rays()
 
 	if _hands_paused:
-		lines.append("РУКИ НА ПАУЗЕ — ладони друг к другу, чтобы продолжить")
+		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	_status.text = "\n".join(lines)
 
@@ -694,8 +706,9 @@ func _update_two_hand_gestures() -> void:
 ## opens repeatedly, then derives the thresholds from it.
 func _start_calibration(contact: int) -> void:
 	_calibrating = contact
-	_calibration_end = Time.get_ticks_msec() / 1000.0 + CALIBRATION_SEC
+	_calibration_end = Time.get_ticks_msec() / 1000.0 + (POSE_CALIBRATION_SEC if contact == CALIBRATE_POSE else CALIBRATION_SEC)
 	_calibration_samples = PackedFloat32Array()
+	_pose_samples.clear()
 	print("[calibration] запись: %s" % ("щипок" if contact == 0 else "касание бока"))
 
 
@@ -705,6 +718,26 @@ func _update_calibration() -> void:
 	var now := Time.get_ticks_msec() / 1000.0
 	# The right hand if it is tracked, otherwise the left.
 	var source: Pointer = _pointers[1] if _pointers[1].tracked_hand else _pointers[0]
+	if _calibrating == CALIBRATE_POSE:
+		if source.tracked_hand:
+			_pose_samples.append(source.pose_features)
+		if now < _calibration_end:
+			_calibration_status.text = "Запись: держите позу прокрутки и водите рукой\nосталось %d с" % ceili(_calibration_end - now)
+			return
+		var pose := ExtraGestures.calibrate_pose(_pose_samples)
+		if pose.is_empty():
+			_calibration_status.text = "Не получилось: рука почти не отслеживалась.\nПовторите."
+		else:
+			for property: String in pose:
+				_gesture_settings.set(property, pose[property])
+			_calibration_status.text = "Поза прокрутки настроена:\nвместе < %d мм, безымянный < %d мм, по линии ≥ %d%%" % [
+					roundi(pose["disc_together"] * 1000.0), roundi(pose["disc_ring_curl"] * 1000.0), roundi(pose["disc_align"] * 100.0)]
+		print("[calibration] %s (%d кадров)" % [_calibration_status.text.replace("\n", " "), _pose_samples.size()])
+		_calibrating = -1
+		_save_settings()
+		_refresh_settings_panel()
+		return
+
 	if source.tracked_hand:
 		_calibration_samples.append(source.contact_distances[_calibrating])
 	var what := "щипок большой + указательный" if _calibrating == 0 else "касание большим бока указательного"
@@ -1138,6 +1171,8 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.palm_normal = (to_world.basis * ExtraGestures.palm_normal(wrist, index_knuckle, little_knuckle, SIDE_SIGNS[index])).normalized()
 		pointer.pinch_point = to_world * thumb_tip
 		pointer.contact_distances = Vector3(frame.thumb_index, frame.thumb_middle, frame.thumb_side)
+		pointer.pose_features = PackedFloat32Array([frame.index_straightness, frame.middle_straightness,
+				frame.index_align, frame.middle_align, frame.index_middle, frame.thumb_spread, frame.ring_to_palm])
 		var ring_straightness := HandGestures.straightness(
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_PROXIMAL).origin,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_INTERMEDIATE).origin,
@@ -1213,7 +1248,9 @@ func _update_pointer(index: int, delta: float) -> void:
 		var head_right := Vector3(_camera.global_basis.x.x, 0.0, _camera.global_basis.x.z).normalized()
 		pointer.swipe.distance = _gesture_settings.swipe_distance
 		var swipe := pointer.swipe.update(frame.time, palm.dot(head_right),
-				open_hand and not resting and not pointer.scrolling and not pointer.menu_open)
+				# Only while the hand's ray is on a screen (last frame): turning round with
+				# an open hand swings it sideways too, but points it away from the screens.
+				open_hand and not resting and not pointer.scrolling and not pointer.menu_open and pointer.on_panel)
 		if swipe != 0:
 			var keys := SWIPE_KEYS[_gesture_settings.swipe_mode][0 if swipe < 0 else 1] as Array
 			MouseInput.press_keys(PackedInt32Array(keys))
@@ -1221,7 +1258,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		if resting:
 			pointer.active = false
 			pointer.mode = "покой"
-	elif controller.get_has_tracking_data():
+	elif controller.get_has_tracking_data() and not _hands_paused:
 		pointer.active = true
 		pointer.mode = "контроллер"
 		pointer.origin = controller.global_position
@@ -1279,6 +1316,12 @@ func _update_rays() -> void:
 	# The radial menu: the selected item is bright and larger.
 	for i in 2:
 		var pointer := _pointers[i]
+		_menu_backgrounds[i].visible = pointer.menu_open
+		if pointer.menu_open:
+			var toward_viewer := pointer.menu.right.cross(pointer.menu.up)
+			# The cylinder's axis (local Y) faces the user; set a little behind the labels.
+			_menu_backgrounds[i].global_transform = Transform3D(Basis(pointer.menu.right, toward_viewer, -pointer.menu.up),
+					pointer.menu.centre - toward_viewer * 0.01)
 		for item in ExtraGestures.Radial.ITEMS.size():
 			var label: Label3D = _menu_labels[i][item]
 			label.visible = pointer.menu_open
@@ -1286,7 +1329,7 @@ func _update_rays() -> void:
 				label.global_position = pointer.menu.item_position(item)
 				var selected := item == pointer.menu_selected
 				label.modulate = Color(1.0, 0.85, 0.3) if selected else Color(0.85, 0.9, 1.0)
-				label.font_size = 44 if selected else 32
+				label.font_size = 34 if selected else 26
 
 	# The scroll disc and the marker of where the fingertips are on it.
 	for i in 2:
@@ -1428,13 +1471,27 @@ func _build_rig() -> void:
 		for item: Array in ExtraGestures.Radial.ITEMS:
 			var label := Label3D.new()
 			label.text = item[0]
-			label.pixel_size = 0.0008
-			label.font_size = 36
-			label.outline_size = 10
+			label.pixel_size = 0.0007
+			label.font_size = 28
+			label.outline_size = 8
 			label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 			label.visible = false
 			add_child(label)
 			_menu_labels[i].append(label)
+		# A dark disc behind the menu, so the items read against the screens.
+		var background_mesh := CylinderMesh.new()
+		background_mesh.top_radius = 0.18
+		background_mesh.bottom_radius = 0.18
+		background_mesh.height = 0.002
+		background_mesh.radial_segments = 48
+		var background_material := _flat_material(MENU_BACKGROUND_COLOR)
+		background_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var background := MeshInstance3D.new()
+		background.mesh = background_mesh
+		background.material_override = background_material
+		background.visible = false
+		add_child(background)
+		_menu_backgrounds.append(background)
 
 		# Joint transforms are relative to the origin, so the spheres live under it.
 		var multimesh := MultiMesh.new()
@@ -1545,7 +1602,9 @@ func _build_settings_panel() -> void:
 			Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
 	_add_button_to(_settings_root, "Настроить бок (СКМ)", Vector3(0.6, bottom, 0.0),
 			Vector2(0.34, 0.08), 0.6).activated.connect(_start_calibration.bind(2))
-	_calibration_status = _settings_label("Настройка: нажмите кнопку и повторяйте жест 5–8 раз", Vector3(0.25, bottom - 0.09, 0.0), 26)
+	_add_button_to(_settings_root, "Настроить прокрутку", Vector3(0.95, bottom, 0.0),
+			Vector2(0.32, 0.08), 0.6).activated.connect(_start_calibration.bind(CALIBRATE_POSE))
+	_calibration_status = _settings_label("Настройка: нажмите кнопку и повторяйте жест 5–8 раз", Vector3(0.35, bottom - 0.09, 0.0), 26)
 
 	_add_button("Настройки", Vector3(0.77, 0.52, -1.2), 0.4).activated.connect(_on_settings_toggle)
 
@@ -1571,6 +1630,8 @@ func _tunable_target(section: String) -> Object:
 			return _gesture_settings
 		"engagement":
 			return _engagement_settings
+		"pause":
+			return _pause
 	return _cursor_filter
 
 
@@ -1595,7 +1656,8 @@ func _on_tunable_button(index: int, direction: float) -> void:
 
 
 func _on_tunables_default() -> void:
-	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new()}
+	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new(),
+			"pause": ExtraGestures.Pause.new()}
 	for tunable: Array in TUNABLES:
 		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
 	_save_settings()

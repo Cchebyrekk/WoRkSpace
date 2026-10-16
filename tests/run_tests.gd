@@ -464,6 +464,18 @@ func _test_hand_gestures() -> void:
 	_check(thresholds.x > 0.012 and thresholds.x < thresholds.y and thresholds.y < 0.055, "калибровка: пороги между касанием и раскрытием")
 	_check(ExtraGestures.calibrate(PackedFloat32Array([0.05, 0.05, 0.05])) == Vector2.ZERO, "калибровка: мало данных — отказ")
 
+	# Pose calibration: thresholds a margin outside what the recorded pose showed.
+	var pose_samples: Array[PackedFloat32Array] = []
+	for i in 60:
+		var wobble := 0.01 * sin(i * 0.5)
+		pose_samples.append(PackedFloat32Array([0.9 + wobble, 0.88 + wobble, 0.85 + wobble, 0.86 + wobble,
+				0.018 + wobble * 0.3, 0.07 + wobble, 0.05 + wobble]))
+	var pose := ExtraGestures.calibrate_pose(pose_samples)
+	_check(pose["disc_straightness"] < 0.88 and pose["disc_straightness"] > 0.75, "калибровка позы: прямота пальцев с запасом")
+	_check(pose["disc_together"] > 0.018 and pose["disc_together"] < 0.03, "калибровка позы: «вместе» с запасом")
+	_check(pose["disc_ring_curl"] > 0.05 and pose["disc_thumb_spread"] < 0.07, "калибровка позы: безымянный и большой с запасом")
+	_check(ExtraGestures.calibrate_pose([] as Array[PackedFloat32Array]).is_empty(), "калибровка позы: нет данных — отказ")
+
 	# The thumb coming in while the disc is up must not click.
 	gestures = HandGestures.new()
 	gestures.update(_disc_pose(0.0))
