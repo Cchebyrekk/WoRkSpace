@@ -108,7 +108,7 @@ const TUNABLES := [
 	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
 	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
-	["pause", "max_gap", "Пауза: ладони ближе чем", 100.0, "см", 0.05, 0.1, 0.8],
+	["pause", "max_gap", "Пауза: ладони ближе чем", 100.0, "см", 0.02, 0.02, 0.8],
 	["pause", "hold_sec", "Пауза: удерживать", 1000.0, "мс", 0.1, 0.2, 2.0],
 	["pause", "facing", "Пауза: ладони друг к другу", 100.0, "%", 0.05, 0.3, 0.95],
 	["gestures", "swipe_mode", "Смахивание", 1.0, "", 1.0, 0.0, 1.0],
@@ -1319,9 +1319,10 @@ func _update_rays() -> void:
 		_menu_backgrounds[i].visible = pointer.menu_open
 		if pointer.menu_open:
 			var toward_viewer := pointer.menu.right.cross(pointer.menu.up)
-			# The cylinder's axis (local Y) faces the user; set a little behind the labels.
+			# The cylinder's axis (local Y) faces the user; set a few centimetres behind the
+			# labels so that they float clearly in front of it.
 			_menu_backgrounds[i].global_transform = Transform3D(Basis(pointer.menu.right, toward_viewer, -pointer.menu.up),
-					pointer.menu.centre - toward_viewer * 0.01)
+					pointer.menu.centre - toward_viewer * 0.035)
 		for item in ExtraGestures.Radial.ITEMS.size():
 			var label: Label3D = _menu_labels[i][item]
 			label.visible = pointer.menu_open
