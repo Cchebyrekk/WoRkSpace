@@ -60,6 +60,12 @@ class Settings:
 	var invert_horizontal := 0
 	## ScrollStick: wheel units per second at full offset (120 = one notch).
 	var stick_speed := 2400.0
+	## Open-hand swipe: 0 = back / forward (Alt+Left / Alt+Right), 1 = undo / redo (Ctrl+Z / Ctrl+Shift+Z).
+	var swipe_mode := 0
+	## How far the open hand has to travel sideways within 0.3 s.
+	var swipe_distance := 0.18
+	## Two-hand zoom: wheel units (with Ctrl) per metre the hands move apart.
+	var zoom_speed := 1200.0
 
 
 ## One frame of hand data. Distances in metres; `*_align` are cosines between the

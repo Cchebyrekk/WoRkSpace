@@ -86,6 +86,15 @@ const CURSOR_LOOKBACK_SEC := 0.1
 const CLICK_LABELS := {-1: "—", 0: "ЛКМ", 1: "ПКМ", 2: "СКМ"}
 ## When the disc pose forms, the cursor goes back to where it was this long before.
 const DISC_RECALL_SEC := 0.3
+## Cosine between the palm normal and the direction to the head for "palm turned to the user".
+const MENU_PALM_FACING := 0.6
+## Swipe shortcuts per swipe_mode: [left, right], as Windows virtual-key codes.
+const SWIPE_KEYS := [
+	[[0x12, 0x25], [0x12, 0x27]],  # Alt+Left / Alt+Right: back / forward
+	[[0x11, 0x5A], [0x11, 0x10, 0x5A]],  # Ctrl+Z / Ctrl+Shift+Z: undo / redo
+]
+const VK_CONTROL := 0x11
+const CALIBRATION_SEC := 8.0
 
 ## Tunables on the settings panel: [section, property, label, display scale, unit, step, min, max].
 ## Values are stored in SI units (metres, seconds); the scale converts them for display.
@@ -95,6 +104,9 @@ const TUNABLES := [
 	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
 	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
+	["gestures", "swipe_mode", "Смахивание", 1.0, "", 1.0, 0.0, 1.0],
+	["gestures", "swipe_distance", "Смахивание: путь руки", 100.0, "см", 0.02, 0.08, 0.4],
+	["gestures", "zoom_speed", "Масштаб: скорость", 1.0 / 120.0, "щелч/м", 120.0, 120.0, 6000.0],
 	["gestures", "scroll_mode", "Прокрутка: способ", 1.0, "", 1.0, 0.0, 1.0],
 	["gestures", "stick_speed", "Направление: скорость", 1.0 / 120.0, "щелч/с", 120.0, 120.0, 9600.0],
 	["gestures", "invert_vertical", "Направление: инверсия вверх-вниз", 1.0, "", 1.0, 0.0, 1.0],
@@ -255,6 +267,17 @@ class Pointer:
 	var hscroll := 0.0
 	var disc_shown := false
 	var engagement := HandEngagement.new()
+	## Hand data for the two-hand gestures, the menu and calibration (world space).
+	var tracked_hand := false
+	var palm_world := Vector3.ZERO
+	var palm_normal := Vector3.ZERO
+	var pinch_point := Vector3.ZERO
+	## Thumb to index tip, to middle tip, to the side of the index (metres).
+	var contact_distances := Vector3.ONE
+	var menu := ExtraGestures.Radial.new()
+	var menu_open := false
+	var menu_selected := -1
+	var swipe := ExtraGestures.Swipe.new()
 	## For the log and the rest decision: palm below the eyes (m) and ray angle to the horizon (rad).
 	var palm_drop := 0.0
 	var ray_elevation := 0.0
@@ -299,6 +322,19 @@ var _cursor_button := HandGestures.Click.NONE
 ## Fractions of a wheel unit carried over between frames.
 var _scroll_remainder := 0.0
 var _hscroll_remainder := 0.0
+## Two-hand gestures: pause toggle and Ctrl+wheel zoom.
+var _pause := ExtraGestures.Pause.new()
+var _hands_paused := false
+var _zoom_active := false
+var _zoom_last_gap := 0.0
+var _zoom_remainder := 0.0
+## Calibration: which contact is being recorded (0 = thumb-index tip, 2 = side), or -1.
+var _calibrating := -1
+var _calibration_end := 0.0
+var _calibration_samples := PackedFloat32Array()
+var _calibration_status: Label3D
+## Per hand: the radial menu's labels.
+var _menu_labels: Array = [[], []]
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
@@ -423,10 +459,14 @@ func _process(delta: float) -> void:
 			lines[-1] += " | щипок %.0f мм, луч %s, ниже глаз %.0f см, луч %+.0f°" % [pointer.pinch_mm,
 					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)]
 
+	_update_two_hand_gestures()
+	_update_calibration()
 	_update_buttons(delta)
 	_update_cursor()
 	_update_rays()
 
+	if _hands_paused:
+		lines.append("РУКИ НА ПАУЗЕ — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	_status.text = "\n".join(lines)
 
@@ -462,8 +502,10 @@ func _on_session_begun(openxr: OpenXRInterface) -> void:
 
 
 func _exit_tree() -> void:
-	# Never leave Windows with a mouse button stuck down.
+	# Never leave Windows with a mouse button or Ctrl stuck down.
 	_release_cursor_button()
+	if _zoom_active:
+		MouseInput.set_key(VK_CONTROL, false)
 	for panel in _panels:
 		panel.capture.stop()
 
@@ -605,6 +647,85 @@ func _update_cursor() -> void:
 	else:
 		_scroll_remainder = 0.0
 		_hscroll_remainder = 0.0
+
+
+## Pause (palms facing each other) and zoom (both hands holding a left pinch).
+func _update_two_hand_gestures() -> void:
+	var left := _pointers[0]
+	var right := _pointers[1]
+	var now := Time.get_ticks_usec() / 1000000.0
+	if left.tracked_hand and right.tracked_hand:
+		if _pause.update(now, left.palm_world, left.palm_normal, right.palm_world, right.palm_normal):
+			_hands_paused = not _hands_paused
+			print("[gesture] руки %s" % ("на паузе" if _hands_paused else "снова управляют"))
+	else:
+		_pause.reset()
+
+	var zooming := left.mode == "рука" and right.mode == "рука" \
+			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT
+	if zooming:
+		var gap := left.pinch_point.distance_to(right.pinch_point)
+		if not _zoom_active:
+			# The first hand's click may already be down: let it go before zooming.
+			_release_cursor_button()
+			MouseInput.set_key(VK_CONTROL, true)
+			_zoom_active = true
+			_zoom_remainder = 0.0
+			print("[gesture] масштаб двумя руками")
+		else:
+			_zoom_remainder += (gap - _zoom_last_gap) * _gesture_settings.zoom_speed
+			var whole := int(_zoom_remainder)
+			if whole != 0:
+				MouseInput.scroll(whole)
+				_zoom_remainder -= whole
+		_zoom_last_gap = gap
+		# Neither hand clicks or moves the cursor while zooming.
+		for pointer in [left, right]:
+			pointer.button = HandGestures.Click.NONE
+			pointer.pressed = false
+			pointer.just_pressed = false
+			pointer.pending = true
+	elif _zoom_active:
+		MouseInput.set_key(VK_CONTROL, false)
+		_zoom_active = false
+
+
+## Records one contact distance for CALIBRATION_SEC while the user touches and
+## opens repeatedly, then derives the thresholds from it.
+func _start_calibration(contact: int) -> void:
+	_calibrating = contact
+	_calibration_end = Time.get_ticks_msec() / 1000.0 + CALIBRATION_SEC
+	_calibration_samples = PackedFloat32Array()
+	print("[calibration] запись: %s" % ("щипок" if contact == 0 else "касание бока"))
+
+
+func _update_calibration() -> void:
+	if _calibrating < 0:
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	# The right hand if it is tracked, otherwise the left.
+	var source: Pointer = _pointers[1] if _pointers[1].tracked_hand else _pointers[0]
+	if source.tracked_hand:
+		_calibration_samples.append(source.contact_distances[_calibrating])
+	var what := "щипок большой + указательный" if _calibrating == 0 else "касание большим бока указательного"
+	if now < _calibration_end:
+		_calibration_status.text = "Запись: делайте %s 5–8 раз\nосталось %d с" % [what, ceili(_calibration_end - now)]
+		return
+	var thresholds := ExtraGestures.calibrate(_calibration_samples)
+	if thresholds == Vector2.ZERO:
+		_calibration_status.text = "Не получилось: касания плохо различимы.\nПовторите чётче."
+	elif _calibrating == 0:
+		_gesture_settings.pinch_press = snappedf(thresholds.x, 0.001)
+		_gesture_settings.pinch_release = snappedf(thresholds.y, 0.001)
+		_calibration_status.text = "Щипок: касание %d мм, отпускание %d мм" % [roundi(thresholds.x * 1000.0), roundi(thresholds.y * 1000.0)]
+	else:
+		_gesture_settings.side_press = snappedf(thresholds.x, 0.001)
+		_gesture_settings.side_release = snappedf(thresholds.y, 0.001)
+		_calibration_status.text = "Бок: касание %d мм, отпускание %d мм" % [roundi(thresholds.x * 1000.0), roundi(thresholds.y * 1000.0)]
+	print("[calibration] %s (%d кадров)" % [_calibration_status.text.replace("\n", " "), _calibration_samples.size()])
+	_calibrating = -1
+	_save_settings()
+	_refresh_settings_panel()
 
 
 func _release_cursor_button() -> void:
@@ -916,6 +1037,7 @@ func _update_pointer(index: int, delta: float) -> void:
 	var pointer := _pointers[index]
 	var was_pressed := pointer.pressed
 	var was_scrolling := pointer.scrolling
+	pointer.tracked_hand = false
 	pointer.disc_shown = false
 	pointer.disc_pose_started = false
 	var controller := _controllers[index]
@@ -1009,11 +1131,28 @@ func _update_pointer(index: int, delta: float) -> void:
 		frame.thumb_spread = thumb_tip.distance_to(index_knuckle)
 		frame.ring_to_palm = tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin.distance_to(
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin)
+		# Palm and contact data for the two-hand gestures, the menu, swipes and calibration.
+		var little_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_PROXIMAL).origin
+		pointer.tracked_hand = true
+		pointer.palm_world = palm
+		pointer.palm_normal = (to_world.basis * ExtraGestures.palm_normal(wrist, index_knuckle, little_knuckle, SIDE_SIGNS[index])).normalized()
+		pointer.pinch_point = to_world * thumb_tip
+		pointer.contact_distances = Vector3(frame.thumb_index, frame.thumb_middle, frame.thumb_side)
+		var ring_straightness := HandGestures.straightness(
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_PROXIMAL).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_INTERMEDIATE).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_DISTAL).origin,
+				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin)
+		var open_hand := frame.index_straightness > 0.85 and frame.middle_straightness > 0.85 and ring_straightness > 0.85 \
+				and frame.thumb_index > _gesture_settings.pinch_release
+
 		# A hand on the keyboard or the lap is at rest: hidden, no ray, no gestures.
 		pointer.palm_drop = _camera.global_position.y - palm.y
 		pointer.ray_elevation = asin(clampf(pointer.direction.y, -1.0, 1.0))
 		var was_engaged := pointer.engagement.engaged
-		var resting := not pointer.engagement.update(frame.time, pointer.palm_drop, pointer.ray_elevation)
+		# Paused hands and hands being recorded for calibration control nothing either.
+		var resting := not pointer.engagement.update(frame.time, pointer.palm_drop, pointer.ray_elevation) \
+				or _hands_paused or _calibrating >= 0
 		if resting != not was_engaged:
 			print("[hand] %s: %s (ниже глаз %.0f см, луч %+.0f°)" % [SIDE_LABELS[index], "в покое" if resting else "в работе",
 					pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)])
@@ -1049,6 +1188,36 @@ func _update_pointer(index: int, delta: float) -> void:
 				pointer.scroll = pointer.disc.turn(fingertips)
 		pointer.disc_shown = gesture.disc
 		pointer.disc_pose_started = pointer.scrolling and not was_scrolling
+
+		# Radial menu: a middle-finger pinch with the palm turned to the user opens it
+		# instead of a right click; keep pinching, move to an item, let go to run it.
+		var facing_user := pointer.palm_normal.dot((_camera.global_position - palm).normalized()) > MENU_PALM_FACING
+		if not pointer.menu_open and not is_nan(gesture.anchor_time) and gesture.button == HandGestures.Click.RIGHT and facing_user:
+			pointer.menu_open = true
+			pointer.menu.open(pointer.pinch_point, _camera.global_position)
+			print("[gesture] %s: круговое меню" % SIDE_LABELS[index])
+		if pointer.menu_open:
+			if gesture.button == HandGestures.Click.RIGHT:
+				pointer.menu_selected = pointer.menu.selection(pointer.pinch_point)
+			else:
+				pointer.menu_open = false
+				if pointer.menu_selected >= 0:
+					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
+					MouseInput.press_keys(PackedInt32Array(item[1]))
+					print("[gesture] %s: меню — %s" % [SIDE_LABELS[index], item[0]])
+				pointer.menu_selected = -1
+			pointer.button = HandGestures.Click.NONE
+			pointer.pending = pointer.menu_open
+
+		# Swipe of the open hand sideways (as the user sees it).
+		var head_right := Vector3(_camera.global_basis.x.x, 0.0, _camera.global_basis.x.z).normalized()
+		pointer.swipe.distance = _gesture_settings.swipe_distance
+		var swipe := pointer.swipe.update(frame.time, palm.dot(head_right),
+				open_hand and not resting and not pointer.scrolling and not pointer.menu_open)
+		if swipe != 0:
+			var keys := SWIPE_KEYS[_gesture_settings.swipe_mode][0 if swipe < 0 else 1] as Array
+			MouseInput.press_keys(PackedInt32Array(keys))
+			print("[gesture] %s: смахивание %s" % [SIDE_LABELS[index], "влево" if swipe < 0 else "вправо"])
 		if resting:
 			pointer.active = false
 			pointer.mode = "покой"
@@ -1107,6 +1276,18 @@ func _update_buttons(delta: float) -> void:
 
 
 func _update_rays() -> void:
+	# The radial menu: the selected item is bright and larger.
+	for i in 2:
+		var pointer := _pointers[i]
+		for item in ExtraGestures.Radial.ITEMS.size():
+			var label: Label3D = _menu_labels[i][item]
+			label.visible = pointer.menu_open
+			if pointer.menu_open:
+				label.global_position = pointer.menu.item_position(item)
+				var selected := item == pointer.menu_selected
+				label.modulate = Color(1.0, 0.85, 0.3) if selected else Color(0.85, 0.9, 1.0)
+				label.font_size = 44 if selected else 32
+
 	# The scroll disc and the marker of where the fingertips are on it.
 	for i in 2:
 		var pointer := _pointers[i]
@@ -1243,6 +1424,18 @@ func _build_rig() -> void:
 		add_child(marker)
 		_disc_markers.append(marker)
 
+		# Radial menu labels, placed around the menu centre while it is open.
+		for item: Array in ExtraGestures.Radial.ITEMS:
+			var label := Label3D.new()
+			label.text = item[0]
+			label.pixel_size = 0.0008
+			label.font_size = 36
+			label.outline_size = 10
+			label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			label.visible = false
+			add_child(label)
+			_menu_labels[i].append(label)
+
 		# Joint transforms are relative to the origin, so the spheres live under it.
 		var multimesh := MultiMesh.new()
 		multimesh.transform_format = MultiMesh.TRANSFORM_3D
@@ -1334,15 +1527,25 @@ func _build_settings_panel() -> void:
 
 	_settings_label("Жесты и курсор", Vector3(0.0, 0.59, 0.0), 40)
 	var small := Vector2(0.07, 0.052)
+	# Two columns: the list no longer fits one.
+	var per_column := ceili(TUNABLES.size() / 2.0)
 	for i in TUNABLES.size():
-		var y := 0.5 - i * 0.062
-		var name_label := _settings_label(TUNABLES[i][2], Vector3(-0.06, y, 0.0), 28)
+		var x := -0.25 + (i / per_column) * 0.95
+		var y := 0.5 - (i % per_column) * 0.062
+		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		_add_button_to(_settings_root, "−", Vector3(0.0, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
-		_settings_values.append(_settings_label("", Vector3(0.13, y, 0.0), 28))
-		_add_button_to(_settings_root, "+", Vector3(0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
-	_add_button_to(_settings_root, "По умолчанию", Vector3(0.0, 0.5 - TUNABLES.size() * 0.062 - 0.02, 0.0),
+		_add_button_to(_settings_root, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
+		_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26))
+		_add_button_to(_settings_root, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+	var bottom := 0.5 - per_column * 0.062 - 0.03
+	_add_button_to(_settings_root, "По умолчанию", Vector3(-0.25, bottom, 0.0),
 			Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
+	# Self-tuning: record a few touches and derive the thresholds from them.
+	_add_button_to(_settings_root, "Настроить щипок", Vector3(0.25, bottom, 0.0),
+			Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
+	_add_button_to(_settings_root, "Настроить бок (СКМ)", Vector3(0.6, bottom, 0.0),
+			Vector2(0.34, 0.08), 0.6).activated.connect(_start_calibration.bind(2))
+	_calibration_status = _settings_label("Настройка: нажмите кнопку и повторяйте жест 5–8 раз", Vector3(0.25, bottom - 0.09, 0.0), 26)
 
 	_add_button("Настройки", Vector3(0.77, 0.52, -1.2), 0.4).activated.connect(_on_settings_toggle)
 
@@ -1406,6 +1609,8 @@ func _refresh_settings_panel() -> void:
 		var value := float(_tunable_target(tunable[0]).get(tunable[1]))
 		if tunable[1] == "disc_ring_curl" and value <= 0.0:
 			_settings_values[i].text = "не нужно"
+		elif tunable[1] == "swipe_mode":
+			_settings_values[i].text = "отмена/повтор" if value >= 0.5 else "назад/вперёд"
 		elif tunable[1] == "scroll_mode":
 			_settings_values[i].text = "диск" if value >= 0.5 else "направление"
 		elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
