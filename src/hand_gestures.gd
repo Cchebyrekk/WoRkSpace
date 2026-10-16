@@ -32,10 +32,16 @@ class Settings:
 	var side_press := 0.022
 	var side_release := 0.035
 	var confirm_delay := 0.12
+	## A finger counts as starting to close on the thumb when it comes nearer than
+	## this; the press is placed where the ray was at that moment (see anchor_time).
+	var approach := 0.045
 	## Disc pose: index and middle at least this straight (1 = fully straight)...
 	var disc_straightness := 0.8
-	## ...pointing up at least this much (cosine to the vertical: 1 = straight up, 0.5 = 60 degrees off)...
-	var disc_up := 0.5
+	## ...in line with the hand, not bent at the knuckle (cosine between finger and
+	## wrist-to-knuckle direction: 1 = straight on)...
+	var disc_align := 0.8
+	## ...held together (tip to tip)...
+	var disc_together := 0.025
 	## ...the thumb tip at least this far from the index knuckle (out to the side)...
 	var disc_thumb_spread := 0.06
 	## ...and the ring finger tip within this distance of the palm (curled); 0 = not required.
@@ -48,8 +54,8 @@ class Settings:
 	var disc_turn_units := 960.0
 
 
-## One frame of hand data. Distances in metres; `*_up` are cosines between the
-## finger and the world's up direction.
+## One frame of hand data. Distances in metres; `*_align` are cosines between the
+## finger (knuckle to tip) and the hand (wrist to knuckle).
 class Frame:
 	var time := 0.0
 	var thumb_index := 1.0
@@ -58,8 +64,9 @@ class Frame:
 	var thumb_side := 1.0
 	var index_straightness := 0.0
 	var middle_straightness := 0.0
-	var index_up := 0.0
-	var middle_up := 0.0
+	var index_align := 0.0
+	var middle_align := 0.0
+	var index_middle := 1.0
 	## Thumb tip to the index knuckle.
 	var thumb_spread := 0.0
 	var ring_to_palm := 1.0
@@ -76,6 +83,9 @@ class Output:
 	var disc := false
 	## True on the frame the disc appears: the caller places it at the fingertips.
 	var disc_started := false
+	## On the frame a button is decided: when the deciding finger started closing on
+	## the thumb. The press belongs where the ray was then, before the hand moved.
+	var anchor_time := NAN
 
 
 enum _State { IDLE, PENDING, PRESSED, TAP, DISC_PENDING, DISC, BLOCKED }
@@ -89,7 +99,17 @@ var _button := Click.NONE
 var _in := [false, false, false]
 ## Deepest contact of each kind during the recognition window, as distance / press threshold.
 var _depth := [INF, INF, INF]
+## Last time each contact's distance was beyond `approach` (the finger was open).
+var _open_time := [0.0, 0.0, 0.0]
 var _pose := false
+
+
+## Forgets everything, e.g. when the hand goes to rest: any held button is let go.
+func reset() -> void:
+	_state = _State.IDLE
+	_button = Click.NONE
+	_in = [false, false, false]
+	_pose = false
 
 
 func update(frame: Frame) -> Output:
@@ -99,6 +119,8 @@ func update(frame: Frame) -> Output:
 	var releases := [s.pinch_release, s.pinch_release, s.side_release]
 	for contact in 3:
 		_in[contact] = distances[contact] < (releases[contact] if _in[contact] else presses[contact])
+		if distances[contact] > s.approach:
+			_open_time[contact] = frame.time
 	var any_in: bool = _in[0] or _in[1] or _in[2]
 	_pose = _is_disc_pose(frame)
 
@@ -124,9 +146,11 @@ func update(frame: Frame) -> Output:
 				# Opened again before the window ran out: a quick click.
 				_button = _decide()
 				_state = _State.TAP
+				output.anchor_time = _anchor_time()
 			elif frame.time - _since >= s.confirm_delay:
 				_button = _decide()
 				_state = _State.PRESSED
+				output.anchor_time = _anchor_time()
 		_State.PRESSED:
 			# Held until every contact has let go; another contact joining changes nothing.
 			if not any_in:
@@ -163,6 +187,15 @@ func _track_depth(distances: Array, presses: Array) -> void:
 			_depth[contact] = minf(_depth[contact], distances[contact] / presses[contact])
 
 
+## When the first of the contacts in the window started closing.
+func _anchor_time() -> float:
+	var earliest := INF
+	for contact in 3:
+		if _depth[contact] < INF:
+			earliest = minf(earliest, _open_time[contact])
+	return earliest
+
+
 func _decide() -> Click:
 	var best := _Contact.INDEX
 	for contact in 3:
@@ -181,10 +214,11 @@ func _is_disc_pose(frame: Frame) -> bool:
 	# Looser limits once the pose is on, so that it does not flicker off.
 	var slack := 0.1 if _pose else 0.0
 	var straight := frame.index_straightness >= s.disc_straightness - slack and frame.middle_straightness >= s.disc_straightness - slack
-	var up := frame.index_up >= s.disc_up - 2.0 * slack and frame.middle_up >= s.disc_up - 2.0 * slack
+	var in_line := frame.index_align >= s.disc_align - slack and frame.middle_align >= s.disc_align - slack
+	var together := frame.index_middle < s.disc_together + 0.1 * slack
 	var thumb_out := frame.thumb_spread >= s.disc_thumb_spread - 0.1 * slack
 	var ring_curled := s.disc_ring_curl <= 0.0 or frame.ring_to_palm < s.disc_ring_curl + 0.1 * slack
-	return straight and up and thumb_out and ring_curled
+	return straight and in_line and together and thumb_out and ring_curled
 
 
 ## How straight a finger is from its joint positions: 1 when the knuckle-to-tip

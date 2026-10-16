@@ -98,7 +98,11 @@ const TUNABLES := [
 	["gestures", "disc_dwell", "Диск: задержка", 1000.0, "мс", 0.05, 0.0, 0.6],
 	["gestures", "disc_radius", "Диск: радиус", 1000.0, "мм", 0.01, 0.03, 0.15],
 	["gestures", "disc_turn_units", "Диск: щелчков за оборот", 1.0 / 120.0, "", 120.0, 120.0, 4800.0],
-	["gestures", "disc_up", "Диск: пальцы вверх", 100.0, "%", 0.1, 0.0, 1.0],
+	["gestures", "disc_align", "Диск: пальцы по линии кисти", 100.0, "%", 0.05, 0.3, 1.0],
+	["gestures", "disc_together", "Диск: пальцы вместе", 1000.0, "мм", 0.002, 0.01, 0.05],
+	["gestures", "approach", "Начало щипка", 1000.0, "мм", 0.005, 0.025, 0.08],
+	["engagement", "drop", "Покой: рука ниже глаз на", 100.0, "см", 0.02, 0.2, 0.9],
+	["engagement", "ray_down_deg", "Покой: луч ниже горизонта на", 1.0, "°", 5.0, 10.0, 80.0],
 	["gestures", "disc_ring_curl", "Диск: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
 	["cursor", "drag_threshold", "Перетаскивание: порог", 1.0, "px", 5.0, 5.0, 150.0],
 	["cursor", "drag_delay_sec", "Перетаскивание: задержка", 1000.0, "мс", 0.05, 0.0, 1.0],
@@ -240,6 +244,12 @@ class Pointer:
 	var scroll := 0.0
 	var disc := ScrollDisc.new()
 	var disc_shown := false
+	var engagement := HandEngagement.new()
+	## For the log and the rest decision: palm below the eyes (m) and ray angle to the horizon (rad).
+	var palm_drop := 0.0
+	var ray_elevation := 0.0
+	## When the gesture just decided began (see HandGestures.Output.anchor_time), else NAN.
+	var anchor_time := NAN
 	## The hand has just taken the disc pose (it may have dragged the cursor while forming it).
 	var disc_pose_started := false
 	var on_panel := false
@@ -281,6 +291,7 @@ var _scroll_remainder := 0.0
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
+var _engagement_settings := HandEngagement.Settings.new()
 var _disc_rings: Array[MeshInstance3D] = []
 var _disc_markers: Array[MeshInstance3D] = []
 var _settings_root: Node3D
@@ -321,6 +332,7 @@ func _ready() -> void:
 	_build_rig()
 	for pointer in _pointers:
 		pointer.gestures.settings = _gesture_settings
+		pointer.engagement.settings = _engagement_settings
 	_build_buttons()
 	_build_settings_panel()
 	_load_settings()
@@ -387,6 +399,8 @@ func _process(delta: float) -> void:
 		var pointer := _pointers[i]
 		# With the hand interaction profile the controller node is tracked for bare hands too.
 		_controller_visuals[i].visible = pointer.mode == "контроллер"
+		if pointer.mode == "покой":
+			_joint_meshes[i].visible = false
 		lines.append("%s: суставов %d/%d (источник: %s) | контроллер: %s, триггер %.2f, grip %.2f, стик %s | луч: %s%s" % [
 			SIDE_LABELS[i], joints, XRHandTracker.HAND_JOINT_MAX, _hand_source_label(i),
 			"да" if controller.get_has_tracking_data() else "нет",
@@ -394,8 +408,9 @@ func _process(delta: float) -> void:
 			controller.get_vector2(&"primary"),
 			pointer.mode, (", " + CLICK_LABELS[pointer.button]) if pointer.pressed else (", колесо" if pointer.scrolling else (", распознаю" if pointer.pending else "")),
 		])
-		if pointer.mode == "рука":
-			lines[-1] += " | щипок %.0f мм, луч %s" % [pointer.pinch_mm, "Meta" if pointer.runtime_aim else "свой"]
+		if pointer.mode == "рука" or pointer.mode == "покой":
+			lines[-1] += " | щипок %.0f мм, луч %s, ниже глаз %.0f см, луч %+.0f°" % [pointer.pinch_mm,
+					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)]
 
 	_update_buttons(delta)
 	_update_cursor()
@@ -529,7 +544,7 @@ func _update_cursor() -> void:
 			_cursor_press_armed = false
 		var target := owner_pointer.panel.pixel_at(owner_pointer.panel_uv) if owner_pointer.on_panel else Vector2.ZERO
 		result = _cursor_filter.update(target, owner_pointer.on_panel, owner_pointer.pressed and _cursor_press_armed, now,
-				owner_pointer.pending or owner_pointer.scrolling)
+				owner_pointer.pending or owner_pointer.scrolling, owner_pointer.anchor_time)
 
 	var pixel := Vector2i(result.position.round())
 	if result.move:
@@ -969,14 +984,28 @@ func _update_pointer(index: int, delta: float) -> void:
 		frame.middle_straightness = HandGestures.straightness(middle_knuckle,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_INTERMEDIATE).origin,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_DISTAL).origin, middle_tip)
-		frame.index_up = (to_world.basis * (index_tip - index_knuckle)).normalized().dot(Vector3.UP)
-		frame.middle_up = (to_world.basis * (middle_tip - middle_knuckle)).normalized().dot(Vector3.UP)
+		# Disc pose: fingers in line with the hand (whatever way the hand is turned) and together.
+		var hand_axis := (middle_knuckle - wrist).normalized()
+		frame.index_align = (index_tip - index_knuckle).normalized().dot(hand_axis)
+		frame.middle_align = (middle_tip - middle_knuckle).normalized().dot(hand_axis)
+		frame.index_middle = index_tip.distance_to(middle_tip)
 		frame.thumb_spread = thumb_tip.distance_to(index_knuckle)
 		frame.ring_to_palm = tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin.distance_to(
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin)
-		var gesture := pointer.gestures.update(frame)
+		# A hand on the keyboard or the lap is at rest: hidden, no ray, no gestures.
+		pointer.palm_drop = _camera.global_position.y - palm.y
+		pointer.ray_elevation = asin(clampf(pointer.direction.y, -1.0, 1.0))
+		var was_engaged := pointer.engagement.engaged
+		var resting := not pointer.engagement.update(frame.time, pointer.palm_drop, pointer.ray_elevation)
+		if resting != not was_engaged:
+			print("[hand] %s: %s (ниже глаз %.0f см, луч %+.0f°)" % [SIDE_LABELS[index], "в покое" if resting else "в работе",
+					pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)])
+		if resting:
+			pointer.gestures.reset()
+		var gesture := HandGestures.Output.new() if resting else pointer.gestures.update(frame)
 		pointer.button = gesture.button
 		pointer.pending = gesture.pending
+		pointer.anchor_time = gesture.anchor_time
 		pointer.scrolling = gesture.disc_pending or gesture.disc
 		pointer.scroll = 0.0
 		var fingertips := to_world * ((index_tip + middle_tip) * 0.5)
@@ -989,6 +1018,9 @@ func _update_pointer(index: int, delta: float) -> void:
 			pointer.scroll = pointer.disc.turn(fingertips)
 		pointer.disc_shown = gesture.disc
 		pointer.disc_pose_started = pointer.scrolling and not was_scrolling
+		if resting:
+			pointer.active = false
+			pointer.mode = "покой"
 	elif controller.get_has_tracking_data():
 		pointer.active = true
 		pointer.mode = "контроллер"
@@ -1001,6 +1033,7 @@ func _update_pointer(index: int, delta: float) -> void:
 			pointer.button = HandGestures.Click.RIGHT
 		else:
 			pointer.button = HandGestures.Click.NONE
+		pointer.anchor_time = NAN
 		var stick := controller.get_vector2(&"primary").y
 		pointer.scrolling = absf(stick) > CONTROLLER_STICK_DEADZONE
 		pointer.scroll = stick * CONTROLLER_SCROLL_SPEED * delta if pointer.scrolling else 0.0
@@ -1262,16 +1295,16 @@ func _build_settings_panel() -> void:
 	_settings_root.visible = false
 	add_child(_settings_root)
 
-	_settings_label("Жесты и курсор", Vector3(0.0, 0.42, 0.0), 40)
-	var small := Vector2(0.07, 0.06)
+	_settings_label("Жесты и курсор", Vector3(0.0, 0.59, 0.0), 40)
+	var small := Vector2(0.07, 0.052)
 	for i in TUNABLES.size():
-		var y := 0.32 - i * 0.075
+		var y := 0.5 - i * 0.062
 		var name_label := _settings_label(TUNABLES[i][2], Vector3(-0.06, y, 0.0), 28)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		_add_button_to(_settings_root, "−", Vector3(0.0, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
 		_settings_values.append(_settings_label("", Vector3(0.13, y, 0.0), 28))
 		_add_button_to(_settings_root, "+", Vector3(0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
-	_add_button_to(_settings_root, "По умолчанию", Vector3(0.0, 0.32 - TUNABLES.size() * 0.075 - 0.02, 0.0),
+	_add_button_to(_settings_root, "По умолчанию", Vector3(0.0, 0.5 - TUNABLES.size() * 0.062 - 0.02, 0.0),
 			Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
 
 	_add_button("Настройки", Vector3(0.77, 0.52, -1.2), 0.4).activated.connect(_on_settings_toggle)
@@ -1293,7 +1326,12 @@ func _on_settings_toggle() -> void:
 
 
 func _tunable_target(section: String) -> Object:
-	return _gesture_settings if section == "gestures" else _cursor_filter
+	match section:
+		"gestures":
+			return _gesture_settings
+		"engagement":
+			return _engagement_settings
+	return _cursor_filter
 
 
 func _on_tunable_button(index: int, direction: float) -> void:
@@ -1317,7 +1355,7 @@ func _on_tunable_button(index: int, direction: float) -> void:
 
 
 func _on_tunables_default() -> void:
-	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new()}
+	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new()}
 	for tunable: Array in TUNABLES:
 		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
 	_save_settings()

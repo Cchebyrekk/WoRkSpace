@@ -62,7 +62,10 @@ func is_held() -> bool:
 ## `target` is only meaningful while `on_screen` is true. A press counts only if
 ## it starts on the screen; one that started elsewhere and wandered in is ignored.
 ## `freeze` keeps an unpressed cursor still, e.g. while a gesture is being recognised.
-func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze := false) -> Result:
+## `anchor_time`, if given on the frame of a press, is when the gesture began; the
+## press goes where the pointer was then (at most HISTORY_SEC back) instead of
+## `lookback_sec` before now.
+func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze := false, anchor_time := NAN) -> Result:
 	var result := Result.new()
 	var just_pressed := pressed and not _was_pressed
 	_was_pressed = pressed
@@ -85,7 +88,8 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze
 		_held = true
 		_dragging = false
 		_press_time = time
-		_anchor = _position_at(time - lookback_sec, target)
+		var anchor_at := time - lookback_sec if is_nan(anchor_time) else maxf(anchor_time, time - HISTORY_SEC)
+		_anchor = _position_at(anchor_at, target)
 		result.double_click = time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
 		if result.double_click:
 			_anchor = previous_anchor

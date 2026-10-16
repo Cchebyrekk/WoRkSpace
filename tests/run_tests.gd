@@ -235,18 +235,21 @@ func _hand(time: float, thumb_index: float, thumb_middle := 0.06, thumb_side := 
 	frame.thumb_side = thumb_side
 	frame.index_straightness = 0.95
 	frame.middle_straightness = 0.95
-	frame.index_up = 0.1
-	frame.middle_up = 0.1
+	frame.index_align = 0.95
+	frame.middle_align = 0.95
+	frame.index_middle = 0.03
 	frame.thumb_spread = 0.04
 	frame.ring_to_palm = 0.05
 	return frame
 
 
-## The disc pose: index and middle straight and up, thumb out, ring curled.
-func _disc_pose(time: float, ring_to_palm := 0.05, up := 0.9) -> HandGestures.Frame:
+## The disc pose: index and middle straight, in line with the hand and together,
+## thumb out, ring curled.
+func _disc_pose(time: float, ring_to_palm := 0.05, align := 0.95, together := 0.015) -> HandGestures.Frame:
 	var frame := _hand(time, 0.09, 0.09, 0.07)
-	frame.index_up = up
-	frame.middle_up = up
+	frame.index_align = align
+	frame.middle_align = align
+	frame.index_middle = together
 	frame.thumb_spread = 0.08
 	frame.ring_to_palm = ring_to_palm
 	return frame
@@ -332,8 +335,8 @@ func _test_hand_gestures() -> void:
 	_check(out.disc and out.disc_started, "через задержку диск появляется")
 	out = gestures.update(_disc_pose(0.20))
 	_check(out.disc and not out.disc_started, "диск держится, «появился» только один кадр")
-	out = gestures.update(_disc_pose(0.25, 0.05, 0.45))
-	_check(out.disc, "небольшой наклон пальцев не сбрасывает диск (гистерезис)")
+	out = gestures.update(_disc_pose(0.25, 0.05, 0.75, 0.03))
+	_check(out.disc, "небольшой изгиб и разведение пальцев не сбрасывают диск (гистерезис)")
 	out = gestures.update(_hand(0.30, 0.06))
 	_check(not out.disc and not out.disc_pending, "пальцы опущены — диск исчез")
 
@@ -344,13 +347,57 @@ func _test_hand_gestures() -> void:
 		out = gestures.update(_disc_pose(i * 0.05, 0.12))
 		any_disc = any_disc or out.disc or out.disc_pending
 	_check(not any_disc, "поднятая открытая ладонь диск не вызывает")
-	# Fingers pointing forward are not the pose either.
+	# Fingers bent at the knuckle (not in line with the hand) are not the pose.
 	gestures = HandGestures.new()
 	any_disc = false
 	for i in 10:
-		out = gestures.update(_disc_pose(i * 0.05, 0.05, 0.1))
+		out = gestures.update(_disc_pose(i * 0.05, 0.05, 0.3))
 		any_disc = any_disc or out.disc or out.disc_pending
-	_check(not any_disc, "пальцы вперёд, а не вверх — диска нет")
+	_check(not any_disc, "пальцы согнуты в костяшках — диска нет")
+	# Index and middle apart (a V) are not the pose.
+	gestures = HandGestures.new()
+	any_disc = false
+	for i in 10:
+		out = gestures.update(_disc_pose(i * 0.05, 0.05, 0.95, 0.05))
+		any_disc = any_disc or out.disc or out.disc_pending
+	_check(not any_disc, "пальцы врозь — диска нет")
+
+	# The press is anchored to when the finger started closing, however slowly it closed.
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.00, 0.06, 0.06))
+	gestures.update(_hand(0.10, 0.06, 0.05))
+	gestures.update(_hand(0.20, 0.06, 0.04))
+	gestures.update(_hand(0.30, 0.06, 0.03))
+	gestures.update(_hand(0.40, 0.06, 0.012))
+	out = gestures.update(_hand(0.53, 0.06, 0.012))
+	_check(out.button == RIGHT and is_equal_approx(out.anchor_time, 0.10), "нажатие привязано к началу сведения пальцев")
+	out = gestures.update(_hand(0.60, 0.06, 0.012))
+	_check(is_nan(out.anchor_time), "время начала выдаётся только в кадр решения")
+	gestures.reset()
+	out = gestures.update(_hand(0.70, 0.06, 0.012))
+	_check(out.button == NONE and out.pending, "после сброса касание распознаётся заново")
+
+	# A hand at rest (low, or ray pointing down) stops controlling; it takes a moment either way.
+	var engagement := HandEngagement.new()
+	_check(not engagement.update(0.0, 0.3, 0.0), "в начале рука не управляет")
+	_check(not engagement.update(0.2, 0.3, 0.0), "в работу не сразу")
+	_check(engagement.update(0.35, 0.3, 0.0), "поднятая рука с лучом вперёд — в работе")
+	_check(engagement.update(0.45, 0.6, 0.0), "опустилась — ещё не сразу")
+	_check(not engagement.update(0.7, 0.6, 0.0), "рука ниже глаз на 60 см — в покое")
+	engagement.update(0.8, 0.3, 0.0)
+	_check(engagement.update(1.2, 0.3, 0.0), "снова поднята — в работе")
+	engagement.update(1.3, 0.3, deg_to_rad(-60.0))
+	_check(not engagement.update(1.6, 0.3, deg_to_rad(-60.0)), "луч круто вниз (рука на клавиатуре) — в покое")
+	engagement.update(1.7, 0.3, 0.0)
+	_check(not engagement.update(1.75, 0.6, 0.0) and not engagement.update(1.9, 0.3, 0.0), "короткий подъём не возвращает в работу")
+
+	# The cursor filter places a press at an explicit anchor time.
+	var anchored := CursorFilter.new()
+	anchored.update(Vector2(10.0, 10.0), true, false, 0.0)
+	anchored.update(Vector2(10.0, 10.0), true, false, 0.1)
+	anchored.update(Vector2(90.0, 10.0), true, false, 0.3)
+	var press := anchored.update(Vector2(95.0, 10.0), true, true, 0.4, false, 0.1)
+	_check(press.press and press.position == Vector2(10.0, 10.0), "нажатие ставится на момент начала жеста")
 
 	# The thumb coming in while the disc is up must not click.
 	gestures = HandGestures.new()
