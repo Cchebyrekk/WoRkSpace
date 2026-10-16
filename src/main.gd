@@ -84,17 +84,22 @@ const CONTROLLER_STICK_DEADZONE := 0.2
 ## (the recognition window comes on top, see _update_cursor).
 const CURSOR_LOOKBACK_SEC := 0.1
 const CLICK_LABELS := {-1: "—", 0: "ЛКМ", 1: "ПКМ", 2: "СКМ"}
+## When the disc pose forms, the cursor goes back to where it was this long before.
+const DISC_RECALL_SEC := 0.3
 
 ## Tunables on the settings panel: [section, property, label, display scale, unit, step, min, max].
 ## Values are stored in SI units (metres, seconds); the scale converts them for display.
 const TUNABLES := [
 	["gestures", "pinch_press", "Щипок: сжатие", 1000.0, "мм", 0.001, 0.008, 0.035],
 	["gestures", "pinch_release", "Щипок: разжатие", 1000.0, "мм", 0.002, 0.02, 0.07],
+	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
+	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
-	["gestures", "scroll_together", "Прокрутка: пальцы вместе", 1000.0, "мм", 0.002, 0.008, 0.04],
-	["gestures", "scroll_ring_curl", "Прокрутка: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
-	["gestures", "scroll_dwell", "Прокрутка: задержка", 1000.0, "мс", 0.05, 0.0, 0.6],
-	["gestures", "scroll_speed", "Прокрутка: скорость", 1.0, "", 250.0, 250.0, 8000.0],
+	["gestures", "disc_dwell", "Диск: задержка", 1000.0, "мс", 0.05, 0.0, 0.6],
+	["gestures", "disc_radius", "Диск: радиус", 1000.0, "мм", 0.01, 0.03, 0.15],
+	["gestures", "disc_turn_units", "Диск: щелчков за оборот", 1.0 / 120.0, "", 120.0, 120.0, 4800.0],
+	["gestures", "disc_up", "Диск: пальцы вверх", 100.0, "%", 0.1, 0.0, 1.0],
+	["gestures", "disc_ring_curl", "Диск: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
 	["cursor", "drag_threshold", "Перетаскивание: порог", 1.0, "px", 5.0, 5.0, 150.0],
 	["cursor", "drag_delay_sec", "Перетаскивание: задержка", 1000.0, "мс", 0.05, 0.0, 1.0],
 	["cursor", "double_click_sec", "Двойной щелчок: окно", 1000.0, "мс", 0.1, 0.3, 2.0],
@@ -233,6 +238,10 @@ class Pointer:
 	var scrolling := false
 	## Wheel units produced this frame; positive scrolls up.
 	var scroll := 0.0
+	var disc := ScrollDisc.new()
+	var disc_shown := false
+	## The hand has just taken the disc pose (it may have dragged the cursor while forming it).
+	var disc_pose_started := false
 	var on_panel := false
 	## The nearest screen panel the ray hits, and where: 0..1 from its top-left corner.
 	var panel: ScreenPanel
@@ -272,6 +281,8 @@ var _scroll_remainder := 0.0
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
+var _disc_rings: Array[MeshInstance3D] = []
+var _disc_markers: Array[MeshInstance3D] = []
 var _settings_root: Node3D
 var _settings_values: Array[Label3D] = []
 ## Index of the pointer that drives the Windows cursor, or -1.
@@ -540,9 +551,21 @@ func _update_cursor() -> void:
 		print("[cursor] отпускание в %s через %.2f с, за время удержания луч уходил на %.0f px" % [
 				pixel, _cursor_filter.last_hold_sec, _cursor_filter.last_hold_excursion])
 
-	# The wheel goes to wherever the cursor is, from the pointer that owns it.
-	if owner_pointer != null and owner_pointer.on_panel and owner_pointer.scrolling:
-		_scroll_remainder += owner_pointer.scroll
+	# Raising the fingers into the disc pose moves the ray; put the cursor back where
+	# it was just before, so that the wheel goes to the window the user meant.
+	if owner_pointer != null and owner_pointer.disc_pose_started:
+		var back: Variant = _cursor_filter.recall(now - DISC_RECALL_SEC)
+		if back != null:
+			MouseInput.move_to(Vector2i((back as Vector2).round()))
+
+	# The wheel goes to the window under the cursor, from whichever pointer turns it:
+	# with the disc up the ray usually points somewhere else entirely.
+	var any_scrolling := false
+	for pointer in _pointers:
+		if pointer.scrolling:
+			any_scrolling = true
+			_scroll_remainder += pointer.scroll
+	if any_scrolling:
 		var whole := int(_scroll_remainder)
 		if whole != 0:
 			MouseInput.scroll(whole)
@@ -734,7 +757,6 @@ func _load_settings() -> void:
 	for tunable: Array in TUNABLES:
 		var target := _tunable_target(tunable[0])
 		target.set(tunable[1], config.get_value(tunable[0], tunable[1], target.get(tunable[1])))
-	_gesture_settings.scroll_apart = config.get_value("gestures", "scroll_apart", _gesture_settings.scroll_apart)
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
 
@@ -749,7 +771,6 @@ func _save_settings() -> void:
 	config.set_value("ray", "aim_offset_right", _aim_offset[1])
 	for tunable: Array in TUNABLES:
 		config.set_value(tunable[0], tunable[1], _tunable_target(tunable[0]).get(tunable[1]))
-	config.set_value("gestures", "scroll_apart", _gesture_settings.scroll_apart)
 	var error := config.save(SETTINGS_PATH)
 	if error != OK:
 		print("[settings] не удалось сохранить: ", error_string(error))
@@ -862,6 +883,9 @@ func _update_hand(index: int) -> int:
 func _update_pointer(index: int, delta: float) -> void:
 	var pointer := _pointers[index]
 	var was_pressed := pointer.pressed
+	var was_scrolling := pointer.scrolling
+	pointer.disc_shown = false
+	pointer.disc_pose_started = false
 	var controller := _controllers[index]
 	var tracker := XRServer.get_tracker(HAND_TRACKER_NAMES[index]) as XRHandTracker
 	pointer.hit_distance = INF
@@ -932,27 +956,39 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.direction = PointerMath.smooth_direction(previous,
 				PointerMath.deadband_direction(previous, target, RAY_DEADBAND), delta, smoothing)
 
+		var index_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL).origin
+		var index_joint := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_INTERMEDIATE).origin
 		var frame := HandGestures.Frame.new()
 		frame.time = Time.get_ticks_usec() / 1000000.0
 		frame.thumb_index = thumb_tip.distance_to(index_tip)
 		frame.thumb_middle = thumb_tip.distance_to(middle_tip)
-		frame.index_middle = index_tip.distance_to(middle_tip)
-		frame.index_straightness = HandGestures.straightness(
-				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL).origin,
-				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_INTERMEDIATE).origin,
+		# The side of the index finger is its first segment, knuckle to middle joint.
+		frame.thumb_side = HandGestures.distance_to_segment(thumb_tip, index_knuckle, index_joint)
+		frame.index_straightness = HandGestures.straightness(index_knuckle, index_joint,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_DISTAL).origin, index_tip)
-		frame.middle_straightness = HandGestures.straightness(
-				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL).origin,
+		frame.middle_straightness = HandGestures.straightness(middle_knuckle,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_INTERMEDIATE).origin,
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_DISTAL).origin, middle_tip)
+		frame.index_up = (to_world.basis * (index_tip - index_knuckle)).normalized().dot(Vector3.UP)
+		frame.middle_up = (to_world.basis * (middle_tip - middle_knuckle)).normalized().dot(Vector3.UP)
+		frame.thumb_spread = thumb_tip.distance_to(index_knuckle)
 		frame.ring_to_palm = tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin.distance_to(
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin)
-		frame.height = palm.y
 		var gesture := pointer.gestures.update(frame)
 		pointer.button = gesture.button
 		pointer.pending = gesture.pending
-		pointer.scrolling = gesture.scrolling
-		pointer.scroll = gesture.scroll
+		pointer.scrolling = gesture.disc_pending or gesture.disc
+		pointer.scroll = 0.0
+		var fingertips := to_world * ((index_tip + middle_tip) * 0.5)
+		if gesture.disc_started:
+			pointer.disc.radius = _gesture_settings.disc_radius
+			pointer.disc.turn_units = _gesture_settings.disc_turn_units
+			pointer.disc.start(fingertips, _camera.global_position)
+			print("[gesture] %s: диск прокрутки" % SIDE_LABELS[index])
+		if gesture.disc:
+			pointer.scroll = pointer.disc.turn(fingertips)
+		pointer.disc_shown = gesture.disc
+		pointer.disc_pose_started = pointer.scrolling and not was_scrolling
 	elif controller.get_has_tracking_data():
 		pointer.active = true
 		pointer.mode = "контроллер"
@@ -1007,6 +1043,20 @@ func _update_buttons(delta: float) -> void:
 
 
 func _update_rays() -> void:
+	# The scroll disc and the marker of where the fingertips are on it.
+	for i in 2:
+		var pointer := _pointers[i]
+		_disc_rings[i].visible = pointer.disc_shown
+		_disc_markers[i].visible = pointer.disc_shown
+		if not pointer.disc_shown:
+			continue
+		var torus := _disc_rings[i].mesh as TorusMesh
+		if not is_equal_approx(torus.outer_radius, pointer.disc.radius + 0.003):
+			torus.inner_radius = pointer.disc.radius - 0.003
+			torus.outer_radius = pointer.disc.radius + 0.003
+		_disc_rings[i].global_transform = Transform3D(pointer.disc.basis(), pointer.disc.center)
+		_disc_markers[i].global_position = pointer.disc.marker()
+
 	for i in 2:
 		var pointer := _pointers[i]
 		var ray := _rays[i]
@@ -1101,6 +1151,28 @@ func _build_rig() -> void:
 		add_child(ray)
 		_rays.append(ray)
 
+		# Scroll disc: a thin ring and a marker, placed in world space each frame.
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.057
+		torus.outer_radius = 0.063
+		torus.rings = 48
+		torus.ring_segments = 8
+		var ring := MeshInstance3D.new()
+		ring.mesh = torus
+		ring.material_override = _flat_material(Color(0.85, 0.9, 1.0))
+		ring.visible = false
+		add_child(ring)
+		_disc_rings.append(ring)
+		var marker_mesh := SphereMesh.new()
+		marker_mesh.radius = 0.008
+		marker_mesh.height = 0.016
+		var marker := MeshInstance3D.new()
+		marker.mesh = marker_mesh
+		marker.material_override = _flat_material(side_colors[i])
+		marker.visible = false
+		add_child(marker)
+		_disc_markers.append(marker)
+
 		# Joint transforms are relative to the origin, so the spheres live under it.
 		var multimesh := MultiMesh.new()
 		multimesh.transform_format = MultiMesh.TRANSFORM_3D
@@ -1179,13 +1251,14 @@ func _add_button_to(parent: Node3D, text: String, at: Vector3, size: Vector2, ho
 	return button
 
 
-## Settings panel to the user's front left: every gesture and cursor tunable with
-## − / + buttons. Shown and hidden with the "Настройки" button; saved on each change.
+## Settings panel behind the user, where no screen panel reaches (the screens span
+## at most 300 degrees in front): every gesture and cursor tunable with − / +
+## buttons. Shown and hidden with the "Настройки" button; saved on each change.
 func _build_settings_panel() -> void:
 	_settings_root = Node3D.new()
-	_settings_root.position = Vector3(-0.85, 1.05, -0.85)
-	# Turned to face the user standing at the origin.
-	_settings_root.rotation = Vector3(0.0, deg_to_rad(45.0), 0.0)
+	_settings_root.position = Vector3(0.0, 1.25, 0.9)
+	# Turned to face the user when they turn round.
+	_settings_root.rotation = Vector3(0.0, PI, 0.0)
 	_settings_root.visible = false
 	add_child(_settings_root)
 
@@ -1233,8 +1306,10 @@ func _on_tunable_button(index: int, direction: float) -> void:
 			value = minf(value, _gesture_settings.pinch_release - 0.005)
 		"pinch_release":
 			value = maxf(value, _gesture_settings.pinch_press + 0.005)
-		"scroll_together":
-			_gesture_settings.scroll_apart = value + 0.01
+		"side_press":
+			value = minf(value, _gesture_settings.side_release - 0.005)
+		"side_release":
+			value = maxf(value, _gesture_settings.side_press + 0.005)
 	target.set(tunable[1], value)
 	_save_settings()
 	_refresh_settings_panel()
@@ -1245,7 +1320,6 @@ func _on_tunables_default() -> void:
 	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new()}
 	for tunable: Array in TUNABLES:
 		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
-	_gesture_settings.scroll_apart = (defaults["gestures"] as HandGestures.Settings).scroll_apart
 	_save_settings()
 	_refresh_settings_panel()
 	print("[settings] жесты и курсор — значения по умолчанию")
@@ -1255,7 +1329,7 @@ func _refresh_settings_panel() -> void:
 	for i in mini(TUNABLES.size(), _settings_values.size()):
 		var tunable: Array = TUNABLES[i]
 		var value := float(_tunable_target(tunable[0]).get(tunable[1]))
-		if tunable[1] == "scroll_ring_curl" and value <= 0.0:
+		if tunable[1] == "disc_ring_curl" and value <= 0.0:
 			_settings_values[i].text = "не нужно"
 		else:
 			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]

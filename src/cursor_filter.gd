@@ -108,6 +108,18 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze
 	return result
 
 
+## Moves the (unpressed) cursor back to where the pointer was at `time` and
+## returns that point, or null if nothing that old is remembered. Used when a
+## pose that freezes the cursor took a moment to form and dragged it off target.
+func recall(time: float) -> Variant:
+	if _held or _history.is_empty() or _history[0].z > time:
+		return null
+	var back := _position_at(time, Vector2.ZERO)
+	_position = back
+	_has_position = true
+	return back
+
+
 func _move(result: Result, to: Vector2) -> void:
 	if _has_position and to == _position:
 		return

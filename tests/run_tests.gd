@@ -226,22 +226,30 @@ func _test_panel_layout() -> void:
 	_check(PanelLayout.arrange([] as Array[Rect2i], 0, eye, distance, 60.0, 300.0).is_empty(), "нет мониторов — нет панелей")
 
 
-func _hand(time: float, thumb_index: float, thumb_middle := 0.06, index_middle := 0.03, ring_to_palm := 0.05, height := 1.0) -> HandGestures.Frame:
+## A hand with fingers pointing forward (not the disc pose) and the given contact distances.
+func _hand(time: float, thumb_index: float, thumb_middle := 0.06, thumb_side := 0.05) -> HandGestures.Frame:
 	var frame := HandGestures.Frame.new()
 	frame.time = time
 	frame.thumb_index = thumb_index
 	frame.thumb_middle = thumb_middle
-	frame.index_middle = index_middle
+	frame.thumb_side = thumb_side
 	frame.index_straightness = 0.95
 	frame.middle_straightness = 0.95
-	frame.ring_to_palm = ring_to_palm
-	frame.height = height
+	frame.index_up = 0.1
+	frame.middle_up = 0.1
+	frame.thumb_spread = 0.04
+	frame.ring_to_palm = 0.05
 	return frame
 
 
-## The wheel pose: index and middle together and straight, thumb away, ring curled.
-func _wheel(time: float, height: float, ring_to_palm := 0.05) -> HandGestures.Frame:
-	return _hand(time, 0.08, 0.08, 0.012, ring_to_palm, height)
+## The disc pose: index and middle straight and up, thumb out, ring curled.
+func _disc_pose(time: float, ring_to_palm := 0.05, up := 0.9) -> HandGestures.Frame:
+	var frame := _hand(time, 0.09, 0.09, 0.07)
+	frame.index_up = up
+	frame.middle_up = up
+	frame.thumb_spread = 0.08
+	frame.ring_to_palm = ring_to_palm
+	return frame
 
 
 func _test_hand_gestures() -> void:
@@ -252,7 +260,7 @@ func _test_hand_gestures() -> void:
 
 	var gestures := HandGestures.new()
 	var out := gestures.update(_hand(0.0, 0.06))
-	_check(out.button == NONE and not out.pending and not out.scrolling, "открытая рука — ничего")
+	_check(out.button == NONE and not out.pending and not out.disc and not out.disc_pending, "открытая рука — ничего")
 	out = gestures.update(_hand(0.10, 0.012))
 	_check(out.pending and out.button == NONE, "касание: сначала ожидание, кнопки ещё нет")
 	out = gestures.update(_hand(0.20, 0.012))
@@ -269,17 +277,26 @@ func _test_hand_gestures() -> void:
 	out = gestures.update(_hand(0.13, 0.06, 0.012))
 	_check(out.button == RIGHT, "большой + средний — правая кнопка")
 
-	# A three-finger pinch starts as a two-finger one: the middle finger joins within the window.
+	# Middle button: the thumb tip against the side of the index finger.
 	gestures = HandGestures.new()
-	gestures.update(_hand(0.0, 0.012, 0.06))
-	out = gestures.update(_hand(0.05, 0.012, 0.012))
-	_check(out.pending and out.button == NONE, "три пальца: в окне ещё не решено")
-	out = gestures.update(_hand(0.13, 0.012, 0.012))
-	_check(out.button == MIDDLE, "большой + указательный + средний — средняя кнопка, а не левая")
-	out = gestures.update(_hand(0.30, 0.012, 0.04))
-	_check(out.button == MIDDLE, "средняя держится, пока хоть один палец касается")
-	out = gestures.update(_hand(0.35, 0.04, 0.04))
-	_check(out.button == NONE, "средняя отпущена, когда разведены оба")
+	gestures.update(_hand(0.0, 0.04, 0.06, 0.012))
+	out = gestures.update(_hand(0.13, 0.04, 0.06, 0.012))
+	_check(out.button == MIDDLE, "большой к боку указательного — средняя кнопка")
+	out = gestures.update(_hand(0.30, 0.04, 0.06, 0.03))
+	_check(out.button == MIDDLE, "средняя держится между порогами касания бока")
+	out = gestures.update(_hand(0.35, 0.04, 0.06, 0.04))
+	_check(out.button == NONE, "средняя отпущена")
+
+	# Two contacts within the window: the deeper one (relative to its threshold) decides.
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.017, 0.06, 0.06))
+	gestures.update(_hand(0.05, 0.017, 0.06, 0.008))
+	out = gestures.update(_hand(0.13, 0.017, 0.06, 0.008))
+	_check(out.button == MIDDLE, "задел кончик, но прижал бок — средняя")
+	gestures = HandGestures.new()
+	gestures.update(_hand(0.0, 0.006, 0.06, 0.021))
+	out = gestures.update(_hand(0.13, 0.006, 0.06, 0.021))
+	_check(out.button == LEFT, "плотный щипок кончиков рядом с боком — левая")
 
 	# A finger joining after the window does not change the button.
 	gestures = HandGestures.new()
@@ -305,43 +322,45 @@ func _test_hand_gestures() -> void:
 		touched = touched or out.pending or out.button != NONE
 	_check(not touched, "пальцы между порогами без касания — нажатия нет")
 
-	# Wheel: the pose has to be held before the hand's movement turns the wheel.
+	# Disc: the pose has to be held for the dwell before the disc appears.
 	gestures = HandGestures.new()
-	out = gestures.update(_wheel(0.0, 1.0))
-	_check(out.scrolling and is_zero_approx(out.scroll), "поза прокрутки: курсор стоит, колесо ещё нет")
-	out = gestures.update(_wheel(0.10, 1.02))
-	_check(is_zero_approx(out.scroll), "движение до конца задержки не крутит колесо")
-	gestures.update(_wheel(0.20, 1.02))
-	var total := 0.0
-	for i in range(1, 11):
-		total += gestures.update(_wheel(0.20 + i * 0.05, 1.02 + i * 0.01)).scroll
-	_check(is_equal_approx(total, 0.1 * gestures.settings.scroll_speed), "рука вверх на 10 см — колесо вверх пропорционально пути")
-	var down := 0.0
-	for i in range(1, 6):
-		down += gestures.update(_wheel(0.70 + i * 0.05, 1.12 - i * 0.02)).scroll
-	_check(down < 0.0 and is_equal_approx(down, -0.1 * gestures.settings.scroll_speed), "рука вниз — колесо вниз")
-	var drift := 0.0
-	for i in range(1, 11):
-		drift += gestures.update(_wheel(0.95 + i * 0.05, 1.02 + i * 0.001)).scroll
-	_check(is_zero_approx(drift), "медленный дрейф руки колесо не крутит")
+	out = gestures.update(_disc_pose(0.0))
+	_check(out.disc_pending and not out.disc, "поза диска: курсор стоит, диска ещё нет")
+	out = gestures.update(_disc_pose(0.10))
+	_check(out.disc_pending and not out.disc_started, "до конца задержки диска нет")
+	out = gestures.update(_disc_pose(0.16))
+	_check(out.disc and out.disc_started, "через задержку диск появляется")
+	out = gestures.update(_disc_pose(0.20))
+	_check(out.disc and not out.disc_started, "диск держится, «появился» только один кадр")
+	out = gestures.update(_disc_pose(0.25, 0.05, 0.45))
+	_check(out.disc, "небольшой наклон пальцев не сбрасывает диск (гистерезис)")
+	out = gestures.update(_hand(0.30, 0.06))
+	_check(not out.disc and not out.disc_pending, "пальцы опущены — диск исчез")
 
-	# A relaxed open hand also has index and middle together, but the ring finger is straight.
+	# Fingers up but the ring finger straight (an open hand held up) is not the pose.
 	gestures = HandGestures.new()
-	var any_scroll := false
+	var any_disc := false
 	for i in 10:
-		out = gestures.update(_wheel(i * 0.05, 1.0 + i * 0.02, 0.12))
-		any_scroll = any_scroll or out.scrolling or not is_zero_approx(out.scroll)
-	_check(not any_scroll, "расслабленная открытая ладонь не прокручивает")
-
-	# The thumb coming in while scrolling must not click.
+		out = gestures.update(_disc_pose(i * 0.05, 0.12))
+		any_disc = any_disc or out.disc or out.disc_pending
+	_check(not any_disc, "поднятая открытая ладонь диск не вызывает")
+	# Fingers pointing forward are not the pose either.
 	gestures = HandGestures.new()
-	gestures.update(_wheel(0.0, 1.0))
-	gestures.update(_wheel(0.2, 1.0))
+	any_disc = false
+	for i in 10:
+		out = gestures.update(_disc_pose(i * 0.05, 0.05, 0.1))
+		any_disc = any_disc or out.disc or out.disc_pending
+	_check(not any_disc, "пальцы вперёд, а не вверх — диска нет")
+
+	# The thumb coming in while the disc is up must not click.
+	gestures = HandGestures.new()
+	gestures.update(_disc_pose(0.0))
+	gestures.update(_disc_pose(0.2))
 	var clicked := false
 	for i in 6:
-		out = gestures.update(_hand(0.25 + i * 0.05, 0.012, 0.06, 0.012))
+		out = gestures.update(_hand(0.25 + i * 0.05, 0.012))
 		clicked = clicked or out.button != NONE or out.pending
-	_check(not clicked, "большой палец во время прокрутки — щелчка нет")
+	_check(not clicked, "касание пальцев во время диска — щелчка нет")
 	gestures.update(_hand(0.6, 0.06))
 	gestures.update(_hand(0.7, 0.012))
 	out = gestures.update(_hand(0.83, 0.012))
@@ -349,6 +368,37 @@ func _test_hand_gestures() -> void:
 
 	_check(is_equal_approx(HandGestures.straightness(Vector3.ZERO, Vector3(0, 0.04, 0), Vector3(0, 0.07, 0), Vector3(0, 0.09, 0)), 1.0), "прямой палец — 1")
 	_check(HandGestures.straightness(Vector3.ZERO, Vector3(0, 0.04, 0), Vector3(0, 0.04, 0.03), Vector3(0, 0.02, 0.03)) < 0.6, "согнутый палец — заметно меньше 1")
+	_check(is_equal_approx(HandGestures.distance_to_segment(Vector3(0.01, 0.02, 0.0), Vector3.ZERO, Vector3(0, 0.04, 0)), 0.01), "расстояние до бока фаланги")
+	_check(is_equal_approx(HandGestures.distance_to_segment(Vector3(0, 0.07, 0), Vector3.ZERO, Vector3(0, 0.04, 0)), 0.03), "расстояние за концом фаланги — до конца")
+
+	# Scroll disc: the fingertip starts at the top; counter-clockwise (as seen by the user) scrolls up.
+	var disc := ScrollDisc.new()
+	var viewer := Vector3(0.0, 1.6, 0.0)
+	disc.start(Vector3(0.0, 1.3, -0.4), viewer)
+	_check(disc.center.is_equal_approx(Vector3(0.0, 1.3 - disc.radius, -0.4)), "диск появляется под кончиками пальцев")
+	_check(disc.marker().is_equal_approx(Vector3(0.0, 1.3, -0.4)), "пальцы на верхней точке диска")
+	_check(disc.basis().y.is_equal_approx(Vector3.BACK), "диск повёрнут к пользователю")
+	var turned := 0.0
+	for i in range(0, 73):
+		var angle := PI * 0.5 + i * TAU / 72.0
+		turned += disc.turn(disc.center + (disc.right * cos(angle) + disc.up * sin(angle)) * disc.radius)
+	_check(is_equal_approx(turned, disc.turn_units), "оборот против часовой — колесо вверх на оборот")
+	var back := 0.0
+	for i in range(0, 37):
+		var angle := PI * 0.5 - i * TAU / 72.0
+		back += disc.turn(disc.center + (disc.right * cos(angle) + disc.up * sin(angle)) * disc.radius)
+	_check(is_equal_approx(back, -disc.turn_units * 0.5), "полоборота по часовой — колесо вниз")
+	_check(disc.right.is_equal_approx(Vector3.RIGHT), "«право» диска — право пользователя")
+	_check(is_zero_approx(disc.turn(disc.center + Vector3(0.005, 0.0, 0.0))), "у самого центра колесо не крутится")
+	_check(is_zero_approx(disc.turn(disc.center + disc.up * disc.radius)), "после центра первый кадр только запоминает угол")
+
+	# Recalling where the cursor was before a pose froze it.
+	var filter := CursorFilter.new()
+	filter.update(Vector2(100.0, 100.0), true, false, 0.0)
+	filter.update(Vector2(100.0, 100.0), true, false, 0.2)
+	filter.update(Vector2(160.0, 90.0), true, false, 0.4)
+	_check(filter.recall(0.15) == Vector2(100.0, 100.0), "курсор возвращается туда, где был до позы")
+	_check(filter.recall(-5.0) == null, "слишком давно — возвращать некуда")
 
 
 func _test_recenter_math() -> void:
