@@ -6,6 +6,11 @@
 #   -Action list     print the displays
 #   -Action remove   detach one active VDD monitor (never the primary, never the last)
 #   -Action add      re-attach the most recently detached one at its old position
+#   -Action arrange -Positions "\\.\DISPLAY3=0,0;\\.\DISPLAY4=1920,0"
+#                    move monitors (by GDI name, as the app sees them) in one step
+#   -Action save     remember the current layout and which monitors are attached
+#   -Action restore  bring back the remembered layout (re-attach / detach VDD
+#                    monitors, then positions); never leaves fewer than one screen
 #
 # Prints one JSON line: {"ok":true,"code":"detached","detail":"..","attached":5}
 # Monitors are identified by their device path (\\?\DISPLAY#MTT1337#...), which
@@ -15,16 +20,150 @@
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less script as ANSI.
 # The embedded C# has to stay C# 5 (no string interpolation, no "out var").
 param(
-    [ValidateSet('list', 'add', 'remove')][string]$Action = 'list',
+    [ValidateSet('list', 'add', 'remove', 'arrange', 'save', 'restore')][string]$Action = 'list',
+    [string]$Positions = '',
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 
-Add-Type -TypeDefinition @'
+$CcdSource = @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+
+// Top-level windows and where they were, so that they can be put back on their own
+// monitor after a layout change: Windows piles them onto the primary otherwise.
+public class SavedWindow {
+    public IntPtr Handle;
+    public string Device;
+    public int MonitorX, MonitorY;
+    public WindowKeeper.Placement Placement;
+}
+
+public static class WindowKeeper {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Placement {
+        public int length; public int flags; public int showCmd;
+        public POINT minPosition; public POINT maxPosition; public RECT normalPosition;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct MONITORINFOEX {
+        public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    }
+    delegate bool EnumProc(IntPtr hwnd, IntPtr param);
+    delegate bool MonitorProc(IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr param);
+
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr param);
+    [DllImport("user32.dll")] static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorProc proc, IntPtr param);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFOEX info);
+    [DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr hwnd, ref Placement placement);
+    [DllImport("user32.dll")] static extern bool SetWindowPlacement(IntPtr hwnd, ref Placement placement);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
+    [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+    // SetWindowPlacement waits for the window's thread; one that is busy (the app
+    // itself waiting for this script, or a hung program) would block us for good.
+    static bool Responds(IntPtr hwnd) {
+        IntPtr ignored;
+        return SendMessageTimeout(hwnd, 0, IntPtr.Zero, IntPtr.Zero, 0x2, 200, out ignored) != IntPtr.Zero; // WM_NULL, SMTO_ABORTIFHUNG
+    }
+
+    // Real pixels, not the 96-DPI virtualised ones.
+    public static void PerMonitorDpi() { SetThreadDpiAwarenessContext(new IntPtr(-4)); }
+
+    static bool MonitorBounds(IntPtr monitor, out string device, out RECT bounds) {
+        MONITORINFOEX info = new MONITORINFOEX();
+        info.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+        bool ok = monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info);
+        device = ok ? info.szDevice : "";
+        bounds = info.rcMonitor;
+        return ok;
+    }
+
+    public static List<SavedWindow> Snapshot() {
+        var result = new List<SavedWindow>();
+        EnumWindows(delegate (IntPtr hwnd, IntPtr param) {
+            if (!IsWindowVisible(hwnd) || GetWindowTextLength(hwnd) == 0) return true;
+            if (GetWindow(hwnd, 4) != IntPtr.Zero) return true; // owned (dialogs move with their owner)
+            if ((GetWindowLong(hwnd, -20) & 0x80) != 0) return true; // WS_EX_TOOLWINDOW
+            int cloaked;
+            if (DwmGetWindowAttribute(hwnd, 14, out cloaked, 4) == 0 && cloaked != 0) return true;
+            SavedWindow saved = new SavedWindow();
+            saved.Handle = hwnd;
+            saved.Placement.length = Marshal.SizeOf(typeof(Placement));
+            if (!GetWindowPlacement(hwnd, ref saved.Placement)) return true;
+            RECT bounds;
+            if (!MonitorBounds(MonitorFromWindow(hwnd, 2), out saved.Device, out bounds)) return true;
+            saved.MonitorX = bounds.Left; saved.MonitorY = bounds.Top;
+            result.Add(saved);
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    // Puts each window back on the monitor it was on, at the same place relative to
+    // that monitor. Returns how many had to be moved.
+    public static int Restore(List<SavedWindow> saved) {
+        var monitors = new Dictionary<string, RECT>(StringComparer.OrdinalIgnoreCase);
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate (IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr param) {
+            string device; RECT bounds;
+            if (MonitorBounds(monitor, out device, out bounds)) monitors[device] = bounds;
+            return true;
+        }, IntPtr.Zero);
+        IntPtr foreground = GetForegroundWindow();
+        int moved = 0;
+        foreach (SavedWindow window in saved) {
+            RECT target;
+            if (!monitors.TryGetValue(window.Device, out target)) continue;
+            Placement wanted = window.Placement;
+            Shift(ref wanted.normalPosition, target.Left - window.MonitorX, target.Top - window.MonitorY);
+            bool maximized = wanted.showCmd == 3;
+            // A window Windows had already piled onto another monitor may keep a restore
+            // rectangle there: bring it onto its own monitor, or it maximizes in the wrong place.
+            int centreX = (wanted.normalPosition.Left + wanted.normalPosition.Right) / 2;
+            int centreY = (wanted.normalPosition.Top + wanted.normalPosition.Bottom) / 2;
+            if (centreX < target.Left || centreX >= target.Right || centreY < target.Top || centreY >= target.Bottom) {
+                Shift(ref wanted.normalPosition, target.Left + 40 - wanted.normalPosition.Left, target.Top + 40 - wanted.normalPosition.Top);
+            }
+            Placement now = new Placement();
+            now.length = Marshal.SizeOf(typeof(Placement));
+            if (!GetWindowPlacement(window.Handle, ref now)) continue;
+            string device; RECT bounds;
+            bool sameMonitor = MonitorBounds(MonitorFromWindow(window.Handle, 2), out device, out bounds)
+                && string.Equals(device, window.Device, StringComparison.OrdinalIgnoreCase);
+            if (sameMonitor && (maximized || (now.normalPosition.Left == wanted.normalPosition.Left && now.normalPosition.Top == wanted.normalPosition.Top))) continue;
+            if (!Responds(window.Handle)) continue;
+            // Restored first (without taking the focus) on its monitor; a maximized window
+            // then maximizes there: SetWindowPlacement alone leaves it where it is maximized now.
+            wanted.flags = 0;
+            wanted.showCmd = wanted.showCmd == 2 ? 7 : 4;
+            if (!SetWindowPlacement(window.Handle, ref wanted)) continue;
+            if (maximized) ShowWindowAsync(window.Handle, 3);
+            moved++;
+        }
+        if (foreground != IntPtr.Zero && Responds(foreground)) SetForegroundWindow(foreground);
+        return moved;
+    }
+
+    static void Shift(ref RECT rect, int dx, int dy) {
+        rect.Left += dx; rect.Right += dx; rect.Top += dy; rect.Bottom += dy;
+    }
+}
 
 public class CcdScreen {
     public string Path { get; set; }
@@ -199,6 +338,43 @@ public static class Ccd {
         return SetDisplayConfig((uint)paths.Count, paths.ToArray(), (uint)modes.Length, modes, SDC_FLAGS);
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SOURCE_NAME {
+        public uint type; public uint size; public LUID adapterId; public uint id;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string viewGdiDeviceName;
+    }
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetSourceName(ref SOURCE_NAME request);
+
+    static string GdiName(PATH_SOURCE source) {
+        SOURCE_NAME request = new SOURCE_NAME();
+        request.type = 1; // DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME
+        request.size = (uint)Marshal.SizeOf(typeof(SOURCE_NAME));
+        request.adapterId = source.adapterId;
+        request.id = source.id;
+        return GetSourceName(ref request) == 0 ? request.viewGdiDeviceName : "";
+    }
+
+    // Moves the given monitors in one SetDisplayConfig call. `byGdiName`: the keys are
+    // \\.\DISPLAYnn names, otherwise device paths. -1 if one of them is not active.
+    public static int SetPositions(string[] names, int[] xs, int[] ys, bool byGdiName) {
+        PATH_INFO[] paths; MODE_INFO[] modes;
+        Query(QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
+        for (int n = 0; n < names.Length; n++) {
+            bool found = false;
+            for (int i = 0; i < paths.Length; i++) {
+                string name = byGdiName ? GdiName(paths[i].sourceInfo) : TargetPath(paths[i].targetInfo);
+                if (!Same(name, names[n])) continue;
+                uint index = paths[i].sourceInfo.modeInfoIdx;
+                if (index >= modes.Length || modes[index].infoType != MODE_SOURCE) continue;
+                modes[index].srcX = xs[n];
+                modes[index].srcY = ys[n];
+                found = true;
+            }
+            if (!found) return -1;
+        }
+        return SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, SDC_FLAGS);
+    }
+
     public static int SetPosition(string devicePath, int x, int y) {
         PATH_INFO[] paths; MODE_INFO[] modes;
         Query(QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
@@ -218,7 +394,38 @@ public static class Ccd {
 $StateDir = Join-Path $env:LOCALAPPDATA 'WoRkPlace'
 $StatePath = Join-Path $StateDir 'detached.json'
 $LogPath = Join-Path $StateDir 'topology.log'
+$BackupPath = Join-Path $StateDir 'layout_backup.json'
 New-Item -ItemType Directory -Force $StateDir | Out-Null
+
+# Compiling the C# takes about a second on every run: keep the compiled assembly,
+# named by a hash of the source so that an edited script builds a new one.
+$sha = [System.Security.Cryptography.SHA1]::Create()
+$hash = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($CcdSource))) -replace '-', '').Substring(0, 12)
+$AssemblyPath = Join-Path $StateDir "ccd_$hash.dll"
+if (-not (Test-Path $AssemblyPath)) {
+    Get-ChildItem $StateDir -Filter 'ccd_*.dll' -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+    Add-Type -TypeDefinition $CcdSource -OutputAssembly $AssemblyPath -OutputType Library
+}
+Add-Type -Path $AssemblyPath
+[WindowKeeper]::PerMonitorDpi()
+
+# Windows moves windows itself a moment after a layout change; put them back after it.
+# Measured on 17.10.2026: a window was still moved 3.8 s after the change, so keep
+# watching for up to 10 s and stop once nothing has moved for 2.5 s (at least 5 s).
+function Restore-Windows($saved) {
+    $total = 0
+    $started = Get-Date
+    $lastMove = $started
+    while ($true) {
+        Start-Sleep -Milliseconds 400
+        $moved = [WindowKeeper]::Restore($saved)
+        $now = Get-Date
+        if ($moved -gt 0) { $total += $moved; $lastMove = $now }
+        $elapsed = ($now - $started).TotalSeconds
+        if ($elapsed -ge 10 -or ($elapsed -ge 5 -and ($now - $lastMove).TotalSeconds -ge 2.5)) { break }
+    }
+    Write-Log ("Windows: {0} remembered, {1} moved back, watched {2:N1} s" -f $saved.Count, $total, ($now - $started).TotalSeconds)
+}
 
 function Write-Log([string]$text) {
     Add-Content -Path $LogPath -Value ('{0:HH:mm:ss.fff} [{1}] {2}' -f (Get-Date), $Action, $text)
@@ -320,14 +527,89 @@ function Add-Screen {
     return @{ ok = $false; code = 'failed'; detail = ($errors -join '; ') }
 }
 
+function Set-Arrangement {
+    $names = @(); $xs = @(); $ys = @()
+    foreach ($item in ($Positions -split ';')) {
+        if ($item -notmatch '^(.+)=(-?\d+),(-?\d+)$') { continue }
+        $names += $Matches[1]; $xs += [int]$Matches[2]; $ys += [int]$Matches[3]
+    }
+    if ($names.Count -eq 0) { return @{ ok = $false; code = 'failed'; detail = "no positions in '$Positions'" } }
+    Write-ScreensToLog (Get-Screens)
+    if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = $Positions } }
+    $code = [Ccd]::SetPositions([string[]]$names, [int[]]$xs, [int[]]$ys, $true)
+    Write-Log "Arrange $Positions -> $code"
+    if ($code -ne 0) { return @{ ok = $false; code = 'failed'; detail = "SetDisplayConfig returned $code" } }
+    return @{ ok = $true; code = 'arranged'; detail = '' }
+}
+
+function Save-Layout {
+    $screens = Get-Screens
+    Write-ScreensToLog $screens
+    $items = @($screens | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Active = [bool]$_.Active; X = $_.X; Y = $_.Y } | ConvertTo-Json -Compress })
+    if (-not $DryRun) { [System.IO.File]::WriteAllText($BackupPath, '[' + ($items -join ',') + ']') }
+    return @{ ok = $true; code = 'saved'; detail = "$(@($screens | Where-Object Active).Count) active" }
+}
+
+function Restore-Layout {
+    if (-not (Test-Path $BackupPath)) { return @{ ok = $false; code = 'no_backup'; detail = '' } }
+    $parsed = Get-Content $BackupPath -Raw | ConvertFrom-Json
+    $backup = @($parsed | Where-Object { $_.Path -is [string] })
+    $screens = Get-Screens
+    Write-ScreensToLog $screens
+    if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "$($backup.Count) remembered" } }
+    $errors = @()
+    $state = @(Read-State)
+
+    # Attach first, so the number of screens never drops on the way.
+    foreach ($entry in @($backup | Where-Object Active)) {
+        $screen = $screens | Where-Object { $_.Path -eq $entry.Path }
+        if ($null -eq $screen -or $screen.Active) { continue }
+        $code = [Ccd]::Attach($entry.Path)
+        Write-Log "Attach $(Get-ShortName $entry.Path) -> $code"
+        if ($code -ne 0 -or -not (Wait-Active $entry.Path $true)) { $errors += "attach $(Get-ShortName $entry.Path): $code"; continue }
+        $state = @($state | Where-Object { $_.Path -ne $entry.Path })
+    }
+    # Then detach VDD monitors that were not attached before; never the primary, never the last.
+    foreach ($screen in @(Get-Screens | Where-Object { $_.Active -and $_.IsVdd -and -not $_.Primary })) {
+        $entry = $backup | Where-Object { $_.Path -eq $screen.Path }
+        if ($null -eq $entry -or $entry.Active) { continue }
+        if (@(Get-Screens | Where-Object Active).Count -le 1) { break }
+        $code = [Ccd]::Detach($screen.Path)
+        Write-Log "Detach $($screen.Short) -> $code"
+        if ($code -ne 0 -or -not (Wait-Active $screen.Path $false)) { $errors += "detach $($screen.Short): $code"; continue }
+        $state = @($state | Where-Object { $_.Path -ne $screen.Path })
+        $state += [pscustomobject]@{ Path = $screen.Path; X = $screen.X; Y = $screen.Y }
+    }
+    Write-State $state
+
+    # Positions of everything that is attached now and was attached then.
+    $active = @(Get-Screens | Where-Object Active)
+    $place = @($backup | Where-Object { $_.Active -and ($active.Path -contains $_.Path) })
+    if ($place.Count -gt 0) {
+        $code = [Ccd]::SetPositions([string[]]@($place.Path), [int[]]@($place | ForEach-Object { $_.X }), [int[]]@($place | ForEach-Object { $_.Y }), $false)
+        Write-Log "SetPositions ($($place.Count)) -> $code"
+        if ($code -ne 0) { $errors += "positions: $code" }
+    }
+    if ($errors.Count -gt 0) { return @{ ok = $false; code = 'failed'; detail = ($errors -join '; ') } }
+    return @{ ok = $true; code = 'restored'; detail = '' }
+}
+
 try {
+    $windows = $null
+    if (-not $DryRun -and @('add', 'remove', 'arrange', 'restore') -contains $Action) { $windows = [WindowKeeper]::Snapshot() }
     switch ($Action) {
-        'list'   { Get-Screens | Select-Object Short, IsVdd, Active, Primary, X, Y, Width, Height | Format-Table -AutoSize | Out-String -Width 200 | Write-Output; exit 0 }
-        'remove' { $result = Remove-Screen }
-        'add'    { $result = Add-Screen }
+        'list'    { Get-Screens | Select-Object Short, IsVdd, Active, Primary, X, Y, Width, Height | Format-Table -AutoSize | Out-String -Width 200 | Write-Output; exit 0 }
+        'remove'  { $result = Remove-Screen }
+        'add'     { $result = Add-Screen }
+        'arrange' { $result = Set-Arrangement }
+        'save'    { $result = Save-Layout }
+        'restore' { $result = Restore-Layout }
     }
 } catch {
     $result = @{ ok = $false; code = 'failed'; detail = "$($_.Exception.Message)" }
+}
+if ($null -ne $windows) {
+    try { Restore-Windows $windows } catch { Write-Log "Windows: $($_.Exception.Message)" }
 }
 $result.attached = @(Get-Screens | Where-Object Active).Count
 $json = $result | ConvertTo-Json -Compress

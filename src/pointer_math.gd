@@ -26,6 +26,35 @@ static func rect_uv(point: Vector3, rect_transform: Transform3D, size: Vector2) 
 	return Vector2(local.x / size.x + 0.5, 0.5 - local.y / size.y)
 
 
+## A curved panel: `size.x` metres of arc on a cylinder of `radius` with a
+## vertical axis, curving towards the viewer. `panel_transform` is at the middle of
+## the arc, its +Z towards the viewer, so the cylinder's axis is `radius` in front.
+## Returns (distance along the ray, u, v) with u, v 0..1 from the top-left corner,
+## or x = -1.0 on a miss.
+static func ray_arc(origin: Vector3, direction: Vector3, panel_transform: Transform3D, size: Vector2, radius: float) -> Vector3:
+	var inverse := panel_transform.affine_inverse()
+	var o := inverse * origin - Vector3(0.0, 0.0, radius)
+	var d := inverse.basis * direction
+	# x² + z² = radius² around the axis.
+	var a := d.x * d.x + d.z * d.z
+	if is_zero_approx(a):
+		return Vector3(-1.0, 0.0, 0.0)
+	var b := o.x * d.x + o.z * d.z
+	var c := o.x * o.x + o.z * o.z - radius * radius
+	var discriminant := b * b - a * c
+	if discriminant < 0.0:
+		return Vector3(-1.0, 0.0, 0.0)
+	var half_angle := size.x * 0.5 / radius
+	for t: float in [(-b - sqrt(discriminant)) / a, (-b + sqrt(discriminant)) / a]:
+		if t < 0.0:
+			continue
+		var point := o + d * t
+		var angle := atan2(point.x, -point.z)
+		if point.z < 0.0 and absf(angle) <= half_angle and absf(point.y) <= size.y * 0.5:
+			return Vector3(t, angle / (2.0 * half_angle) + 0.5, 0.5 - point.y / size.y)
+	return Vector3(-1.0, 0.0, 0.0)
+
+
 ## Pinch with hysteresis: closes below `press_distance`, opens above `release_distance`.
 static func pinch_state(was_pinched: bool, tip_distance: float, press_distance: float, release_distance: float) -> bool:
 	if was_pinched:

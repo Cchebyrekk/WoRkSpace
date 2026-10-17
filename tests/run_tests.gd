@@ -12,9 +12,11 @@ func _init() -> void:
 	_test_hand_ray()
 	_test_recenter_math()
 	_test_rect_uv()
+	_test_ray_arc()
 	_test_cursor_filter()
 	_test_aim_study()
 	_test_panel_layout()
+	_test_layout_edit()
 	_test_hand_gestures()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
@@ -41,6 +43,21 @@ func _test_ray_rect() -> void:
 	var turned := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-2.0, 1.0, 0.0))
 	_check(is_equal_approx(PointerMath.ray_rect_distance(eye, Vector3.LEFT, turned, size), 2.0), "повёрнутый прямоугольник слева")
 	_check(PointerMath.ray_rect_distance(eye, Vector3.FORWARD, turned, size) < 0.0, "повёрнутый: луч вперёд — промах")
+
+
+func _test_ray_arc() -> void:
+	# A curved panel 1.2 m of arc on a 1.1 m cylinder around the viewer at the origin.
+	var panel := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, -1.1))
+	var hit := PointerMath.ray_arc(Vector3.ZERO, Vector3.FORWARD, panel, Vector2(1.2, 0.6), 1.1)
+	_check(is_equal_approx(hit.x, 1.1) and is_equal_approx(hit.y, 0.5) and is_equal_approx(hit.z, 0.5), "изогнутая панель: луч в середину")
+	# Around the cylinder axis every point of the arc is 1.1 m away.
+	var angle := 0.4
+	hit = PointerMath.ray_arc(Vector3.ZERO, Vector3(sin(angle), 0.0, -cos(angle)), panel, Vector2(1.2, 0.6), 1.1)
+	_check(is_equal_approx(hit.x, 1.1) and is_equal_approx(hit.y, angle / (1.2 / 1.1) + 0.5), "изогнутая панель: u растёт по дуге")
+	hit = PointerMath.ray_arc(Vector3.ZERO, Vector3(sin(0.7), 0.0, -cos(0.7)), panel, Vector2(1.2, 0.6), 1.1)
+	_check(hit.x < 0.0, "изогнутая панель: мимо края — промах")
+	hit = PointerMath.ray_arc(Vector3.ZERO, Vector3.BACK, panel, Vector2(1.2, 0.6), 1.1)
+	_check(hit.x < 0.0, "изогнутая панель: сзади — промах")
 
 
 func _test_rect_uv() -> void:
@@ -224,6 +241,191 @@ func _test_panel_layout() -> void:
 	placed = PanelLayout.arrange(five, 2, eye, distance, 60.0, 300.0)
 	_check(is_zero_approx(placed[2].heading) and is_equal_approx(placed[4].heading, deg_to_rad(120.0)), "пять в ряд: основной по центру, масштаб не меняется")
 	_check(PanelLayout.arrange([] as Array[Rect2i], 0, eye, distance, 60.0, 300.0).is_empty(), "нет мониторов — нет панелей")
+
+	# Back from VR to the desktop: the centre of each panel maps to the centre of its monitor.
+	placed = PanelLayout.arrange(rows, 0, eye, distance, 60.0, 300.0)
+	var back := PanelLayout.to_desktop(rows, 0, distance, 60.0, 300.0, placed[1].heading, placed[1].elevation)
+	_check(back.is_equal_approx(Vector2(rows[1].get_center())), "из VR обратно в пиксели: центр панели — центр монитора")
+
+	# A panel enlarged in VR pushes its neighbours aside: they still meet edge to edge.
+	var trio: Array[Rect2i] = [Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080)]
+	placed = PanelLayout.arrange(trio, 1, eye, distance, 60.0, 300.0, [1.0, 1.5, 1.0] as Array[float])
+	var middle_right := placed[1].transform * Vector3(placed[1].size.x * 0.5, 0.0, 0.0)
+	var right_left := placed[2].transform * Vector3(-placed[2].size.x * 0.5, 0.0, 0.0)
+	_check(is_zero_approx(placed[1].heading), "увеличенная средняя панель осталась прямо перед глазами")
+	# Flat panels of different sizes meet at different depths; from the eye the edges line up.
+	_check((middle_right - eye).normalized().angle_to((right_left - eye).normalized()) < 0.002, "увеличенная панель: соседи стыкуются гранью к грани")
+	_check(is_equal_approx(placed[1].size.x, 1.5 * 2.0 * distance * tan(deg_to_rad(30.0))), "увеличенная панель в полтора раза шире")
+	_check(is_equal_approx(placed[0].heading, -placed[2].heading), "увеличенная панель: соседи раздвинулись поровну")
+
+	# Below (and above) eye level panels facing the eye used to cut into each other
+	# (reported on 16.10.2026). Seen from above, the right-most corner of the left
+	# panel must not pass the left-most corner of the right one, leaning or curved.
+	var two_below: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(-960, 1080, 1920, 1080), Rect2i(960, 1080, 1920, 1080)]
+	for variant in [[[] as Array[float], [] as Array[float], "к глазу"],
+			[[NAN, 0.0, 0.0] as Array[float], [] as Array[float], "стоят прямо"],
+			[[] as Array[float], [0.0, 0.8, 0.8] as Array[float], "изогнуты"]]:
+		placed = PanelLayout.arrange(two_below, 0, eye, distance, 60.0, 300.0, [] as Array[float], 0.07, variant[0], variant[1])
+		var left_edge := -INF
+		var right_edge := INF
+		for corner in [Vector2(1, 1), Vector2(1, -1), Vector2(-1, 1), Vector2(-1, -1)]:
+			var left_point := _panel_point(placed[1], corner, distance)
+			var right_point := _panel_point(placed[2], corner, distance)
+			left_edge = maxf(left_edge, atan2(left_point.x - eye.x, -(left_point.z - eye.z)))
+			right_edge = minf(right_edge, atan2(right_point.x - eye.x, -(right_point.z - eye.z)))
+		_check(left_edge <= right_edge + 0.002, "ряд ниже глаз (%s): панели не заходят друг в друга" % variant[2])
+		_check(right_edge - left_edge < deg_to_rad(4.0), "ряд ниже глаз (%s): и не расходятся заметно" % variant[2])
+
+	# A gap between rows, for the handles.
+	placed = PanelLayout.arrange(rows, 0, eye, distance, 60.0, 300.0, [] as Array[float], 0.07)
+	lower_top = placed[0].transform.origin.y + placed[0].size.y * 0.5
+	upper_bottom = (placed[1].transform * Vector3(0.0, -placed[1].size.y * 0.5, 0.0)).y
+	_check(upper_bottom - lower_top > 0.05 and upper_bottom - lower_top < 0.08, "между рядами зазор под ручку")
+	_check(is_zero_approx(placed[0].elevation), "с зазором ряд основного по-прежнему на уровне глаз")
+
+	# Magnets for panels placed in VR.
+	var other := Vector4(0.0, 0.0, 0.5, 0.3)
+	var snapped := PanelLayout.snap_angles(1.03, 0.02, Vector2(0.5, 0.3), [other] as Array[Vector4], deg_to_rad(3.0))
+	_check(snapped.is_equal_approx(Vector2(1.0, 0.0)), "магнит: панель прилипает грань к грани и по высоте")
+	snapped = PanelLayout.snap_angles(1.3, 0.4, Vector2(0.5, 0.3), [other] as Array[Vector4], deg_to_rad(3.0))
+	_check(snapped.is_equal_approx(Vector2(1.3, 0.4)), "магнит: вдали панель не трогает")
+	# Held at one place (1.0, edge to edge with `other`), pulled near another (1.03,
+	# in line with a second panel): the nearer one wins (it stayed a little off, 17.10.2026).
+	var two_others := [other, Vector4(1.03, 0.0, 0.5, 0.3)] as Array[Vector4]
+	snapped = PanelLayout.snap_angles(1.04, 0.0, Vector2(0.5, 0.3), two_others, deg_to_rad(3.0), Vector2(1.0, NAN))
+	_check(is_equal_approx(snapped.x, 1.03), "магнит: удержание не мешает точной точке рядом")
+	# Moving the panel up and down along an edge must not make it creep sideways (17.10.2026).
+	var neighbour := Vector4(0.0, 0.2, 0.5, 0.3)
+	var widths := [PanelLayout.visible_half(Vector2(1.27, 0.71), 0.2, 0.0, distance).x] as Array[float]
+	var low := PanelLayout.snap_angles(1.05, -0.1, Vector2(0.5, 0.3), [neighbour] as Array[Vector4], deg_to_rad(3.0), Vector2(NAN, NAN), widths)
+	var high := PanelLayout.snap_angles(1.05, 0.35, Vector2(0.5, 0.3), [neighbour] as Array[Vector4], deg_to_rad(3.0), Vector2(NAN, NAN), widths)
+	_check(is_equal_approx(low.x, high.x) and not is_equal_approx(low.x, 1.05), "магнит: вдоль края вверх-вниз панель не ползёт вбок")
+
+	# Just past the reach it still holds; well past it lets go.
+	snapped = PanelLayout.snap_angles(1.0 + deg_to_rad(4.0), 0.3, Vector2(0.5, 0.3), [other] as Array[Vector4], deg_to_rad(3.0), Vector2(1.0, NAN))
+	_check(is_equal_approx(snapped.x, 1.0), "магнит: у границы держит")
+	snapped = PanelLayout.snap_angles(1.0 + deg_to_rad(6.0), 0.3, Vector2(0.5, 0.3), [other] as Array[Vector4], deg_to_rad(3.0), Vector2(1.0, NAN))
+	_check(is_equal_approx(snapped.x, 1.0 + deg_to_rad(6.0)), "магнит: дальше отпускает")
+	_check(is_equal_approx(PanelLayout.snap_scale(1.02, Vector2(0.5, 0.3), [] as Array[Vector2], 0.04), 1.0), "магнит размера: к исходному")
+	var bigger := Vector2(0.5, 0.3) * 1.5
+	_check(is_equal_approx(PanelLayout.snap_scale(1.47, Vector2(0.5, 0.3), [bigger] as Array[Vector2], 0.04), 1.5), "магнит размера: как у соседа")
+	_check(is_equal_approx(PanelLayout.snap_scale(1.3, Vector2(0.5, 0.3), [bigger] as Array[Vector2], 0.04), 1.3), "магнит размера: вдали не трогает")
+
+	# A curved panel looks narrower than a flat one: the magnet has to see that.
+	var flat_half := PanelLayout.visible_half(Vector2(1.27, 0.71), 0.0, 0.0, distance)
+	var curved_half := PanelLayout.visible_half(Vector2(1.27, 0.71), 0.0, 1.0, distance)
+	_check(is_equal_approx(flat_half.x, atan(0.635 / distance)), "видимая ширина плоской панели")
+	_check(is_equal_approx(curved_half.x, 1.27 * 0.5 / distance), "изогнутая вокруг глаза: видимая половина — половина дуги")
+
+	# Where a ray from the hand leaves the sphere of panels.
+	var angles := PanelLayout.sphere_angles(eye, PanelLayout.direction_of(0.5, 0.2), eye, distance)
+	_check(angles.is_equal_approx(Vector2(0.5, 0.2)), "луч из глаза: курс и возвышение совпадают с направлением")
+	angles = PanelLayout.sphere_angles(eye + Vector3(0.2, -0.3, -0.3), Vector3.FORWARD, eye, distance)
+	_check(angles.x > 0.0 and angles.y < 0.0 and angles.x < 0.3, "луч от руки справа снизу выходит справа снизу")
+
+
+## A corner (±1, ±1) of a placed panel in world space; curved panels bend towards the eye.
+func _panel_point(placement: PanelLayout.Placement, corner: Vector2, distance: float) -> Vector3:
+	var local := Vector3(corner.x * placement.size.x * 0.5, corner.y * placement.size.y * 0.5, 0.0)
+	if placement.curvature > 0.0:
+		var radius := PanelLayout.curve_radius(placement.curvature, distance)
+		var angle := corner.x * placement.size.x * 0.5 / radius
+		local = Vector3(radius * sin(angle), local.y, radius * (1.0 - cos(angle)))
+	return placement.transform * local
+
+
+func _layout_is_valid(rects: Array[Rect2i], primary: int) -> bool:
+	if rects[primary].position != Vector2i.ZERO:
+		return false
+	for i in rects.size():
+		for j in range(i + 1, rects.size()):
+			if rects[i].intersects(rects[j]):
+				return false
+	# Connected: a monitor touches another along an edge (not just a corner).
+	var reached := {0: true}
+	var changed := true
+	while changed:
+		changed = false
+		for i in rects.size():
+			if reached.has(i):
+				continue
+			for j: int in reached.keys():
+				var a := rects[i]
+				var b := rects[j]
+				var side := (a.end.x == b.position.x or b.end.x == a.position.x) and mini(a.end.y, b.end.y) > maxi(a.position.y, b.position.y)
+				var stacked := (a.end.y == b.position.y or b.end.y == a.position.y) and mini(a.end.x, b.end.x) > maxi(a.position.x, b.position.x)
+				if side or stacked:
+					reached[i] = true
+					changed = true
+					break
+	return reached.size() == rects.size()
+
+
+func _test_layout_edit() -> void:
+	var three: Array[Rect2i] = [Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080)]
+	var rows := LayoutEdit.rows(three)
+	_check(rows.size() == 1 and rows[0] == PackedInt32Array([0, 1, 2]), "три в ряд — один ряд слева направо")
+
+	# The left monitor dropped to the right of the right one: order becomes 1, 2, 0.
+	var moved := LayoutEdit.move(three, 1, 0, Vector2(4000.0, 540.0))
+	_check(_layout_is_valid(moved, 1), "перенос вправо: раскладка допустима")
+	_check(moved[1].position.x < moved[2].position.x and moved[2].position.x < moved[0].position.x, "перенос вправо: порядок 1, 2, 0")
+	_check(moved[0].position.y == 0 and moved[2].position.y == 0, "перенос вправо: все в одном ряду")
+
+	# Dropped between two neighbours: goes in between.
+	moved = LayoutEdit.move(three, 1, 2, Vector2(-900.0, 540.0))
+	_check(_layout_is_valid(moved, 1), "вставка между соседями: раскладка допустима")
+	_check(moved[0].position.x < moved[2].position.x and moved[2].position.x < moved[1].position.x, "вставка между соседями: порядок 0, 2, 1")
+
+	# Dropped well above: a new row on top, touching the row below.
+	moved = LayoutEdit.move(three, 1, 2, Vector2(960.0, -1200.0))
+	_check(_layout_is_valid(moved, 1), "новый ряд сверху: раскладка допустима")
+	_check(moved[2].end.y == 0, "новый ряд сверху: стоит на ряду ниже")
+	_check(moved[0].position.y == 0 and moved[1].position.y == 0, "новый ряд сверху: нижний ряд на месте")
+
+	# The middle one moved up: left and right close the gap.
+	moved = LayoutEdit.move(three, 0, 1, Vector2(0.0, -1200.0))
+	_check(_layout_is_valid(moved, 0), "средний наверх: раскладка допустима")
+	_check(moved[0].end.x == moved[2].position.x, "средний наверх: соседи сомкнулись")
+
+	# Back down from a second row into the first.
+	var two_rows: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080), Rect2i(960, -1080, 1920, 1080)]
+	_check(LayoutEdit.rows(two_rows).size() == 2, "два ряда распознаны")
+	moved = LayoutEdit.move(two_rows, 0, 2, Vector2(5000.0, 500.0))
+	_check(_layout_is_valid(moved, 0), "из верхнего ряда в нижний: раскладка допустима")
+	_check(LayoutEdit.rows(moved).size() == 1 and moved[2].position.x == moved[1].end.x, "из верхнего ряда в нижний: встал справа")
+
+	# A new row far to the side still overlaps the row it sits on.
+	moved = LayoutEdit.move(three, 1, 0, Vector2(20000.0, 3000.0))
+	_check(_layout_is_valid(moved, 1), "новый ряд далеко сбоку: раскладка допустима")
+
+	# Moving the primary keeps it at (0, 0) and the layout valid; mixed sizes too.
+	var mixed: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 2560, 1440), Rect2i(-1280, 0, 1280, 720)]
+	moved = LayoutEdit.move(mixed, 0, 0, Vector2(6000.0, 700.0))
+	_check(_layout_is_valid(moved, 0), "перенос основного и разные размеры: раскладка допустима")
+	_check(moved[1].size == Vector2i(2560, 1440), "размеры мониторов не меняются")
+
+	# Two over the seams of three ("45 degrees", asked for on 16.10.2026): the magnet
+	# puts the middle of an upper monitor on the edge between two lower ones.
+	var five: Array[Rect2i] = [Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080),
+			Rect2i(-1920, -1080, 1920, 1080), Rect2i(0, -1080, 1920, 1080)]
+	moved = LayoutEdit.move(five, 1, 4, Vector2(1900.0, -500.0))
+	_check(_layout_is_valid(moved, 1), "над стыком: раскладка допустима")
+	_check(moved[4].position == Vector2i(960, -1080), "над стыком: середина верхнего на стыке нижних")
+	_check(moved[3].position == Vector2i(-1920, -1080), "над стыком: второй верхний не сдвинулся")
+	moved = LayoutEdit.move(moved, 1, 3, Vector2(30.0, -560.0))
+	_check(moved[3].position == Vector2i(-960, -1080) and moved[4].position == Vector2i(960, -1080), "два над стыками трёх")
+
+	# An upper row on the right, away from the existing upper monitor (reported on 16.10.2026).
+	var with_top_left: Array[Rect2i] = [Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080),
+			Rect2i(-1920, -1080, 1920, 1080)]
+	moved = LayoutEdit.move(with_top_left, 1, 0, Vector2(2900.0, -560.0))
+	_check(_layout_is_valid(moved, 1), "второй ряд справа: раскладка допустима")
+	_check(moved[0].position.y == -1080 and moved[0].position.x > moved[3].position.x, "второй ряд справа: встал наверх справа")
+
+	# Dropping where it already is changes nothing.
+	moved = LayoutEdit.move(three, 1, 2, Vector2(2880.0, 540.0))
+	_check(moved == three, "отпустили на том же месте — раскладка та же")
 
 
 ## A hand with fingers pointing forward (not the disc pose) and the given contact distances.

@@ -71,6 +71,8 @@ const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
 const PANEL_DISTANCE := 1.1
 const PANEL_WIDTH_DEG := 60.0
 const PANEL_CENTER_HEIGHT := 1.45
+## Centre of the sphere the panels stand on (world space, after recentring).
+const PANEL_EYE := Vector3(0.0, PANEL_CENTER_HEIGHT, 0.0)
 ## A row of monitors wider than this arc is shrunk to fit, so that panels never
 ## wrap around behind the user.
 const PANEL_MAX_ARC_DEG := 300.0
@@ -133,6 +135,11 @@ const TUNABLES := [
 	["cursor", "drag_threshold", "Перетаскивание: порог", 1.0, "px", 5.0, 5.0, 150.0],
 	["cursor", "drag_delay_sec", "Перетаскивание: задержка", 1000.0, "мс", 0.05, 0.0, 1.0],
 	["cursor", "double_click_sec", "Двойной щелчок: окно", 1000.0, "мс", 0.1, 0.3, 2.0],
+	["gestures", "grab_mode", "Перенос панели", 1.0, "", 1.0, 0.0, 3.0],
+	["gestures", "fist_curl", "Кулак: пальцы у ладони", 1000.0, "мм", 0.005, 0.04, 0.11],
+	["panels", "move_mode", "Перенос меняет", 1.0, "", 1.0, 0.0, 1.0],
+	["panels", "magnet", "Магнит в VR", 1.0, "", 1.0, 0.0, 1.0],
+	["panels", "tilt_mode", "Наклон меняет", 1.0, "", 1.0, 0.0, 1.0],
 ]
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
@@ -145,7 +152,44 @@ const TOPOLOGY_MESSAGES := {
 	"attached": "экран присоединён",
 	"last_screen": "это последний экран, убирать нельзя",
 	"no_free_screen": "свободных экранов нет — «Новый VDD» создаст ещё один (Link переподключится)",
+	"arranged": "раскладка Windows изменена",
+	"saved": "исходная раскладка запомнена",
+	"restored": "исходная раскладка возвращена",
+	"no_backup": "исходная раскладка не запомнена",
 }
+## Grabbing a screen panel: by the bar under it (move) or by its corner (resize in VR only).
+const GRAB_MOVE := 1
+const GRAB_RESIZE := 2
+const PANEL_SCALE_MIN := 0.5
+const PANEL_SCALE_MAX := 2.5
+## A fist lets go only once the fingers open this much further than it took to close.
+const FIST_RELEASE_MARGIN := 0.015
+const LAYOUT_RESTORE_HOLD_SEC := 1.0
+## Room between rows of panels for the handles under them (metres).
+const ROW_GAP := 0.07
+## A carried panel is let go only after the grip (fist, pinch, trigger) or the
+## tracking has been lost this long: tracking drops out for a moment now and then.
+const FIST_GRACE_SEC := 0.5
+const GRAB_GRACE_SEC := 0.25
+## Magnets in VR: placement within this angle, size within this share.
+const MAGNET_REACH_DEG := 3.0
+const SIZE_MAGNET_SHARE := 0.04
+## Tilt grip: degrees of tilt per degree the hand moves up or down.
+const TILT_GAIN := 2.0
+## Curve grip: curvature (0..1) per radian the hand moves sideways, and its magnet.
+const CURVE_GAIN := 3.0
+const CURVE_MAGNET := 0.05
+
+
+## Panel options on the settings panel (section [panels]).
+class PanelOptions:
+	## What moving a panel by its handle changes: 0 = the Windows layout (the panels
+	## follow it), 1 = only where the panel is in VR.
+	var move_mode := 0
+	## Magnet for placing and sizing panels in VR: 1 = on.
+	var magnet := 1
+	## What the tilt grip changes: 0 = the panel's whole row, 1 = that panel only.
+	var tilt_mode := 0
 
 
 ## Spread of a point over a stretch of frames: the root-mean-square distance from
@@ -304,11 +348,37 @@ class Pointer:
 	## The nearest screen panel the ray hits, and where: 0..1 from its top-left corner.
 	var panel: ScreenPanel
 	var panel_uv := Vector2.ZERO
+	## Fist (all four fingertips at the palm), and the frame it closed; only in fist grab mode.
+	var fist := false
+	var fist_started := false
+	## The farthest fingertip from the palm (mm), for the log: tuning the fist threshold.
+	var fist_mm := 0.0
+	## The panel this pointer moves or resizes, or null; GRAB_MOVE or GRAB_RESIZE.
+	var grab_panel: ScreenPanel
+	var grab_kind := 0
+	## Held by a fist rather than by a pinch / trigger.
+	var grab_by_fist := false
+	## Where on the panel it was grabbed: (heading, elevation) from the panel's centre.
+	var grab_offset := Vector2.ZERO
+	## Resize: the scale and the angle from the panel's centre when grabbed.
+	var grab_scale := 1.0
+	var grab_angle := 1.0
+	## Resize: where the panel's centre was when grabbed (heading, elevation).
+	var grab_centre := Vector2.ZERO
+	## How long the grip or the tracking has been lost while carrying.
+	var grab_lost_sec := 0.0
+	## Where the ray was when grabbed (heading, elevation), and the tilt or curvature then.
+	var grab_start := Vector2.ZERO
+	var grab_value := 0.0
+	## Free placement: what the magnet held last frame (NAN = nothing).
+	var snap_held := Vector2(NAN, NAN)
 
 
 var _origin: XROrigin3D
 var _camera: XRCamera3D
 var _controllers: Array[XRController3D] = []
+## Last interaction profile seen per side, for the log.
+var _controller_profiles: Array[String] = ["", ""]
 var _controller_visuals: Array[Node3D] = []
 var _joint_meshes: Array[MultiMeshInstance3D] = []
 var _pointers: Array[Pointer] = [Pointer.new(), Pointer.new()]
@@ -329,6 +399,28 @@ var _monitor_signature := ""
 ## A changed list has to be seen twice in a row: during a topology change it flickers.
 var _pending_monitor_signature := ""
 var _monitor_check_timer := 0.0
+## Moving a panel: the layout when it was grabbed, which panel is primary, and
+## the layout as it would be if let go now (the other panels already show it).
+var _drag_rects: Array[Rect2i] = []
+var _drag_primary := 0
+var _drag_preview: Array[Rect2i] = []
+## Sent to Windows and not yet seen back: the panels keep showing it meanwhile.
+var _layout_pending: Array[Rect2i] = []
+## VR-only panel size per monitor name.
+var _panel_scales := {}
+## Panels placed freely in VR (outside the layout): monitor name -> (heading, elevation).
+var _panel_positions := {}
+var _panel_options := PanelOptions.new()
+## A layout to send to Windows once the one being applied is done.
+var _queued_positions := {}
+## Tilt per monitor name and per row (key: row from the primary's, as a string),
+## in radians; neither = facing the eye. Curvature per monitor name, 0..1.
+var _panel_pitches := {}
+var _row_pitches := {}
+var _panel_curvatures := {}
+## The user's own arrangement put aside by "Как в Windows", for "Моя расстановка".
+var _layout_stash := {}
+var _layout_reset_button: VrButton
 var _session_visible := false
 var _frames_logged := 0
 var _cursor_filter := CursorFilter.new()
@@ -401,8 +493,13 @@ func _ready() -> void:
 	_build_buttons()
 	_build_settings_panel()
 	_load_settings()
+	_update_layout_reset_button()
 	_update_ray_info()
 	_refresh_settings_panel()
+	# The layout as it was before this session, for the emergency exit. Not after a
+	# self-restart: by then the layout may already have been changed here.
+	if OS.get_environment(XR_RETRY_ENV) == "":
+		_topology.save_layout()
 
 	_hotkey = GlobalHotkey.new()
 	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
@@ -437,6 +534,9 @@ func _ready() -> void:
 		print("[xr] расширение hand tracking поддерживается средой: ", openxr.is_hand_tracking_supported())
 		print("[xr] расширение hand interaction (поза прицеливания руки) поддерживается средой: ", openxr.is_hand_interaction_supported())
 		openxr.session_begun.connect(_on_session_begun.bind(openxr))
+		# Holding the Meta button re-centres the headset's view; the scene follows.
+		if openxr.has_signal(&"pose_recentered"):
+			openxr.connect(&"pose_recentered", _on_pose_recentered)
 		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
 			openxr.connect(event, _on_xr_event.bind(event))
 
@@ -448,7 +548,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _hotkey != null and _hotkey.consume_pressed():
 		print("[app] нажато Ctrl+Alt+Shift+F12")
-		_quit()
+		_quit(true)
 		return
 	if not _xr_ready:
 		return
@@ -474,11 +574,14 @@ func _process(delta: float) -> void:
 			pointer.mode, (", " + CLICK_LABELS[pointer.button]) if pointer.pressed else (", колесо" if pointer.scrolling else (", распознаю" if pointer.pending else "")),
 		])
 		if pointer.mode == "рука" or pointer.mode == "покой":
-			lines[-1] += " | щипок %.0f мм, луч %s, ниже глаз %.0f см, луч %+.0f°" % [pointer.pinch_mm,
-					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)]
+			lines[-1] += " | щипок %.0f мм, луч %s, ниже глаз %.0f см, луч %+.0f°, кулак %.0f мм" % [pointer.pinch_mm,
+					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation), pointer.fist_mm]
+		if pointer.grab_panel != null:
+			lines[-1] += " | %s %s" % ["переношу" if pointer.grab_kind == GRAB_MOVE else "меняю размер", pointer.grab_panel.monitor_name]
 
 	_update_two_hand_gestures()
 	_update_calibration()
+	_update_grabs(delta)
 	_update_buttons(delta)
 	_update_cursor()
 	_update_rays()
@@ -510,9 +613,19 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		_quit()
 
 
-func _quit() -> void:
+## The emergency exit (`restore_layout`) also brings back the Windows layout and
+## the set of attached screens from before this session; a normal exit keeps them.
+func _quit(restore_layout := false) -> void:
 	print("[app] выход")
+	if restore_layout:
+		print("[screens] возвращаю исходную раскладку: ", _topology.restore_layout_now())
 	get_tree().quit()
+
+
+func _on_pose_recentered() -> void:
+	print("[xr] вид сброшен кнопкой Meta, выравниваю сцену")
+	# A moment later, when the new head pose has arrived.
+	get_tree().create_timer(0.3).timeout.connect(_recenter)
 
 
 func _on_session_begun(openxr: OpenXRInterface) -> void:
@@ -530,7 +643,7 @@ func _exit_tree() -> void:
 
 ## Adds where a ray meets the plane of a panel (inside it or not), in that panel's pixels.
 func _add_plane_point(spread: Spread, panel: ScreenPanel, origin: Vector3, direction: Vector3) -> void:
-	var panel_transform := panel.layer.global_transform
+	var panel_transform := panel.placement.transform
 	var distance := PointerMath.ray_rect_distance(origin, direction, panel_transform, Vector2(1000.0, 1000.0))
 	if distance >= 0.0:
 		spread.add(panel.uv_at(origin + direction * distance) * Vector2(panel.monitor_rect.size))
@@ -566,7 +679,8 @@ func _update_cursor() -> void:
 	for pointer in _pointers:
 		pointer.on_panel = false
 		pointer.panel = null
-		if not pointer.active:
+		# A pointer that carries a panel does not touch the cursor.
+		if not pointer.active or pointer.grab_panel != null:
 			continue
 		var nearest := INF
 		for panel in _panels:
@@ -680,7 +794,8 @@ func _update_two_hand_gestures() -> void:
 		_pause.reset()
 
 	var zooming := left.mode == "рука" and right.mode == "рука" \
-			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT
+			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT \
+			and left.grab_panel == null and right.grab_panel == null
 	if zooming:
 		var gap := left.pinch_point.distance_to(right.pinch_point)
 		if not _zoom_active:
@@ -779,12 +894,16 @@ func _update_panels(delta: float) -> void:
 	_monitor_check_timer += delta
 	if _monitor_check_timer >= MONITOR_CHECK_SEC:
 		_monitor_check_timer = 0.0
-		var signature := str(ScreenCapture.list_monitors())
+		var monitors := ScreenCapture.list_monitors()
+		var signature := str(monitors)
 		if signature == _monitor_signature:
 			_pending_monitor_signature = ""
 		elif signature == _pending_monitor_signature:
-			print("[capture] раскладка мониторов изменилась, перестраиваю панели")
-			_rebuild_panels()
+			if _move_panels(monitors):
+				print("[capture] мониторы переставлены, панели те же")
+			else:
+				print("[capture] раскладка мониторов изменилась, перестраиваю панели")
+				_rebuild_panels()
 		else:
 			_pending_monitor_signature = signature
 
@@ -792,6 +911,39 @@ func _update_panels(delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
 	for panel in _panels:
 		panel.refresh(_session_visible, copy_frames, now)
+
+
+## The same monitors, only moved around (or another one made primary): the
+## captures keep working (checked with tests/move_probe.gd), so the panels just
+## take the new places instead of being built anew, which made the headset stutter.
+## False if monitors came, went or changed size.
+func _move_panels(monitors: Array[Dictionary]) -> bool:
+	if monitors.size() != _panels.size():
+		return false
+	var by_name := {}
+	for monitor in monitors:
+		by_name[monitor["name"]] = monitor
+	for panel in _panels:
+		if not by_name.has(panel.monitor_name) or by_name[panel.monitor_name]["size"] != panel.monitor_rect.size:
+			return false
+		# A new primary monitor froze its capture (17.10.2026): build the panels anew then.
+		if by_name[panel.monitor_name]["primary"] != panel.primary:
+			return false
+	for panel in _panels:
+		var monitor: Dictionary = by_name[panel.monitor_name]
+		panel.monitor_rect = Rect2i(monitor["position"], panel.monitor_rect.size)
+		panel.primary = monitor["primary"]
+	_monitor_signature = str(monitors)
+	_pending_monitor_signature = ""
+	# What was sent has arrived, unless more is still on its way.
+	if not _topology.busy and _queued_positions.is_empty():
+		_layout_pending.clear()
+	var carrying := false
+	for pointer in _pointers:
+		carrying = carrying or pointer.grab_panel != null
+	if not carrying:
+		_place_panels([], true)
+	return true
 
 
 ## One live panel per Windows monitor, arranged like the monitors are in Windows.
@@ -808,6 +960,10 @@ func _rebuild_panels() -> void:
 	for pointer in _pointers:
 		pointer.panel = null
 		pointer.on_panel = false
+		pointer.grab_panel = null
+	# Whatever was sent to Windows has arrived (or failed): show what is there now.
+	_layout_pending.clear()
+	_queued_positions.clear()
 	for panel in _panels:
 		panel.close()
 	_panels.clear()
@@ -827,24 +983,357 @@ func _rebuild_panels() -> void:
 	if hole_punch and not _panels.is_empty():
 		get_viewport().transparent_bg = true
 	print("[capture] мониторов %d, панелей %d" % [monitors.size(), _panels.size()])
-	_place_panels()
+	_place_panels([], true)
 
 
-## Puts the panels on an arc around the user, mirroring the Windows layout.
-func _place_panels() -> void:
+## Puts the panels on an arc around the user, mirroring the Windows layout, or
+## `layout` instead (one rectangle per panel: a move being previewed). A layout
+## sent to Windows and not seen back yet is shown meanwhile. VR sizes push the
+## neighbours aside; panels placed freely in VR stay where they were put; tilt
+## and curvature come from the user's settings. `log_it` writes the result to the
+## log (not while something is being dragged: that is every frame).
+func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 	var rects: Array[Rect2i] = []
-	var primary_index := 0
+	if not layout.is_empty():
+		rects = layout
+	elif _layout_pending.size() == _panels.size():
+		rects = _layout_pending
+	else:
+		rects = _current_rects()
+	var primary_index := _primary_index()
+	var row_offsets := _row_offsets(rects, primary_index)
+	var scales: Array[float] = []
+	var pitches: Array[float] = []
+	var curvatures: Array[float] = []
 	for i in _panels.size():
-		rects.append(_panels[i].monitor_rect)
-		if _panels[i].primary:
-			primary_index = i
-	var placements := PanelLayout.arrange(rects, primary_index, Vector3(0.0, PANEL_CENTER_HEIGHT, 0.0),
-			PANEL_DISTANCE, PANEL_WIDTH_DEG, PANEL_MAX_ARC_DEG)
+		var panel := _panels[i]
+		panel.vr_scale = _panel_scales.get(panel.monitor_name, 1.0)
+		panel.distance = PANEL_DISTANCE
+		scales.append(panel.vr_scale)
+		pitches.append(_pitch_of(panel.monitor_name, row_offsets[i]))
+		curvatures.append(_panel_curvatures.get(panel.monitor_name, 0.0))
+	var placements := PanelLayout.arrange(rects, primary_index, PANEL_EYE, PANEL_DISTANCE, PANEL_WIDTH_DEG,
+			PANEL_MAX_ARC_DEG, scales, ROW_GAP, pitches, curvatures)
 	for i in _panels.size():
+		var free_at: Variant = _panel_positions.get(_panels[i].monitor_name)
+		if free_at is Vector2:
+			placements[i] = PanelLayout.placement_at(free_at.x, free_at.y, placements[i].size, PANEL_EYE, PANEL_DISTANCE,
+					_panel_pitches.get(_panels[i].monitor_name, NAN), curvatures[i])
 		_panels[i].place(placements[i])
-		print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, %.2f x %.2f м" % [
-				_panels[i].monitor_name, " (основной)" if _panels[i].primary else "", rects[i].size, rects[i].position,
-				rad_to_deg(placements[i].heading), rad_to_deg(placements[i].elevation), placements[i].size.x, placements[i].size.y])
+		if log_it:
+			print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, наклон %+.0f°, изгиб %.2f, %.2f x %.2f м%s" % [
+					_panels[i].monitor_name, " (основной)" if _panels[i].primary else "", rects[i].size, rects[i].position,
+					rad_to_deg(placements[i].heading), rad_to_deg(placements[i].elevation), rad_to_deg(placements[i].pitch),
+					placements[i].curvature, placements[i].size.x, placements[i].size.y, ", свободно в VR" if free_at is Vector2 else ""])
+
+
+## Each monitor's row, counted from the primary's (-1 = the row above it).
+func _row_offsets(rects: Array[Rect2i], primary_index: int) -> Array[int]:
+	var offsets: Array[int] = []
+	offsets.resize(rects.size())
+	var rows := LayoutEdit.rows(rects)
+	var primary_row := 0
+	for r in rows.size():
+		if rows[r].has(primary_index):
+			primary_row = r
+	for r in rows.size():
+		for i in rows[r]:
+			offsets[i] = r - primary_row
+	return offsets
+
+
+## A monitor's own tilt, else its row's, else NAN (facing the eye).
+func _pitch_of(monitor_name: String, row_offset: int) -> float:
+	if _panel_pitches.has(monitor_name):
+		return _panel_pitches[monitor_name]
+	return _row_pitches.get(str(row_offset), NAN)
+
+
+func _current_rects() -> Array[Rect2i]:
+	var rects: Array[Rect2i] = []
+	for panel in _panels:
+		rects.append(panel.monitor_rect)
+	return rects
+
+
+func _primary_index() -> int:
+	for i in _panels.size():
+		if _panels[i].primary:
+			return i
+	return 0
+
+
+## Which grips a panel offers with the current settings: none at all when moving
+## is by fist only or off (the user's choice on 17.10.2026: those modes are for
+## not having anything under the panels). "Make primary" only on the others.
+func _allowed_grips(panel: ScreenPanel) -> Array:
+	if _gesture_settings.grab_mode >= 2:
+		return []
+	var grips := [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
+	if not panel.primary:
+		grips.append(ScreenPanel.Grip.PRIMARY)
+	return grips
+
+
+## Moving, resizing, tilting and curving screen panels by the grips under them
+## (pinch or trigger); in the fist modes a fist on a panel moves it too. Moving
+## changes the Windows layout (the others make room the way Windows will, see
+## LayoutEdit) or, if so set, only the place in VR.
+func _update_grabs(delta: float) -> void:
+	var carrying := false
+	for pointer in _pointers:
+		carrying = carrying or pointer.grab_panel != null
+	for pointer in _pointers:
+		if pointer.grab_panel != null:
+			if not is_instance_valid(pointer.grab_panel):
+				pointer.grab_panel = null
+				continue
+			var held := pointer.fist if pointer.grab_by_fist else pointer.pressed
+			if pointer.active and held:
+				pointer.grab_lost_sec = 0.0
+				_drag(pointer)
+			else:
+				# Tracking or the grip may drop out for a moment: wait before letting go.
+				pointer.grab_lost_sec += delta
+				if pointer.grab_lost_sec >= (FIST_GRACE_SEC if pointer.grab_by_fist else GRAB_GRACE_SEC):
+					_end_grab(pointer)
+			continue
+		if carrying or not pointer.active:
+			continue
+		var target: ScreenPanel = null
+		var kind := 0
+		if pointer.just_pressed and pointer.button == HandGestures.Click.LEFT:
+			var nearest := INF
+			for panel in _panels:
+				var hit := panel.grip_at(pointer.origin, pointer.direction, _allowed_grips(panel))
+				if int(hit.x) != ScreenPanel.Grip.NONE and hit.y < nearest:
+					nearest = hit.y
+					target = panel
+					kind = int(hit.x)
+		var by_fist := false
+		# pointer.panel is still last frame's: the cursor is updated after this.
+		var fist_moves := _gesture_settings.grab_mode == 1 or _gesture_settings.grab_mode == 2
+		if target == null and fist_moves and pointer.fist_started and pointer.panel != null:
+			target = pointer.panel
+			kind = ScreenPanel.Grip.MOVE
+			by_fist = true
+		if target != null and kind == ScreenPanel.Grip.PRIMARY:
+			# A button, not a grip: nothing to carry.
+			_make_primary(target)
+		elif target != null and _start_grab(pointer, target, kind, by_fist):
+			carrying = true
+
+	# The grips show up when a ray comes near the panel.
+	for panel in _panels:
+		var allowed := _allowed_grips(panel)
+		var near := false
+		var hovered := ScreenPanel.Grip.NONE
+		var held := ScreenPanel.Grip.NONE
+		for pointer in _pointers:
+			if pointer.grab_panel == panel:
+				near = true
+				held = pointer.grab_kind
+			elif pointer.active and pointer.grab_panel == null and panel.is_near(pointer.origin, pointer.direction):
+				near = true
+				var hit := panel.grip_at(pointer.origin, pointer.direction, allowed)
+				if int(hit.x) != ScreenPanel.Grip.NONE:
+					hovered = int(hit.x)
+					pointer.hit_distance = minf(pointer.hit_distance, hit.y)
+		panel.show_grips(near, allowed, hovered, held)
+
+
+## Windows makes primary the monitor at (0, 0): the whole layout shifts so that
+## this one is there. Its taskbar moves with it; windows stay where they are.
+func _make_primary(panel: ScreenPanel) -> void:
+	var rects: Array[Rect2i] = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
+	var shift: Vector2i = -rects[_panels.find(panel)].position
+	var positions := {}
+	for i in _panels.size():
+		rects[i] = Rect2i(rects[i].position + shift, rects[i].size)
+		positions[_panels[i].monitor_name] = rects[i].position
+	_layout_pending = rects
+	print("[panels] %s: делаю основным" % panel.monitor_name)
+	if _topology.busy:
+		_queued_positions = positions
+		_vdd_message = "основной экран: жду предыдущее изменение…"
+	else:
+		_vdd_message = "делаю %s основным…" % panel.monitor_name
+		_topology.arrange(positions)
+
+
+func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool) -> bool:
+	var angles := PanelLayout.sphere_angles(pointer.origin, pointer.direction, PANEL_EYE, PANEL_DISTANCE)
+	if is_nan(angles.x):
+		return false
+	pointer.grab_panel = panel
+	pointer.grab_kind = kind
+	pointer.grab_by_fist = by_fist
+	pointer.grab_lost_sec = 0.0
+	pointer.grab_start = angles
+	pointer.snap_held = Vector2(NAN, NAN)
+	pointer.grab_centre = Vector2(panel.placement.heading, panel.placement.elevation)
+	pointer.grab_offset = angles - pointer.grab_centre
+	pointer.grab_scale = panel.vr_scale
+	pointer.grab_angle = maxf(PanelLayout.direction_of(pointer.grab_centre.x, pointer.grab_centre.y).angle_to(
+			PanelLayout.direction_of(angles.x, angles.y)), 0.01)
+	pointer.grab_value = panel.placement.pitch if kind == ScreenPanel.Grip.TILT else panel.placement.curvature
+	if kind == ScreenPanel.Grip.MOVE:
+		# From the layout as it will be: a change may still be on its way to Windows.
+		_drag_rects = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
+		_drag_primary = _primary_index()
+		_drag_preview = _drag_rects.duplicate()
+	print("[panels] %s: %s (%s%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], "кулак" if by_fist else pointer.mode,
+			", только VR" if kind == ScreenPanel.Grip.MOVE and _panel_options.move_mode == 1 else ""])
+	return true
+
+
+func _drag(pointer: Pointer) -> void:
+	var panel := pointer.grab_panel
+	var angles := PanelLayout.sphere_angles(pointer.origin, pointer.direction, PANEL_EYE, PANEL_DISTANCE)
+	if is_nan(angles.x):
+		return
+	var magnet := _panel_options.magnet != 0
+	match pointer.grab_kind:
+		ScreenPanel.Grip.RESIZE:
+			var centre := PanelLayout.direction_of(pointer.grab_centre.x, pointer.grab_centre.y)
+			var ratio := centre.angle_to(PanelLayout.direction_of(angles.x, angles.y)) / pointer.grab_angle
+			var scale := clampf(pointer.grab_scale * ratio, PANEL_SCALE_MIN, PANEL_SCALE_MAX)
+			if magnet:
+				# As wide or as tall as another panel, or the original size.
+				var others: Array[Vector2] = []
+				for other in _panels:
+					if other != panel:
+						others.append(other.placement.size)
+				scale = PanelLayout.snap_scale(scale, panel.placement.size / panel.vr_scale, others, SIZE_MAGNET_SHARE)
+			# Live, so that the neighbours move aside while the size changes.
+			_panel_scales[panel.monitor_name] = scale
+			_place_panels()
+			return
+		ScreenPanel.Grip.TILT:
+			# Up and down tilts: the panel follows the hand, faster.
+			var pitch := clampf(pointer.grab_value + (angles.y - pointer.grab_start.y) * TILT_GAIN,
+					-deg_to_rad(75.0), deg_to_rad(75.0))
+			if magnet:
+				# Upright, or facing the eye.
+				for candidate: float in [0.0, panel.placement.elevation]:
+					if absf(pitch - candidate) < deg_to_rad(MAGNET_REACH_DEG):
+						pitch = candidate
+			_set_pitch(panel, pitch)
+			_place_panels()
+			return
+		ScreenPanel.Grip.CURVE:
+			# Sideways bends: to the right more, to the left less.
+			var curvature := clampf(pointer.grab_value + (angles.x - pointer.grab_start.x) * CURVE_GAIN, 0.0, 1.0)
+			if magnet:
+				# Flat, around the eye, or like another panel.
+				var candidates: Array[float] = [0.0, 1.0]
+				for other in _panels:
+					if other != panel and other.placement.curvature > 0.0:
+						candidates.append(other.placement.curvature)
+				for candidate in candidates:
+					if absf(curvature - candidate) < CURVE_MAGNET:
+						curvature = candidate
+			if curvature > 0.0:
+				_panel_curvatures[panel.monitor_name] = curvature
+			else:
+				_panel_curvatures.erase(panel.monitor_name)
+			_place_panels()
+			return
+	var at := angles - pointer.grab_offset
+	at.y = clampf(at.y, -1.2, 1.2)
+	if _panel_options.move_mode == 1:
+		# Only in VR: wherever it is put, with the magnet to the other panels.
+		if magnet:
+			var raw := at
+			var others: Array[Vector4] = []
+			var own_widths: Array[float] = []
+			for other in _panels:
+				if other != panel:
+					var other_half := _visible_half(other.placement)
+					others.append(Vector4(other.placement.heading, other.placement.elevation, other_half.x, other_half.y))
+					# This panel's width as if it stood at the other one's height.
+					own_widths.append(PanelLayout.visible_half(panel.placement.size, other.placement.elevation,
+							panel.placement.curvature, PANEL_DISTANCE).x)
+			var own_half := PanelLayout.visible_half(panel.placement.size, 0.0, panel.placement.curvature, PANEL_DISTANCE)
+			at = PanelLayout.snap_angles(at.x, at.y, own_half, others,
+					deg_to_rad(MAGNET_REACH_DEG), pointer.snap_held, own_widths)
+			pointer.snap_held = Vector2(at.x if at.x != raw.x else NAN, at.y if at.y != raw.y else NAN)
+		panel.place(PanelLayout.placement_at(at.x, at.y, panel.placement.size, PANEL_EYE, PANEL_DISTANCE,
+				_panel_pitches.get(panel.monitor_name, NAN), panel.placement.curvature))
+		return
+	var drop := PanelLayout.to_desktop(_drag_rects, _drag_primary, PANEL_DISTANCE, PANEL_WIDTH_DEG, PANEL_MAX_ARC_DEG, at.x, at.y)
+	var preview := LayoutEdit.move(_drag_rects, _drag_primary, _panels.find(panel), drop)
+	if preview != _drag_preview:
+		_drag_preview = preview
+		_place_panels(preview)
+	# The carried panel itself follows the hand.
+	panel.place(PanelLayout.placement_at(at.x, at.y, panel.placement.size, PANEL_EYE, PANEL_DISTANCE,
+			NAN, panel.placement.curvature))
+
+
+## Tilt: of the panel's whole row, or of this panel only (settings); a panel placed
+## freely in VR is not in a row.
+func _set_pitch(panel: ScreenPanel, pitch: float) -> void:
+	if _panel_options.tilt_mode == 1 or _panel_positions.has(panel.monitor_name):
+		_panel_pitches[panel.monitor_name] = pitch
+		return
+	var offsets := _row_offsets(_current_rects(), _primary_index())
+	var row := offsets[_panels.find(panel)]
+	_row_pitches[str(row)] = pitch
+	# The whole row moves together: no panel of it keeps a tilt of its own.
+	for i in _panels.size():
+		if offsets[i] == row and not _panel_positions.has(_panels[i].monitor_name):
+			_panel_pitches.erase(_panels[i].monitor_name)
+
+
+## Half-width and half-height of a placed panel as the eye sees them (curved
+## panels look narrower than flat ones), for the magnet.
+func _visible_half(placement: PanelLayout.Placement) -> Vector2:
+	return PanelLayout.visible_half(placement.size, placement.elevation, placement.curvature, PANEL_DISTANCE)
+
+
+func _end_grab(pointer: Pointer) -> void:
+	var panel := pointer.grab_panel
+	pointer.grab_panel = null
+	if not is_instance_valid(panel):
+		return
+	match pointer.grab_kind:
+		ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE:
+			_save_settings()
+			_place_panels([], true)
+			print("[panels] %s: размер %.2f, наклон %+.0f°, изгиб %.2f" % [panel.monitor_name, panel.vr_scale,
+					rad_to_deg(panel.placement.pitch), panel.placement.curvature])
+			_update_layout_reset_button()
+			return
+	if _panel_options.move_mode == 1:
+		_panel_positions[panel.monitor_name] = Vector2(panel.placement.heading, panel.placement.elevation)
+		_save_settings()
+		_update_layout_reset_button()
+		print("[panels] %s: свободно в VR, курс %+.1f°, возвышение %+.1f°" % [panel.monitor_name,
+				rad_to_deg(panel.placement.heading), rad_to_deg(panel.placement.elevation)])
+		return
+	# Moved in the layout: it is part of the layout again, wherever it was put in VR before.
+	if _panel_positions.erase(panel.monitor_name):
+		_save_settings()
+	if _drag_preview == _drag_rects:
+		_place_panels()
+		print("[panels] %s: на прежнем месте" % panel.monitor_name)
+		return
+	var positions := {}
+	var described: PackedStringArray = []
+	for i in _panels.size():
+		positions[_panels[i].monitor_name] = _drag_preview[i].position
+		described.append("%s %s" % [_panels[i].monitor_name, _drag_preview[i].position])
+	_layout_pending = _drag_preview
+	_place_panels()
+	print("[panels] новая раскладка: ", ", ".join(described))
+	if _topology.busy:
+		# One change at a time; the latest waits for the one being applied.
+		_queued_positions = positions
+		_vdd_message = "раскладка Windows: жду предыдущее изменение…"
+	else:
+		_vdd_message = "меняю раскладку Windows…"
+		_topology.arrange(positions)
 
 
 ## Turns and shifts the play space so that the user stands at the world origin
@@ -859,7 +1348,7 @@ func _recenter() -> void:
 	var yaw := PI - atan2(forward.x, forward.z)
 	var turn := Basis(Vector3.UP, yaw)
 	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
-	_place_panels()
+	_place_panels([], true)
 	_recentered = true
 	print("[xr] сцена выровнена по взгляду, поворот %.0f°" % rad_to_deg(yaw))
 
@@ -949,6 +1438,14 @@ func _load_settings() -> void:
 	for tunable: Array in TUNABLES:
 		var target := _tunable_target(tunable[0])
 		target.set(tunable[1], config.get_value(tunable[0], tunable[1], target.get(tunable[1])))
+	var scales: Variant = config.get_value("panels", "vr_scale", {})
+	if scales is Dictionary:
+		_panel_scales = scales
+	for item: Array in [["vr_position", "_panel_positions"], ["pitch", "_panel_pitches"], ["row_pitch", "_row_pitches"],
+			["curvature", "_panel_curvatures"], ["stash", "_layout_stash"]]:
+		var value: Variant = config.get_value("panels", item[0], {})
+		if value is Dictionary:
+			set(item[1], value)
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
 
@@ -963,6 +1460,12 @@ func _save_settings() -> void:
 	config.set_value("ray", "aim_offset_right", _aim_offset[1])
 	for tunable: Array in TUNABLES:
 		config.set_value(tunable[0], tunable[1], _tunable_target(tunable[0]).get(tunable[1]))
+	config.set_value("panels", "vr_scale", _panel_scales)
+	config.set_value("panels", "vr_position", _panel_positions)
+	config.set_value("panels", "pitch", _panel_pitches)
+	config.set_value("panels", "row_pitch", _row_pitches)
+	config.set_value("panels", "curvature", _panel_curvatures)
+	config.set_value("panels", "stash", _layout_stash)
 	var error := config.save(SETTINGS_PATH)
 	if error != OK:
 		print("[settings] не удалось сохранить: ", error_string(error))
@@ -1035,6 +1538,62 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 	var text: String = TOPOLOGY_MESSAGES.get(code, code)
 	_vdd_message = ("готово: " if ok else "ошибка: ") + text + ((" (" + detail + ")") if detail != "" else "")
 	print("[screens] ", _vdd_message)
+	if not _queued_positions.is_empty():
+		var positions := _queued_positions
+		_queued_positions = {}
+		_vdd_message = "меняю раскладку Windows…"
+		_topology.arrange(positions)
+	elif not ok and not _layout_pending.is_empty():
+		# Windows refused the new layout: the panels go back to what it really is.
+		_layout_pending.clear()
+		_place_panels()
+
+
+## "Как в Windows" puts the user's own arrangement (free places, sizes, tilts,
+## curves) aside and shows the panels exactly as the Windows layout; then the same
+## button, "Моя расстановка", brings that arrangement back.
+func _on_panels_reset_button() -> void:
+	if _layout_stash.is_empty():
+		var own := _own_arrangement()
+		if own.values().all(func(part: Dictionary) -> bool: return part.is_empty()):
+			return
+		_layout_stash = own
+		_apply_arrangement({})
+		print("[panels] как в Windows; своя расстановка отложена")
+	else:
+		_apply_arrangement(_layout_stash)
+		_layout_stash = {}
+		print("[panels] своя расстановка возвращена")
+	_save_settings()
+	_place_panels([], true)
+	_update_layout_reset_button()
+
+
+func _own_arrangement() -> Dictionary:
+	return {"positions": _panel_positions.duplicate(), "scales": _panel_scales.duplicate(),
+			"pitches": _panel_pitches.duplicate(), "row_pitches": _row_pitches.duplicate(),
+			"curvatures": _panel_curvatures.duplicate()}
+
+
+func _apply_arrangement(own: Dictionary) -> void:
+	_panel_positions = own.get("positions", {}).duplicate()
+	_panel_scales = own.get("scales", {}).duplicate()
+	_panel_pitches = own.get("pitches", {}).duplicate()
+	_row_pitches = own.get("row_pitches", {}).duplicate()
+	_panel_curvatures = own.get("curvatures", {}).duplicate()
+
+
+func _update_layout_reset_button() -> void:
+	if _layout_reset_button != null:
+		_layout_reset_button.set_text("Моя расстановка" if not _layout_stash.is_empty() else "Как в Windows")
+
+
+func _on_restore_layout_button() -> void:
+	if _screens_busy():
+		return
+	_vdd_message = "возвращаю исходную раскладку…"
+	print("[screens] ", _vdd_message)
+	_topology.restore_layout()
 
 
 func _on_new_instance_button() -> void:
@@ -1070,6 +1629,19 @@ func _update_hand(index: int) -> int:
 	return valid
 
 
+## A controller in the hand, not the controller node that the hand interaction
+## profile (XR_EXT_hand_interaction) drives for a bare hand: when the hand drops
+## out of view, that one keeps its last pose and its last pinch or grip, and was
+## taken for a controller that clicks (748 presses in one session on 16.10.2026).
+func _is_real_controller(index: int) -> bool:
+	var tracker := XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[index]) as XRPositionalTracker
+	var profile := "" if tracker == null else String(tracker.profile)
+	if profile != _controller_profiles[index]:
+		_controller_profiles[index] = profile
+		print("[input] %s: профиль ввода %s" % [SIDE_LABELS[index], profile if profile != "" else "нет"])
+	return _controllers[index].get_has_tracking_data() and profile != "" and not profile.contains("hand_interaction")
+
+
 ## A real hand wins over a controller; hand joints synthesised from a held
 ## controller do not count as a hand.
 func _update_pointer(index: int, delta: float) -> void:
@@ -1079,6 +1651,9 @@ func _update_pointer(index: int, delta: float) -> void:
 	pointer.tracked_hand = false
 	pointer.disc_shown = false
 	pointer.disc_pose_started = false
+	var was_fist := pointer.fist
+	pointer.fist = false
+	pointer.fist_started = false
 	var controller := _controllers[index]
 	var tracker := XRServer.get_tracker(HAND_TRACKER_NAMES[index]) as XRHandTracker
 	pointer.hit_distance = INF
@@ -1197,9 +1772,20 @@ func _update_pointer(index: int, delta: float) -> void:
 		if resting != not was_engaged:
 			print("[hand] %s: %s (ниже глаз %.0f см, луч %+.0f°)" % [SIDE_LABELS[index], "в покое" if resting else "в работе",
 					pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)])
-		if resting:
+		# Fist (fist grab mode only): every fingertip at the palm. It carries a panel,
+		# so it clicks nothing.
+		var palm_local := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin
+		var curl := maxf(maxf(index_tip.distance_to(palm_local), middle_tip.distance_to(palm_local)),
+				maxf(frame.ring_to_palm, tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PINKY_FINGER_TIP).origin.distance_to(palm_local)))
+		pointer.fist_mm = curl * 1000.0
+		pointer.fist = not resting and (_gesture_settings.grab_mode == 1 or _gesture_settings.grab_mode == 2) \
+				and curl < _gesture_settings.fist_curl + (FIST_RELEASE_MARGIN if was_fist else 0.0)
+		pointer.fist_started = pointer.fist and not was_fist
+		if pointer.fist_started:
+			print("[gesture] %s: кулак (пальцы у ладони до %.0f мм)" % [SIDE_LABELS[index], curl * 1000.0])
+		if resting or pointer.fist:
 			pointer.gestures.reset()
-		var gesture := HandGestures.Output.new() if resting else pointer.gestures.update(frame)
+		var gesture := HandGestures.Output.new() if resting or pointer.fist else pointer.gestures.update(frame)
 		pointer.button = gesture.button
 		pointer.pending = gesture.pending
 		pointer.anchor_time = gesture.anchor_time
@@ -1265,7 +1851,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		if resting:
 			pointer.active = false
 			pointer.mode = "покой"
-	elif controller.get_has_tracking_data() and not _hands_paused:
+	elif _is_real_controller(index) and not _hands_paused:
 		pointer.active = true
 		pointer.mode = "контроллер"
 		pointer.origin = controller.global_position
@@ -1560,7 +2146,11 @@ func _build_buttons() -> void:
 	add_button.activated.connect(_on_screen_button.bind(true))
 	var new_instance_button := _add_button("Новый VDD", Vector3(-0.31, 0.84, -1.2), NEW_INSTANCE_BUTTON_HOLD_SEC)
 	new_instance_button.activated.connect(_on_new_instance_button)
-	_screen_buttons = [remove_button, add_button, new_instance_button]
+	var restore_button := _add_button("Вернуть раскладку", Vector3(-0.31, 0.68, -1.2), LAYOUT_RESTORE_HOLD_SEC)
+	restore_button.activated.connect(_on_restore_layout_button)
+	_screen_buttons = [remove_button, add_button, new_instance_button, restore_button]
+	_layout_reset_button = _add_button("Как в Windows", Vector3(-0.31, 0.36, -1.2), 1.0)
+	_layout_reset_button.activated.connect(_on_panels_reset_button)
 
 	# Kept apart from the others so that it is not hit by accident.
 	var exit_button := _add_button("Выход", Vector3(0.45, 1.0, -1.2), EXIT_BUTTON_HOLD_SEC)
@@ -1669,6 +2259,8 @@ func _tunable_target(section: String) -> Object:
 			return _gesture_settings
 		"engagement":
 			return _engagement_settings
+		"panels":
+			return _panel_options
 		"pause":
 			return _pause
 	return _cursor_filter
@@ -1696,7 +2288,7 @@ func _on_tunable_button(index: int, direction: float) -> void:
 
 func _on_tunables_default() -> void:
 	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new(),
-			"pause": ExtraGestures.Pause.new()}
+			"pause": ExtraGestures.Pause.new(), "panels": PanelOptions.new()}
 	for tunable: Array in TUNABLES:
 		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
 	_save_settings()
@@ -1714,6 +2306,14 @@ func _refresh_settings_panel() -> void:
 			_settings_values[i].text = "отмена/повтор" if value >= 0.5 else "назад/вперёд"
 		elif tunable[1] == "scroll_mode":
 			_settings_values[i].text = "диск" if value >= 0.5 else "направление"
+		elif tunable[1] == "grab_mode":
+			_settings_values[i].text = ["ручка", "ручка и кулак", "только кулак", "выключен"][clampi(roundi(value), 0, 3)]
+		elif tunable[1] == "tilt_mode":
+			_settings_values[i].text = "монитор" if value >= 0.5 else "ряд"
+		elif tunable[1] == "move_mode":
+			_settings_values[i].text = "только VR" if value >= 0.5 else "раскладку Windows"
+		elif tunable[1] == "magnet":
+			_settings_values[i].text = "да" if value >= 0.5 else "нет"
 		elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
 			_settings_values[i].text = "да" if value >= 0.5 else "нет"
 		else:

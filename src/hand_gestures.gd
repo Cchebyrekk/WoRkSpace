@@ -66,6 +66,11 @@ class Settings:
 	var swipe_distance := 0.18
 	## Two-hand zoom: wheel units (with Ctrl) per metre the hands move apart.
 	var zoom_speed := 1200.0
+	## How a hand grabs a screen panel to move it: 0 = pinch on the bar under the
+	## panel, 1 = also a fist anywhere on the panel. Controllers always use the bar.
+	var grab_mode := 0
+	## Fist: the tips of all four fingers nearer the palm than this.
+	var fist_curl := 0.07
 
 
 ## One frame of hand data. Distances in metres; `*_align` are cosines between the

@@ -2,24 +2,55 @@ class_name ScreenPanel
 extends Node
 ## One Windows monitor as a live panel: a capture, and an OpenXR composition layer
 ## that shows it. The runtime samples a composition layer directly, which is
-## noticeably sharper for text than a textured mesh.
+## noticeably sharper for text than a textured mesh. A flat panel is a quad layer,
+## a curved one a cylinder layer.
 ##
 ## Do NOT put the capture texture on a 3D material: in VR that removes the D3D12
 ## device (0x887A0005) and crashes the engine.
+
+## The grips around a panel, all in the gap under it (the screen's own edges stay
+## free for scroll bars): move in the middle, tilt to the left, curve to the
+## right, resize at the bottom-right corner, and at the far left a button that
+## makes this monitor the primary one in Windows.
+enum Grip { NONE, MOVE, RESIZE, TILT, CURVE, PRIMARY }
+
+const GRIP_NAMES := {Grip.MOVE: "перенос", Grip.RESIZE: "размер", Grip.TILT: "наклон", Grip.CURVE: "изгиб", Grip.PRIMARY: "сделать основным"}
 
 var monitor_name := ""
 ## The monitor's rectangle on the Windows virtual desktop, in pixels.
 var monitor_rect := Rect2i()
 var primary := false
 var capture: ScreenCapture
-var layer: OpenXRCompositionLayerQuad
+var layer: OpenXRCompositionLayer
+## Where the layout put the panel; its size already includes `vr_scale`.
+var placement: PanelLayout.Placement
+## Size in VR only, relative to the layout; Windows does not see it.
+var vr_scale := 1.0
+## The distance of the panels from the eye, for the curvature.
+var distance := 1.0
 
 ## A panel keeps being redrawn every frame for this long after its picture last changed.
 const ACTIVE_HOLD_SEC := 1.0
+## Below the bottom edge, to the middle of the grips.
+const GRIP_DROP := 0.036
+const GRIP_SIZES := {Grip.MOVE: Vector2(0.18, 0.022), Grip.TILT: Vector2(0.07, 0.022),
+		Grip.CURVE: Vector2(0.07, 0.022), Grip.RESIZE: Vector2(0.045, 0.045), Grip.PRIMARY: Vector2(0.03, 0.03)}
+## Hit areas are larger than the drawn shapes: a hand ray is not that steady.
+const GRIP_HITS := {Grip.MOVE: Vector2(0.22, 0.06), Grip.TILT: Vector2(0.09, 0.06),
+		Grip.CURVE: Vector2(0.09, 0.06), Grip.RESIZE: Vector2(0.08, 0.08), Grip.PRIMARY: Vector2(0.06, 0.06)}
+const SIDE_GRIP_OFFSET := 0.175
+const PRIMARY_GRIP_OFFSET := 0.29
+const GRIP_COLOR := Color(0.85, 0.88, 0.95, 0.55)
+const GRIP_HOVER_COLOR := Color(1.0, 1.0, 1.0, 0.95)
+const GRIP_ACTIVE_COLOR := Color(0.35, 0.8, 1.0, 1.0)
 
 var _viewport: SubViewport
+var _origin: XROrigin3D
+var _hole_punch := false
 var _rendered_frame := 0
 var _active_until := 0.0
+var _grips := {}
+var _grip_label: Label3D
 
 
 ## `monitor` is an entry of ScreenCapture.list_monitors() and `monitor_index` its
@@ -36,6 +67,8 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel.monitor_name = monitor["name"]
 	panel.monitor_rect = Rect2i(monitor["position"], new_capture.get_size())
 	panel.primary = monitor["primary"]
+	panel._origin = origin
+	panel._hole_punch = hole_punch
 
 	var picture := TextureRect.new()
 	picture.texture = new_capture.get_texture()
@@ -48,22 +81,133 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel._viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	panel._viewport.add_child(picture)
 	panel.add_child(panel._viewport)
+	panel._make_layer(false)
 
-	panel.layer = OpenXRCompositionLayerQuad.new()
-	panel.layer.layer_viewport = panel._viewport
-	if hole_punch:
-		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
-		panel.layer.sort_order = -1
-		panel.layer.enable_hole_punch = true
-	origin.add_child(panel.layer)
+	for grip: int in GRIP_SIZES:
+		panel._grips[grip] = _flat_quad(GRIP_SIZES[grip])
+		panel.add_child(panel._grips[grip])
+	panel._grip_label = Label3D.new()
+	panel._grip_label.pixel_size = 0.0008
+	panel._grip_label.font_size = 28
+	panel._grip_label.outline_size = 8
+	panel._grip_label.no_depth_test = true
+	panel._grip_label.render_priority = 11
+	panel.add_child(panel._grip_label)
+	panel.show_grips(false, [], Grip.NONE, Grip.NONE)
 	return panel
 
 
+func _make_layer(curved: bool) -> void:
+	if layer != null:
+		# A viewport can feed only one layer: let the old one go first, or the new
+		# layer stays empty ("Cannot use the same SubViewport with multiple OpenXR
+		# composition layers") until the freed one is really gone.
+		layer.layer_viewport = null
+		layer.queue_free()
+	layer = OpenXRCompositionLayerCylinder.new() if curved else OpenXRCompositionLayerQuad.new()
+	layer.layer_viewport = _viewport
+	if _hole_punch:
+		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
+		layer.sort_order = -1
+		layer.enable_hole_punch = true
+	_origin.add_child(layer)
+
+
+static func _flat_quad(size: Vector2) -> MeshInstance3D:
+	var mesh := QuadMesh.new()
+	mesh.size = size
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = GRIP_COLOR
+	# Over everything, the hole punched for a neighbouring panel included.
+	material.no_depth_test = true
+	material.render_priority = 10
+	var instance := MeshInstance3D.new()
+	instance.mesh = mesh
+	instance.material_override = material
+	return instance
+
+
 ## The layer is a child of the origin but belongs at a fixed place in the world,
-## so it is positioned globally.
-func place(placement: PanelLayout.Placement) -> void:
-	layer.quad_size = placement.size
-	layer.global_transform = placement.transform
+## so it is positioned globally. A curved panel's cylinder layer sits at the
+## cylinder's axis, `radius` in front of the middle of the arc.
+func place(new_placement: PanelLayout.Placement) -> void:
+	placement = new_placement
+	var curved := placement.curvature > 0.0
+	if curved != (layer is OpenXRCompositionLayerCylinder):
+		_make_layer(curved)
+	if curved:
+		var cylinder := layer as OpenXRCompositionLayerCylinder
+		var radius := PanelLayout.curve_radius(placement.curvature, distance)
+		cylinder.radius = radius
+		cylinder.central_angle = placement.size.x / radius
+		cylinder.aspect_ratio = placement.size.x / placement.size.y
+		layer.global_transform = placement.transform * Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, radius))
+	else:
+		(layer as OpenXRCompositionLayerQuad).quad_size = placement.size
+		layer.global_transform = placement.transform
+	for grip: int in _grips:
+		(_grips[grip] as Node3D).global_transform = _grip_transform(grip)
+
+
+## Where a grip sits, in world space.
+func _grip_transform(grip: int) -> Transform3D:
+	var below := -placement.size.y * 0.5 - GRIP_DROP
+	match grip:
+		Grip.TILT:
+			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(-SIDE_GRIP_OFFSET, below, 0.0))
+		Grip.CURVE:
+			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(SIDE_GRIP_OFFSET, below, 0.0))
+		Grip.PRIMARY:
+			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(-PRIMARY_GRIP_OFFSET, below, 0.0))
+		Grip.RESIZE:
+			var edge := _edge(1.0)
+			return placement.transform * Transform3D(Basis.IDENTITY,
+					Vector3(edge.x + 0.011, -placement.size.y * 0.5 - 0.011, edge.y))
+	return placement.transform * Transform3D(Basis.IDENTITY, Vector3(0.0, below, 0.0))
+
+
+## The right (side = 1) or left edge in the panel's own frame: (x, z towards the viewer).
+func _edge(side: float) -> Vector2:
+	if placement.curvature <= 0.0:
+		return Vector2(side * placement.size.x * 0.5, 0.0)
+	var radius := PanelLayout.curve_radius(placement.curvature, distance)
+	var angle := placement.size.x * 0.5 / radius
+	return Vector2(side * radius * sin(angle), radius * (1.0 - cos(angle)))
+
+
+## The grip a ray points at, and how far along the ray: Vector2(grip, distance).
+## Only grips in `allowed` count.
+func grip_at(origin: Vector3, direction: Vector3, allowed: Array) -> Vector2:
+	var best := Vector2(Grip.NONE, INF)
+	for grip: int in allowed:
+		var distance_along := PointerMath.ray_rect_distance(origin, direction, _grip_transform(grip), GRIP_HITS[grip])
+		if distance_along >= 0.0 and distance_along < best.y:
+			best = Vector2(grip, distance_along)
+	return best
+
+
+## The ray passes over the panel or close around it (where the grips are).
+func is_near(origin: Vector3, direction: Vector3) -> bool:
+	return PointerMath.ray_rect_distance(origin, direction, placement.transform,
+			placement.size + Vector2(0.2, 0.25)) >= 0.0
+
+
+## Shows the grips in `allowed` (or none); `hovered` is lit, `held` coloured, and
+## the name of whichever of them is pointed at or held is written under it.
+func show_grips(visible: bool, allowed: Array, hovered: int, held: int) -> void:
+	for grip: int in _grips:
+		var shown := visible and allowed.has(grip)
+		var mesh := _grips[grip] as MeshInstance3D
+		mesh.visible = shown
+		var color := GRIP_ACTIVE_COLOR if grip == held else (GRIP_HOVER_COLOR if grip == hovered else GRIP_COLOR)
+		(mesh.material_override as StandardMaterial3D).albedo_color = color
+	var named := held if held != Grip.NONE else hovered
+	_grip_label.visible = visible and named != Grip.NONE
+	if _grip_label.visible:
+		_grip_label.text = GRIP_NAMES[named]
+		_grip_label.global_transform = _grip_transform(named) * Transform3D(Basis.IDENTITY, Vector3(0.0, -0.045, 0.0))
 
 
 ## Call every frame. Brings the texture up to date and decides whether the layer
@@ -88,12 +232,19 @@ func refresh(session_visible: bool, copy_frames: bool, now: float) -> void:
 
 ## Distance along the ray to this panel, or -1.0 on a miss.
 func hit_distance(origin: Vector3, direction: Vector3) -> float:
-	return PointerMath.ray_rect_distance(origin, direction, layer.global_transform, layer.quad_size)
+	if placement.curvature > 0.0:
+		return PointerMath.ray_arc(origin, direction, placement.transform, placement.size,
+				PanelLayout.curve_radius(placement.curvature, distance)).x
+	return PointerMath.ray_rect_distance(origin, direction, placement.transform, placement.size)
 
 
-## Where a world point lies on the panel: 0..1 from its top-left corner.
+## Where a world point on the panel lies: 0..1 from its top-left corner.
 func uv_at(point: Vector3) -> Vector2:
-	return PointerMath.rect_uv(point, layer.global_transform, layer.quad_size)
+	if placement.curvature > 0.0:
+		var radius := PanelLayout.curve_radius(placement.curvature, distance)
+		var local := placement.transform.affine_inverse() * point - Vector3(0.0, 0.0, radius)
+		return Vector2(atan2(local.x, -local.z) * radius / placement.size.x + 0.5, 0.5 - local.y / placement.size.y)
+	return PointerMath.rect_uv(point, placement.transform, placement.size)
 
 
 ## The pixel on the Windows virtual desktop under a point of the panel.
@@ -104,4 +255,4 @@ func pixel_at(uv: Vector2) -> Vector2:
 func close() -> void:
 	capture.stop()
 	layer.queue_free()
-	queue_free()
+	queue_free()  # the grips are children
