@@ -26,6 +26,8 @@ class Radial:
 		["Alt+Tab", [0x12, 0x09]],
 		["Повторить", [0x11, 0x10, 0x5A]],
 		["Отменить", [0x11, 0x5A]],
+		# Not a shortcut: turns the scene to where the user looks (main.gd).
+		["Центр", []],
 	]
 	var centre := Vector3.ZERO
 	var right := Vector3.RIGHT

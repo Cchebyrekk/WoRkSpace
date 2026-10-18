@@ -25,6 +25,21 @@ namespace workplace {
 namespace capture = winrt::Windows::Graphics::Capture;
 namespace directx = winrt::Windows::Graphics::DirectX;
 
+// Godot does not mark the process as aware of each monitor's own scale, so
+// Windows hands it scaled sizes for monitors at more than 100 % (a 2560x1440
+// monitor at 125 % reported as 2048x1152) and scaled virtual-desktop metrics,
+// and the cursor landed off the ray once the user changed a scale (18.10.2026).
+// Monitor rectangles and cursor moves are worked out in real pixels instead.
+struct RealPixels {
+	DPI_AWARENESS_CONTEXT previous;
+	RealPixels() : previous(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {}
+	~RealPixels() {
+		if (previous != nullptr) {
+			SetThreadDpiAwarenessContext(previous);
+		}
+	}
+};
+
 static BOOL CALLBACK monitor_proc(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
 	auto *list = reinterpret_cast<std::vector<MonitorInfo> *>(param);
 	MONITORINFOEXW info{};
@@ -38,12 +53,18 @@ static BOOL CALLBACK monitor_proc(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
 		entry.width = info.rcMonitor.right - info.rcMonitor.left;
 		entry.height = info.rcMonitor.bottom - info.rcMonitor.top;
 		entry.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+		DISPLAY_DEVICEW device{};
+		device.cb = sizeof(device);
+		if (EnumDisplayDevicesW(info.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME)) {
+			entry.device_path = winrt::to_string(device.DeviceID);
+		}
 		list->push_back(entry);
 	}
 	return TRUE;
 }
 
 std::vector<MonitorInfo> enumerate_monitors() {
+	RealPixels real_pixels;
 	std::vector<MonitorInfo> monitors;
 	EnumDisplayMonitors(nullptr, nullptr, monitor_proc, reinterpret_cast<LPARAM>(&monitors));
 	return monitors;
@@ -213,7 +234,16 @@ CaptureBackend *CaptureBackend::create() {
 	return new WgcCapture();
 }
 
+void mouse_position(int32_t &x, int32_t &y) {
+	RealPixels real_pixels;
+	POINT point{};
+	GetCursorPos(&point);
+	x = point.x;
+	y = point.y;
+}
+
 void mouse_move(int32_t x, int32_t y) {
+	RealPixels real_pixels;
 	int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
 	int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
 	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);

@@ -66,6 +66,8 @@ public:
 
 	// Pixel on the virtual desktop, the same space as ScreenCapture.list_monitors() positions.
 	static void move_to(const Vector2i &p_position);
+	// The cursor in the same pixels as move_to (Godot's own reading is scaled on monitors above 100 %).
+	static Vector2i get_position();
 	static void set_button(Button p_button, bool p_pressed);
 	// 120 is one wheel notch; positive scrolls up.
 	static void scroll(int p_delta);

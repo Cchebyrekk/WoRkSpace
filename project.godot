@@ -36,3 +36,7 @@ openxr/startup_alert=false
 openxr/extensions/hand_tracking=true
 openxr/extensions/hand_interaction_profile=true
 shaders/enabled=true
+
+[debug]
+
+file_logging/max_log_files=20

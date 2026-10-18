@@ -6,6 +6,11 @@ extends Node
 ## instances, so the driver (and Quest Link) is not restarted.
 
 signal finished(ok: bool, code: String, detail: String)
+## After list_modes(): one dictionary per monitor: name, width, height, refresh,
+## scale (percent), modes ("WxH@Hz" strings), scales (allowed percents).
+signal modes_listed(monitors: Array)
+## After count_instances(): working and all MttVDD device instances.
+signal instances_counted(working: int, total: int)
 
 const SCRIPT_PATH := "res://tools/display_topology.ps1"
 
@@ -14,12 +19,15 @@ var busy := false
 var _thread: Thread
 
 
-func add_screen() -> void:
-	_run("add")
+## `monitor_key` (ScreenPanel.monitor_key): attach that monitor if it is free,
+## else the usual choice.
+func add_screen(monitor_key := "") -> void:
+	_run("add", ["-Monitor", monitor_key] if monitor_key != "" else [])
 
 
-func remove_screen() -> void:
-	_run("remove")
+## `monitor_key`: detach that monitor if it may be detached, else the usual choice.
+func remove_screen(monitor_key := "") -> void:
+	_run("remove", ["-Monitor", monitor_key] if monitor_key != "" else [])
 
 
 ## `positions`: monitor name (\\.\DISPLAYnn, as ScreenCapture.list_monitors() gives
@@ -32,13 +40,33 @@ func arrange(positions: Dictionary) -> void:
 	_run("arrange", ["-Positions", ";".join(items)])
 
 
-## Remembers the current layout and which monitors are attached (to restore on an emergency exit).
-func save_layout() -> void:
-	_run("save")
+func list_modes() -> void:
+	_run("modes")
 
 
-func restore_layout() -> void:
-	_run("restore")
+## Changes one monitor's mode ("2560x1440@60", or "" to keep it) and/or its
+## Windows scale in percent (0 to keep it).
+func set_mode(monitor_name: String, mode: String, scale: int) -> void:
+	var arguments := ["-Monitor", monitor_name]
+	if mode != "":
+		arguments.append_array(["-Mode", mode])
+	if scale > 0:
+		arguments.append_array(["-Scale", str(scale)])
+	_run("setmode", arguments)
+
+
+func count_instances() -> void:
+	_run("instances")
+
+
+## Remembers the current layout and which monitors are attached: `backup` "start"
+## for the emergency exit, "apply" for after the driver restart of "Apply".
+func save_layout(backup := "start") -> void:
+	_run("save", ["-Backup", backup])
+
+
+func restore_layout(backup := "start") -> void:
+	_run("restore", ["-Backup", backup])
 
 
 ## For the emergency exit: restores on this thread and returns the script's answer.
@@ -86,4 +114,11 @@ func _report(answer: String) -> void:
 	busy = false
 	var parsed: Variant = JSON.parse_string(answer)
 	var result: Dictionary = parsed if parsed is Dictionary else {}
+	match str(result.get("code", "")):
+		"modes":
+			modes_listed.emit(result.get("monitors", []))
+			return
+		"instances":
+			instances_counted.emit(int(result.get("working", 0)), int(result.get("total", 0)))
+			return
 	finished.emit(bool(result.get("ok", false)), str(result.get("code", "failed")), str(result.get("detail", answer)))

@@ -13,6 +13,8 @@ func _init() -> void:
 	_test_recenter_math()
 	_test_rect_uv()
 	_test_ray_arc()
+	_test_vdd_config()
+	_test_monitor_key()
 	_test_cursor_filter()
 	_test_aim_study()
 	_test_panel_layout()
@@ -43,6 +45,30 @@ func _test_ray_rect() -> void:
 	var turned := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(-2.0, 1.0, 0.0))
 	_check(is_equal_approx(PointerMath.ray_rect_distance(eye, Vector3.LEFT, turned, size), 2.0), "повёрнутый прямоугольник слева")
 	_check(PointerMath.ray_rect_distance(eye, Vector3.FORWARD, turned, size) < 0.0, "повёрнутый: луч вперёд — промах")
+
+
+func _test_monitor_key() -> void:
+	# The same monitor before and after the driver was reinstalled (18.10.2026).
+	var before := ScreenPanel.key_of("\\\\?\\DISPLAY#MTT1337#1&2240405a&1&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}")
+	var after := ScreenPanel.key_of("\\\\?\\DISPLAY#MTT1337#1&2240405a&2&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}")
+	_check(before == "MTT1337#1&2240405a&UID256" and after == before, "ключ монитора не меняется при переустановке драйвера (%s, %s)" % [before, after])
+	_check(ScreenPanel.key_of("\\\\.\\DISPLAY3") == "\\\\.\\DISPLAY3", "ключ без пути — как есть")
+	_check(ScreenPanel.key_of(before) == before, "ключ от ключа — тот же")
+
+
+func _test_vdd_config() -> void:
+	var text := "<vdd_settings>\n    <monitors><count>1</count></monitors>\n    <resolutions>\n        <resolution>\n" \
+			+ "            <width>1920</width>\n            <height>1080</height>\n            <refresh_rate>120</refresh_rate>\n" \
+			+ "        </resolution>\n        <resolution><width>2560</width><height>1440</height><refresh_rate>60</refresh_rate></resolution>\n" \
+			+ "    </resolutions>\n    <options><logging>false</logging></options>\n</vdd_settings>"
+	var parsed := VddConfig.parse_resolutions(text)
+	var expected: Array[Vector2i] = [Vector2i(1920, 1080), Vector2i(2560, 1440)]
+	_check(parsed == expected, "настройки VDD: разрешения прочитаны")
+	var wanted: Array[Vector2i] = [Vector2i(3440, 1440), Vector2i(1920, 1080)]
+	var changed := VddConfig.with_resolutions(text, wanted)
+	_check(VddConfig.parse_resolutions(changed) == wanted, "настройки VDD: новый список записан")
+	_check(changed.contains("<count>1</count>") and changed.contains("<logging>false</logging>"), "настройки VDD: остальное не тронуто")
+	_check(VddConfig.parse_resolutions("<vdd_settings/>").is_empty(), "настройки VDD: без списка — пусто")
 
 
 func _test_ray_arc() -> void:
@@ -276,6 +302,16 @@ func _test_panel_layout() -> void:
 		_check(left_edge <= right_edge + 0.002, "ряд ниже глаз (%s): панели не заходят друг в друга" % variant[2])
 		_check(right_edge - left_edge < deg_to_rad(4.0), "ряд ниже глаз (%s): и не расходятся заметно" % variant[2])
 
+	# Two leaning panels over the seams of three: their seam stays over the middle
+	# of the middle panel below (it was off-centre, 18.10.2026).
+	var two_over_three: Array[Rect2i] = [Rect2i(-1920, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080),
+			Rect2i(-960, -1080, 1920, 1080), Rect2i(960, -1080, 1920, 1080)]
+	placed = PanelLayout.arrange(two_over_three, 1, eye, distance, 60.0, 300.0, [] as Array[float], 0.07)
+	var seam_left := _panel_point(placed[3], Vector2(1, 0), distance)
+	var seam_right := _panel_point(placed[4], Vector2(-1, 0), distance)
+	var seam_heading := (atan2(seam_left.x - eye.x, -(seam_left.z - eye.z)) + atan2(seam_right.x - eye.x, -(seam_right.z - eye.z))) * 0.5
+	_check(absf(seam_heading - placed[1].heading) < deg_to_rad(0.5), "два наклонённых над тремя: стык по центру среднего")
+
 	# A gap between rows, for the handles.
 	placed = PanelLayout.arrange(rows, 0, eye, distance, 60.0, 300.0, [] as Array[float], 0.07)
 	lower_top = placed[0].transform.origin.y + placed[0].size.y * 0.5
@@ -422,6 +458,17 @@ func _test_layout_edit() -> void:
 	moved = LayoutEdit.move(with_top_left, 1, 0, Vector2(2900.0, -560.0))
 	_check(_layout_is_valid(moved, 1), "второй ряд справа: раскладка допустима")
 	_check(moved[0].position.y == -1080 and moved[0].position.x > moved[3].position.x, "второй ряд справа: встал наверх справа")
+
+	# A monitor switched to a bigger resolution overlaps its neighbour: repaired.
+	var grown: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080), Rect2i(-1920, 0, 1920, 1080)]
+	grown[2] = Rect2i(-1920, 0, 2560, 1440)
+	_check(not LayoutEdit.is_valid(grown, 0), "проверка раскладки: наложение замечено")
+	var repaired := LayoutEdit.repair(grown, 0, 2)
+	_check(LayoutEdit.is_valid(repaired, 0) and _layout_is_valid(repaired, 0), "выросший монитор: раскладка исправлена")
+	_check(repaired[2].end.x == 0 and repaired[1].position.x == 1920, "выросший монитор: встал слева вплотную, остальные на месте")
+	_check(LayoutEdit.is_valid(three, 1), "проверка раскладки: нормальная раскладка допустима")
+	var apart: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(2000, 0, 1920, 1080)]
+	_check(not LayoutEdit.is_valid(apart, 0), "проверка раскладки: разрыв замечен")
 
 	# Dropping where it already is changes nothing.
 	moved = LayoutEdit.move(three, 1, 2, Vector2(2880.0, 540.0))

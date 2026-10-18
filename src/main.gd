@@ -65,6 +65,11 @@ const XR_RESTART_DELAY_SEC := 5.0
 const XR_RESTART_MAX_ATTEMPTS := 60
 const XR_LOST_TRACKERS_SEC := 3.0
 const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
+## How long the layout from before "Apply" waits for the helper's answer.
+const RESTORE_WAIT_MAX_SEC := 180.0
+## After a restart of Quest Link the runtime may come up without hand tracking at
+## first; then the app restarts once more after this long.
+const XR_HANDS_RETRY_DELAY_SEC := 8.0
 
 ## Screen panel: a 1920-px-wide monitor spans this horizontal angle at this distance.
 ## Larger and closer than a real monitor, because the Quest 3S has few pixels per degree.
@@ -140,18 +145,16 @@ const TUNABLES := [
 	["panels", "move_mode", "Перенос меняет", 1.0, "", 1.0, 0.0, 1.0],
 	["panels", "magnet", "Магнит в VR", 1.0, "", 1.0, 0.0, 1.0],
 	["panels", "tilt_mode", "Наклон меняет", 1.0, "", 1.0, 0.0, 1.0],
+	["panels", "monitor_menu", "Меню экранов", 1.0, "", 1.0, 0.0, 1.0],
 ]
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
-const SCREEN_BUTTON_HOLD_SEC := 0.6
 const EXIT_BUTTON_HOLD_SEC := 1.0
-## Creating a driver instance restarts every virtual display and drops Quest Link.
-const NEW_INSTANCE_BUTTON_HOLD_SEC := 2.0
 const TOPOLOGY_MESSAGES := {
 	"detached": "экран отсоединён",
 	"attached": "экран присоединён",
 	"last_screen": "это последний экран, убирать нельзя",
-	"no_free_screen": "свободных экранов нет — «Новый VDD» создаст ещё один (Link переподключится)",
+	"no_free_screen": "свободных экранов нет — добавьте экземпляр на вкладке «Драйвер»",
 	"arranged": "раскладка Windows изменена",
 	"saved": "исходная раскладка запомнена",
 	"restored": "исходная раскладка возвращена",
@@ -164,7 +167,22 @@ const PANEL_SCALE_MIN := 0.5
 const PANEL_SCALE_MAX := 2.5
 ## A fist lets go only once the fingers open this much further than it took to close.
 const FIST_RELEASE_MARGIN := 0.015
-const LAYOUT_RESTORE_HOLD_SEC := 1.0
+## A monitor's menu floats this far in front of its panel (metres).
+const MONITOR_MENU_FORWARD := 0.25
+## Driver section of the settings panel: where it is, the instance limit (as in
+## tools/vdd_helper.ps1) and how long "Применить" has to be held.
+## Settings panel tabs, and which tab each tunable is on (the rest are on the first).
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер"]
+const TUNABLE_TABS := {
+	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
+	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
+	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
+	"grab_mode": 4, "fist_curl": 4, "move_mode": 4, "magnet": 4, "tilt_mode": 4, "monitor_menu": 4,
+}
+## Saved arrangements on the "Раскладки" tab.
+const LAYOUT_SLOTS := 4
+const DRIVER_MAX_INSTANCES := 8
+const DRIVER_APPLY_HOLD_SEC := 2.0
 ## Room between rows of panels for the handles under them (metres).
 const ROW_GAP := 0.07
 ## A carried panel is let go only after the grip (fist, pinch, trigger) or the
@@ -190,6 +208,8 @@ class PanelOptions:
 	var magnet := 1
 	## What the tilt grip changes: 0 = the panel's whole row, 1 = that panel only.
 	var tilt_mode := 0
+	## The grip that opens a monitor's menu (resolution, refresh rate, scale): 1 = shown.
+	var monitor_menu := 0
 
 
 ## Spread of a point over a stretch of frames: the root-mean-square distance from
@@ -384,7 +404,6 @@ var _joint_meshes: Array[MultiMeshInstance3D] = []
 var _pointers: Array[Pointer] = [Pointer.new(), Pointer.new()]
 var _rays: Array[Node3D] = []
 var _buttons: Array[VrButton] = []
-var _screen_buttons: Array[VrButton] = []
 var _topology: DisplayTopology
 var _vdd: VddControl
 var _vdd_message := ""
@@ -398,6 +417,15 @@ var _panels: Array[ScreenPanel] = []
 var _monitor_signature := ""
 ## A changed list has to be seen twice in a row: during a topology change it flickers.
 var _pending_monitor_signature := ""
+## "Apply" in the driver section: the layout is being remembered before the restart.
+var _driver_saving_layout := false
+## Set after the restart "Apply" brought: the panels' first build puts the layout back.
+var _restore_after_apply := false
+## "Apply" was sent with the layout remembered: kept in the settings across the restart.
+var _driver_restore_pending := false
+## The helper request of that "Apply": the layout goes back once it is answered.
+var _driver_restore_request := ""
+var _restore_wait_started := 0.0
 var _monitor_check_timer := 0.0
 ## Moving a panel: the layout when it was grabbed, which panel is primary, and
 ## the layout as it would be if let go now (the other panels already show it).
@@ -418,9 +446,37 @@ var _queued_positions := {}
 var _panel_pitches := {}
 var _row_pitches := {}
 var _panel_curvatures := {}
-## The user's own arrangement put aside by "Как в Windows", for "Моя расстановка".
-var _layout_stash := {}
-var _layout_reset_button: VrButton
+## The panel arrangement of each way of moving them: "windows" (the panels follow
+## the Windows layout) and "vr" (placed freely); the active one is in the
+## _panel_* variables. See _own_arrangement().
+var _arrangements := {"windows": {}, "vr": {}}
+## Saved arrangements ("1".."4"): see _on_slot_save().
+var _layout_slots := {}
+## A saved arrangement being loaded: screens are added or removed one by one first.
+var _slot_loading := {}
+var _slot_load_steps := 0
+## The number of panels the step under way should lead to, or -1.
+var _slot_waiting_count := -1
+var _slot_labels: Array[Label3D] = []
+var _layout_status: Label3D
+## Settings panel tabs.
+var _settings_tabs: Array[Node3D] = []
+var _settings_tab_buttons: Array[VrButton] = []
+## The menu of one monitor (resolution, refresh rate, scale), shown on demand.
+var _monitor_menu: MonitorMenu
+## The monitor whose mode was just changed from its menu: the layout is checked
+## once Windows has it (a bigger monitor may overlap its neighbours).
+var _mode_change_monitor := ""
+## Driver section of the settings panel: working instances now and wanted, the
+## resolutions in the driver's file now and wanted.
+var _driver_count := -1
+var _driver_target := -1
+var _driver_resolutions: Array[Vector2i] = []
+var _driver_selected: Array[Vector2i] = []
+var _driver_count_label: Label3D
+var _driver_status: Label3D
+var _driver_apply: VrButton
+var _driver_chips := {}
 var _session_visible := false
 var _frames_logged := 0
 var _cursor_filter := CursorFilter.new()
@@ -493,13 +549,15 @@ func _ready() -> void:
 	_build_buttons()
 	_build_settings_panel()
 	_load_settings()
-	_update_layout_reset_button()
 	_update_ray_info()
+	_refresh_layout_section()
 	_refresh_settings_panel()
 	# The layout as it was before this session, for the emergency exit. Not after a
 	# self-restart: by then the layout may already have been changed here.
 	if OS.get_environment(XR_RETRY_ENV) == "":
 		_topology.save_layout()
+	_take_restore_after_apply()
+	_count_instances_when_free()
 
 	_hotkey = GlobalHotkey.new()
 	if _hotkey.start(true, true, true, EXIT_HOTKEY_VIRTUAL_KEY):
@@ -517,8 +575,9 @@ func _ready() -> void:
 			print("[xr] Link ещё не готов, попытка %d из %d" % [attempt, XR_RESTART_MAX_ATTEMPTS])
 			get_tree().create_timer(XR_RESTART_DELAY_SEC).timeout.connect(_restart_app.bind(attempt + 1))
 		return
-	if OS.get_environment(XR_RETRY_ENV) != "":
-		print("[xr] сессия восстановлена после перезапуска, попытка ", OS.get_environment(XR_RETRY_ENV))
+	var retry_attempt := OS.get_environment(XR_RETRY_ENV).to_int()
+	if retry_attempt > 0:
+		print("[xr] сессия восстановлена после перезапуска, попытка ", retry_attempt)
 		OS.unset_environment(XR_RETRY_ENV)
 
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
@@ -533,6 +592,11 @@ func _ready() -> void:
 		_xr = openxr
 		print("[xr] расширение hand tracking поддерживается средой: ", openxr.is_hand_tracking_supported())
 		print("[xr] расширение hand interaction (поза прицеливания руки) поддерживается средой: ", openxr.is_hand_interaction_supported())
+		# Back too early after Quest Link restarted: the runtime is up but without
+		# hand tracking for the whole session (18.10.2026). Try again a bit later.
+		if retry_attempt > 0 and not openxr.is_hand_tracking_supported() and retry_attempt < XR_RESTART_MAX_ATTEMPTS:
+			print("[xr] после перезапуска Link руки ещё недоступны, перезапускаюсь ещё раз")
+			get_tree().create_timer(XR_HANDS_RETRY_DELAY_SEC).timeout.connect(_restart_app.bind(retry_attempt + 1))
 		openxr.session_begun.connect(_on_session_begun.bind(openxr))
 		# Holding the Meta button re-centres the headset's view; the scene follows.
 		if openxr.has_signal(&"pose_recentered"):
@@ -582,6 +646,7 @@ func _process(delta: float) -> void:
 	_update_two_hand_gestures()
 	_update_calibration()
 	_update_grabs(delta)
+	_place_monitor_menu()
 	_update_buttons(delta)
 	_update_cursor()
 	_update_rays()
@@ -679,8 +744,12 @@ func _update_cursor() -> void:
 	for pointer in _pointers:
 		pointer.on_panel = false
 		pointer.panel = null
-		# A pointer that carries a panel does not touch the cursor.
+		# A pointer that carries a panel does not touch the cursor; nor does one on a monitor's menu.
 		if not pointer.active or pointer.grab_panel != null:
+			continue
+		var on_menu := _monitor_menu.hit_distance(pointer.origin, pointer.direction)
+		if on_menu >= 0.0:
+			pointer.hit_distance = minf(pointer.hit_distance, on_menu)
 			continue
 		var nearest := INF
 		for panel in _panels:
@@ -983,6 +1052,10 @@ func _rebuild_panels() -> void:
 	if hole_punch and not _panels.is_empty():
 		get_viewport().transparent_bg = true
 	print("[capture] мониторов %d, панелей %d" % [monitors.size(), _panels.size()])
+	if _mode_change_monitor != "":
+		_repair_layout()
+	_resume_slot_load()
+	_continue_slot_load()
 	_place_panels([], true)
 
 
@@ -1007,18 +1080,18 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 	var curvatures: Array[float] = []
 	for i in _panels.size():
 		var panel := _panels[i]
-		panel.vr_scale = _panel_scales.get(panel.monitor_name, 1.0)
+		panel.vr_scale = _panel_scales.get(panel.monitor_key, 1.0)
 		panel.distance = PANEL_DISTANCE
 		scales.append(panel.vr_scale)
-		pitches.append(_pitch_of(panel.monitor_name, row_offsets[i]))
-		curvatures.append(_panel_curvatures.get(panel.monitor_name, 0.0))
+		pitches.append(_pitch_of(panel.monitor_key, row_offsets[i]))
+		curvatures.append(_panel_curvatures.get(panel.monitor_key, 0.0))
 	var placements := PanelLayout.arrange(rects, primary_index, PANEL_EYE, PANEL_DISTANCE, PANEL_WIDTH_DEG,
 			PANEL_MAX_ARC_DEG, scales, ROW_GAP, pitches, curvatures)
 	for i in _panels.size():
-		var free_at: Variant = _panel_positions.get(_panels[i].monitor_name)
+		var free_at: Variant = _panel_positions.get(_panels[i].monitor_key)
 		if free_at is Vector2:
 			placements[i] = PanelLayout.placement_at(free_at.x, free_at.y, placements[i].size, PANEL_EYE, PANEL_DISTANCE,
-					_panel_pitches.get(_panels[i].monitor_name, NAN), curvatures[i])
+					_panel_pitches.get(_panels[i].monitor_key, NAN), curvatures[i])
 		_panels[i].place(placements[i])
 		if log_it:
 			print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, наклон %+.0f°, изгиб %.2f, %.2f x %.2f м%s" % [
@@ -1043,10 +1116,12 @@ func _row_offsets(rects: Array[Rect2i], primary_index: int) -> Array[int]:
 
 
 ## A monitor's own tilt, else its row's, else NAN (facing the eye).
-func _pitch_of(monitor_name: String, row_offset: int) -> float:
-	if _panel_pitches.has(monitor_name):
-		return _panel_pitches[monitor_name]
-	return _row_pitches.get(str(row_offset), NAN)
+## In the Windows layout panels stand upright unless tilted; in VR they face the
+## eye (the user's choice on 18.10.2026).
+func _pitch_of(monitor_key: String, row_offset: int) -> float:
+	if _panel_pitches.has(monitor_key):
+		return _panel_pitches[monitor_key]
+	return _row_pitches.get(str(row_offset), 0.0 if _panel_options.move_mode == 0 else NAN)
 
 
 func _current_rects() -> Array[Rect2i]:
@@ -1066,12 +1141,15 @@ func _primary_index() -> int:
 ## Which grips a panel offers with the current settings: none at all when moving
 ## is by fist only or off (the user's choice on 17.10.2026: those modes are for
 ## not having anything under the panels). "Make primary" only on the others.
+## The menu grip is there whenever the menu is switched on in the settings.
 func _allowed_grips(panel: ScreenPanel) -> Array:
-	if _gesture_settings.grab_mode >= 2:
-		return []
-	var grips := [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
-	if not panel.primary:
-		grips.append(ScreenPanel.Grip.PRIMARY)
+	var grips := []
+	if _gesture_settings.grab_mode <= 1:
+		grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
+		if not panel.primary:
+			grips.append(ScreenPanel.Grip.PRIMARY)
+	if _panel_options.monitor_menu != 0:
+		grips.append(ScreenPanel.Grip.MENU)
 	return grips
 
 
@@ -1120,6 +1198,8 @@ func _update_grabs(delta: float) -> void:
 		if target != null and kind == ScreenPanel.Grip.PRIMARY:
 			# A button, not a grip: nothing to carry.
 			_make_primary(target)
+		elif target != null and kind == ScreenPanel.Grip.MENU:
+			_toggle_monitor_menu(target)
 		elif target != null and _start_grab(pointer, target, kind, by_fist):
 			carrying = true
 
@@ -1182,6 +1262,10 @@ func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool)
 		_drag_rects = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
 		_drag_primary = _primary_index()
 		_drag_preview = _drag_rects.duplicate()
+		if _panel_options.move_mode == 0 and _panel_positions.erase(panel.monitor_key):
+			# Moved in the layout: it is part of the layout again at once.
+			_save_settings()
+			_place_panels(_drag_rects)
 	print("[panels] %s: %s (%s%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], "кулак" if by_fist else pointer.mode,
 			", только VR" if kind == ScreenPanel.Grip.MOVE and _panel_options.move_mode == 1 else ""])
 	return true
@@ -1206,7 +1290,7 @@ func _drag(pointer: Pointer) -> void:
 						others.append(other.placement.size)
 				scale = PanelLayout.snap_scale(scale, panel.placement.size / panel.vr_scale, others, SIZE_MAGNET_SHARE)
 			# Live, so that the neighbours move aside while the size changes.
-			_panel_scales[panel.monitor_name] = scale
+			_panel_scales[panel.monitor_key] = scale
 			_place_panels()
 			return
 		ScreenPanel.Grip.TILT:
@@ -1234,9 +1318,9 @@ func _drag(pointer: Pointer) -> void:
 					if absf(curvature - candidate) < CURVE_MAGNET:
 						curvature = candidate
 			if curvature > 0.0:
-				_panel_curvatures[panel.monitor_name] = curvature
+				_panel_curvatures[panel.monitor_key] = curvature
 			else:
-				_panel_curvatures.erase(panel.monitor_name)
+				_panel_curvatures.erase(panel.monitor_key)
 			_place_panels()
 			return
 	var at := angles - pointer.grab_offset
@@ -1259,31 +1343,31 @@ func _drag(pointer: Pointer) -> void:
 					deg_to_rad(MAGNET_REACH_DEG), pointer.snap_held, own_widths)
 			pointer.snap_held = Vector2(at.x if at.x != raw.x else NAN, at.y if at.y != raw.y else NAN)
 		panel.place(PanelLayout.placement_at(at.x, at.y, panel.placement.size, PANEL_EYE, PANEL_DISTANCE,
-				_panel_pitches.get(panel.monitor_name, NAN), panel.placement.curvature))
+				_panel_pitches.get(panel.monitor_key, NAN), panel.placement.curvature))
 		return
 	var drop := PanelLayout.to_desktop(_drag_rects, _drag_primary, PANEL_DISTANCE, PANEL_WIDTH_DEG, PANEL_MAX_ARC_DEG, at.x, at.y)
 	var preview := LayoutEdit.move(_drag_rects, _drag_primary, _panels.find(panel), drop)
+	# The carried panel stands where it will land (with the magnet to edges and
+	# seams), not freely under the hand: otherwise the magnet was not seen and the
+	# panel jumped when let go (18.10.2026).
 	if preview != _drag_preview:
 		_drag_preview = preview
 		_place_panels(preview)
-	# The carried panel itself follows the hand.
-	panel.place(PanelLayout.placement_at(at.x, at.y, panel.placement.size, PANEL_EYE, PANEL_DISTANCE,
-			NAN, panel.placement.curvature))
 
 
 ## Tilt: of the panel's whole row, or of this panel only (settings); a panel placed
 ## freely in VR is not in a row.
 func _set_pitch(panel: ScreenPanel, pitch: float) -> void:
-	if _panel_options.tilt_mode == 1 or _panel_positions.has(panel.monitor_name):
-		_panel_pitches[panel.monitor_name] = pitch
+	if _panel_options.tilt_mode == 1 or _panel_positions.has(panel.monitor_key):
+		_panel_pitches[panel.monitor_key] = pitch
 		return
 	var offsets := _row_offsets(_current_rects(), _primary_index())
 	var row := offsets[_panels.find(panel)]
 	_row_pitches[str(row)] = pitch
 	# The whole row moves together: no panel of it keeps a tilt of its own.
 	for i in _panels.size():
-		if offsets[i] == row and not _panel_positions.has(_panels[i].monitor_name):
-			_panel_pitches.erase(_panels[i].monitor_name)
+		if offsets[i] == row and not _panel_positions.has(_panels[i].monitor_key):
+			_panel_pitches.erase(_panels[i].monitor_key)
 
 
 ## Half-width and half-height of a placed panel as the eye sees them (curved
@@ -1303,17 +1387,15 @@ func _end_grab(pointer: Pointer) -> void:
 			_place_panels([], true)
 			print("[panels] %s: размер %.2f, наклон %+.0f°, изгиб %.2f" % [panel.monitor_name, panel.vr_scale,
 					rad_to_deg(panel.placement.pitch), panel.placement.curvature])
-			_update_layout_reset_button()
 			return
 	if _panel_options.move_mode == 1:
-		_panel_positions[panel.monitor_name] = Vector2(panel.placement.heading, panel.placement.elevation)
+		_panel_positions[panel.monitor_key] = Vector2(panel.placement.heading, panel.placement.elevation)
 		_save_settings()
-		_update_layout_reset_button()
 		print("[panels] %s: свободно в VR, курс %+.1f°, возвышение %+.1f°" % [panel.monitor_name,
 				rad_to_deg(panel.placement.heading), rad_to_deg(panel.placement.elevation)])
 		return
 	# Moved in the layout: it is part of the layout again, wherever it was put in VR before.
-	if _panel_positions.erase(panel.monitor_name):
+	if _panel_positions.erase(panel.monitor_key):
 		_save_settings()
 	if _drag_preview == _drag_rects:
 		_place_panels()
@@ -1438,14 +1520,19 @@ func _load_settings() -> void:
 	for tunable: Array in TUNABLES:
 		var target := _tunable_target(tunable[0])
 		target.set(tunable[1], config.get_value(tunable[0], tunable[1], target.get(tunable[1])))
-	var scales: Variant = config.get_value("panels", "vr_scale", {})
-	if scales is Dictionary:
-		_panel_scales = scales
-	for item: Array in [["vr_position", "_panel_positions"], ["pitch", "_panel_pitches"], ["row_pitch", "_row_pitches"],
-			["curvature", "_panel_curvatures"], ["stash", "_layout_stash"]]:
-		var value: Variant = config.get_value("panels", item[0], {})
-		if value is Dictionary:
-			set(item[1], value)
+	var arrangements: Variant = config.get_value("panels", "arrangements", {})
+	if arrangements is Dictionary:
+		var identity := {}
+		for mode: String in arrangements:
+			for part: String in ["positions", "scales", "pitches", "curvatures"]:
+				for key: String in (arrangements[mode] as Dictionary).get(part, {}):
+					identity[ScreenPanel.key_of(key)] = ScreenPanel.key_of(key)
+		for mode: String in arrangements:
+			_arrangements[mode] = _remapped_arrangement(arrangements[mode], identity)
+	_apply_arrangement(_arrangements.get(_mode_key(), {}))
+	var slots: Variant = config.get_value("layouts", "slots", {})
+	if slots is Dictionary:
+		_layout_slots = slots
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
 
@@ -1460,12 +1547,14 @@ func _save_settings() -> void:
 	config.set_value("ray", "aim_offset_right", _aim_offset[1])
 	for tunable: Array in TUNABLES:
 		config.set_value(tunable[0], tunable[1], _tunable_target(tunable[0]).get(tunable[1]))
-	config.set_value("panels", "vr_scale", _panel_scales)
-	config.set_value("panels", "vr_position", _panel_positions)
-	config.set_value("panels", "pitch", _panel_pitches)
-	config.set_value("panels", "row_pitch", _row_pitches)
-	config.set_value("panels", "curvature", _panel_curvatures)
-	config.set_value("panels", "stash", _layout_stash)
+	_arrangements[_mode_key()] = _own_arrangement()
+	config.set_value("panels", "arrangements", _arrangements)
+	config.set_value("layouts", "slots", _layout_slots)
+	if not _slot_loading.is_empty():
+		config.set_value("layouts", "pending", _slot_loading)
+	if _driver_restore_pending:
+		config.set_value("driver", "restore_layout", true)
+		config.set_value("driver", "restore_request", _driver_restore_request)
 	var error := config.save(SETTINGS_PATH)
 	if error != OK:
 		print("[settings] не удалось сохранить: ", error_string(error))
@@ -1519,26 +1608,33 @@ func _on_button_pressed(button: String, side: int) -> void:
 	print("[input] ", SIDE_LABELS[side], " контроллер: нажато ", button)
 
 
-func _screens_busy() -> bool:
-	return _topology.busy or _vdd.busy
-
-
-func _on_screen_button(add: bool) -> void:
-	if _screens_busy():
-		return
-	_vdd_message = "присоединяю экран…" if add else "отсоединяю экран…"
-	print("[screens] ", _vdd_message)
-	if add:
-		_topology.add_screen()
-	else:
-		_topology.remove_screen()
-
-
 func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
+	if _driver_saving_layout and code in ["saved", "failed"]:
+		_start_driver_apply(ok)
 	var text: String = TOPOLOGY_MESSAGES.get(code, code)
 	_vdd_message = ("готово: " if ok else "ошибка: ") + text + ((" (" + detail + ")") if detail != "" else "")
 	print("[screens] ", _vdd_message)
-	if not _queued_positions.is_empty():
+	if not _slot_loading.is_empty() and not ok:
+		if code == "no_free_screen":
+			# Not enough driver instances: create more (Quest Link reconnects; the
+			# load goes on after the app has restarted, see _resume_slot_load).
+			# Never fewer than there are: "apply" removes the ones above its number.
+			var want := maxi(int(_slot_loading.get("count", 0)), _driver_count)
+			_layout_status.text = "создаю экземпляры драйвера до %d, Link переподключится…" % want
+			_save_settings()
+			_vdd.apply(want)
+		else:
+			_layout_status.text = "не удалось: " + text
+			_finish_slot_load()
+	elif not _slot_loading.is_empty():
+		_continue_slot_load()
+	if code == "mode_set" or (not ok and _mode_change_monitor != ""):
+		_repair_layout()
+		_mode_change_monitor = ""
+		if _monitor_menu.visible:
+			_monitor_menu.show_loading(_monitor_menu.monitor_name)
+			_topology.list_modes()
+	if not _queued_positions.is_empty() and not _topology.busy:
 		var positions := _queued_positions
 		_queued_positions = {}
 		_vdd_message = "меняю раскладку Windows…"
@@ -1547,26 +1643,6 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 		# Windows refused the new layout: the panels go back to what it really is.
 		_layout_pending.clear()
 		_place_panels()
-
-
-## "Как в Windows" puts the user's own arrangement (free places, sizes, tilts,
-## curves) aside and shows the panels exactly as the Windows layout; then the same
-## button, "Моя расстановка", brings that arrangement back.
-func _on_panels_reset_button() -> void:
-	if _layout_stash.is_empty():
-		var own := _own_arrangement()
-		if own.values().all(func(part: Dictionary) -> bool: return part.is_empty()):
-			return
-		_layout_stash = own
-		_apply_arrangement({})
-		print("[panels] как в Windows; своя расстановка отложена")
-	else:
-		_apply_arrangement(_layout_stash)
-		_layout_stash = {}
-		print("[panels] своя расстановка возвращена")
-	_save_settings()
-	_place_panels([], true)
-	_update_layout_reset_button()
 
 
 func _own_arrangement() -> Dictionary:
@@ -1583,30 +1659,258 @@ func _apply_arrangement(own: Dictionary) -> void:
 	_panel_curvatures = own.get("curvatures", {}).duplicate()
 
 
-func _update_layout_reset_button() -> void:
-	if _layout_reset_button != null:
-		_layout_reset_button.set_text("Моя расстановка" if not _layout_stash.is_empty() else "Как в Windows")
+## Opens the menu of `panel` in front of the lower part of it, or closes it if it
+## is already open there.
+## A radial menu item: a keyboard shortcut, or one of the app's own actions.
+func _run_menu_item(item: Array) -> void:
+	var keys: Array = item[1]
+	if not keys.is_empty():
+		MouseInput.press_keys(PackedInt32Array(keys))
+	elif item[0] == "Центр":
+		_recenter()
 
 
-func _on_restore_layout_button() -> void:
-	if _screens_busy():
+func _toggle_monitor_menu(panel: ScreenPanel) -> void:
+	if _monitor_menu.visible and _monitor_menu.monitor_name == panel.monitor_name:
+		_close_monitor_menu()
 		return
-	_vdd_message = "возвращаю исходную раскладку…"
+	_monitor_menu.show_loading(panel.monitor_name)
+	_monitor_menu.visible = true
+	print("[screens] меню экрана %s" % panel.monitor_name)
+	_place_monitor_menu()
+	_list_modes_when_free()
+
+
+func _close_monitor_menu() -> void:
+	_monitor_menu.visible = false
+
+
+## The topology script runs one thing at a time: ask again a little later if busy.
+func _list_modes_when_free() -> void:
+	if not _monitor_menu.visible:
+		return
+	if _topology.busy:
+		get_tree().create_timer(1.0).timeout.connect(_list_modes_when_free)
+	else:
+		_topology.list_modes()
+
+
+## Keeps the open menu with its panel (panels move when the layout changes).
+func _place_monitor_menu() -> void:
+	if not _monitor_menu.visible:
+		return
+	for panel in _panels:
+		if panel.monitor_name == _monitor_menu.monitor_name:
+			var lift := -panel.placement.size.y * 0.5 + MonitorMenu.SIZE.y * 0.5 + 0.03
+			_monitor_menu.global_transform = panel.placement.transform * Transform3D(Basis.IDENTITY, Vector3(0.0, lift, MONITOR_MENU_FORWARD))
+			return
+	_monitor_menu.visible = false
+
+
+func _on_modes_listed(monitors: Array) -> void:
+	for entry: Dictionary in monitors:
+		if str(entry.get("name", "")) == _monitor_menu.monitor_name:
+			_monitor_menu.set_modes(entry)
+			print("[screens] %s: %dx%d, %d Гц, масштаб %d %%" % [entry["name"], int(entry["width"]), int(entry["height"]),
+					int(entry["refresh"]), int(entry["scale"])])
+
+
+func _on_monitor_menu_apply(monitor_name: String, mode: String, scale: int) -> void:
+	if _topology.busy:
+		_vdd_message = "экраны заняты, повторите через несколько секунд"
+		_monitor_menu.show_loading(monitor_name)
+		_list_modes_when_free()
+		return
+	_mode_change_monitor = monitor_name if mode != "" else ""
+	_vdd_message = "%s: %s%s…" % [monitor_name, (mode.replace("@", ", ") + " Гц") if mode != "" else "",
+			(", масштаб %d %%" % scale) if scale > 0 else ""]
 	print("[screens] ", _vdd_message)
-	_topology.restore_layout()
+	_topology.set_mode(monitor_name, mode, scale)
 
 
-func _on_new_instance_button() -> void:
-	if _screens_busy():
+## After a monitor changed its resolution: if the layout overlaps or falls
+## apart, that monitor is put back in its row (LayoutEdit.repair) and the fixed
+## layout is sent to Windows.
+func _repair_layout() -> void:
+	var rects := _current_rects()
+	var primary_index := _primary_index()
+	if rects.is_empty() or LayoutEdit.is_valid(rects, primary_index):
 		return
-	_vdd_message = "создаю экземпляр VDD, Link переподключится…"
-	print("[vdd] ", _vdd_message)
-	_vdd.add_screen()
+	var index := 0
+	for i in _panels.size():
+		if _panels[i].monitor_name == _mode_change_monitor:
+			index = i
+	var fixed := LayoutEdit.repair(rects, primary_index, index)
+	var positions := {}
+	for i in _panels.size():
+		positions[_panels[i].monitor_name] = fixed[i].position
+	print("[screens] раскладка после смены разрешения поправлена: ", positions)
+	_layout_pending = fixed
+	if _topology.busy:
+		_queued_positions = positions
+	else:
+		_topology.arrange(positions)
+
+
+## Settings panel, to the side of the gesture settings: how many driver instances
+## (each one virtual screen) and which resolutions the driver offers. Changes are
+## only collected; "Применить" writes the driver's file and restarts the driver
+## once (Quest Link reconnects, the app comes back by itself).
+func _build_driver_section(tab: Node3D) -> void:
+	var x := 0.0
+	_settings_label("Экземпляров", Vector3(x - 0.2, 0.51, 0.0), 26, tab)
+	var small := Vector2(0.07, 0.052)
+	_add_button_to(tab, "−", Vector3(x + 0.0, 0.51, 0.0), small, 0.25).activated.connect(_on_driver_count.bind(-1))
+	_driver_count_label = _settings_label("", Vector3(x + 0.13, 0.51, 0.0), 26, tab)
+	_add_button_to(tab, "+", Vector3(x + 0.26, 0.51, 0.0), small, 0.25).activated.connect(_on_driver_count.bind(1))
+	_settings_label("Разрешения драйвера", Vector3(x, 0.44, 0.0), 26, tab)
+	var options: Array[Vector2i] = VddConfig.PRESETS.duplicate()
+	for size in VddConfig.read():
+		if not options.has(size):
+			options.append(size)
+	options.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.x * a.y < b.x * b.y)
+	var per_column := ceili(options.size() / 2.0)
+	for i in options.size():
+		var at := Vector3(x - 0.15 + (i / per_column) * 0.3, 0.38 - (i % per_column) * 0.058, 0.0)
+		var chip := _add_button_to(tab, "", at, Vector2(0.28, 0.05), 0.25)
+		chip.activated.connect(_on_driver_chip.bind(options[i]))
+		_driver_chips[options[i]] = chip
+	var bottom := 0.38 - per_column * 0.058 - 0.03
+	_driver_status = _settings_label("", Vector3(x, bottom, 0.0), 22, tab)
+	_driver_apply = _add_button_to(tab, "Применить", Vector3(x, bottom - 0.08, 0.0), Vector2(0.3, 0.07), DRIVER_APPLY_HOLD_SEC)
+	_driver_apply.activated.connect(_on_driver_apply)
+
+
+## `reload` reads what the driver has now (when the settings panel opens).
+func _refresh_driver_section(reload := false) -> void:
+	if reload:
+		_driver_resolutions = VddConfig.read()
+		_driver_selected = _driver_resolutions.duplicate()
+		_driver_count = -1
+		_count_instances_when_free()
+	for size: Vector2i in _driver_chips:
+		var on := _driver_selected.has(size)
+		var mark := "[x]" if on else "[ ]"
+		var differs := on != _driver_resolutions.has(size)
+		(_driver_chips[size] as VrButton).set_text("%s %d×%d%s" % [mark, size.x, size.y, " *" if differs else ""])
+	if _driver_count < 0:
+		_driver_count_label.text = "…"
+	elif _driver_target != _driver_count:
+		_driver_count_label.text = "%d → %d" % [_driver_count, _driver_target]
+	else:
+		_driver_count_label.text = str(_driver_count)
+	var changed := _driver_count >= 0 and (_driver_target != _driver_count or _driver_selected != _driver_resolutions)
+	_driver_apply.enabled = changed and not _vdd.busy
+	if _vdd.busy:
+		_driver_status.text = "применяю: драйвер перезапускается, Link переподключится"
+	elif changed:
+		_driver_status.text = "* изменится после «Применить» (драйвер перезапустится,\nLink переподключится, приложение вернётся само)"
+	else:
+		_driver_status.text = ""
+
+
+func _count_instances_when_free() -> void:
+	if _topology.busy:
+		get_tree().create_timer(1.0).timeout.connect(_count_instances_when_free)
+	else:
+		_topology.count_instances()
+
+
+func _on_instances_counted(working: int, _total: int) -> void:
+	_driver_count = working
+	_driver_target = working
+	_refresh_driver_section()
+
+
+func _on_driver_count(step: int) -> void:
+	if _driver_count < 0:
+		return
+	_driver_target = clampi(_driver_target + step, 1, DRIVER_MAX_INSTANCES)
+	_refresh_driver_section()
+
+
+func _on_driver_chip(size: Vector2i) -> void:
+	if _driver_selected.has(size):
+		# The driver needs at least one resolution.
+		if _driver_selected.size() > 1:
+			_driver_selected.erase(size)
+	else:
+		_driver_selected.append(size)
+		_driver_selected.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.x * a.y < b.x * b.y)
+	_refresh_driver_section()
+
+
+func _on_driver_apply() -> void:
+	if _vdd.busy or _driver_count < 0:
+		return
+	if _driver_selected != _driver_resolutions:
+		var problem := VddConfig.write(_driver_selected)
+		if problem != "":
+			_driver_status.text = "ошибка: " + problem
+			print("[vdd] ", problem)
+			return
+	print("[vdd] применяю: экземпляров %d, разрешения %s" % [_driver_target, _driver_selected])
+	# The driver restart attaches every instance to the desktop (18.10.2026): the
+	# layout is remembered first and put back after the app has restarted.
+	_driver_saving_layout = true
+	_save_layout_for_apply()
+	_refresh_driver_section()
+
+
+func _save_layout_for_apply() -> void:
+	if _topology.busy:
+		get_tree().create_timer(0.5).timeout.connect(_save_layout_for_apply)
+	else:
+		_topology.save_layout("apply")
+
+
+## After the layout is remembered (or could not be): the driver restart itself.
+func _start_driver_apply(saved: bool) -> void:
+	_driver_saving_layout = false
+	_vdd_message = "драйвер перезапускается, Link переподключится…"
+	_vdd.apply(_driver_target)
+	_driver_restore_pending = saved and _vdd.busy
+	_driver_restore_request = _vdd.last_request_id()
+	_save_settings()
+	_refresh_driver_section()
+
+
+## After the restart "Apply" brings: the layout from before it, once, and only
+## after the helper has finished. On 18.10.2026 the app was back while the helper
+## still restarted the driver, and its last step attached every screen again.
+func _restore_layout_after_apply() -> void:
+	if not _restore_after_apply:
+		return
+	var waited := Time.get_ticks_msec() / 1000.0 - _restore_wait_started
+	if _driver_restore_request != "" and not _vdd.has_answered(_driver_restore_request) and waited < RESTORE_WAIT_MAX_SEC:
+		get_tree().create_timer(1.0).timeout.connect(_restore_layout_after_apply)
+		return
+	if not _slot_loading.is_empty():
+		_restore_after_apply = false
+		_driver_restore_pending = false
+		_save_settings()
+		return
+	if _topology.busy:
+		get_tree().create_timer(0.5).timeout.connect(_restore_layout_after_apply)
+		return
+	_restore_after_apply = false
+	_driver_restore_pending = false
+	_save_settings()
+	print("[screens] возвращаю раскладку и окна, бывшие до «Применить»")
+	_topology.restore_layout("apply")
 
 
 func _on_vdd_finished(ok: bool, message: String) -> void:
 	_vdd_message = ("готово: " if ok else "ошибка: ") + message
 	print("[vdd] ", _vdd_message)
+	if _driver_restore_pending:
+		# The answer came while this process still runs: put the layout back now.
+		# Also after a failure: the driver may have been restarted half way.
+		_driver_restore_pending = false
+		_save_settings()
+		_restore_after_apply = true
+		_restore_layout_after_apply()
+	_refresh_driver_section(true)
 
 
 ## Moves the joint spheres of one hand; returns how many joints have a valid position.
@@ -1831,7 +2135,7 @@ func _update_pointer(index: int, delta: float) -> void:
 				pointer.menu_open = false
 				if pointer.menu_selected >= 0:
 					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
-					MouseInput.press_keys(PackedInt32Array(item[1]))
+					_run_menu_item(item)
 					print("[gesture] %s: меню — %s" % [SIDE_LABELS[index], item[0]])
 				pointer.menu_selected = -1
 			pointer.button = HandGestures.Click.NONE
@@ -1887,7 +2191,7 @@ func _update_pointer(index: int, delta: float) -> void:
 				pointer.menu_open = false
 				if pointer.menu_selected >= 0:
 					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
-					MouseInput.press_keys(PackedInt32Array(item[1]))
+					_run_menu_item(item)
 					print("[gesture] %s: меню — %s (контроллер)" % [SIDE_LABELS[index], item[0]])
 				pointer.menu_selected = -1
 			pointer.button = HandGestures.Click.NONE
@@ -1913,8 +2217,6 @@ func _update_pointer(index: int, delta: float) -> void:
 
 
 func _update_buttons(delta: float) -> void:
-	for button in _screen_buttons:
-		button.enabled = not _screens_busy()
 	for button in _buttons:
 		# Buttons of a hidden panel cannot be pressed.
 		if not button.is_visible_in_tree():
@@ -2100,6 +2402,9 @@ func _build_rig() -> void:
 			label.font_size = 28
 			label.outline_size = 8
 			label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			# Over the background disc: transparent things are otherwise sorted by distance.
+			label.render_priority = 2
+			label.outline_render_priority = 1
 			label.visible = false
 			add_child(label)
 			_menu_labels[i].append(label)
@@ -2111,6 +2416,7 @@ func _build_rig() -> void:
 		background_mesh.radial_segments = 48
 		var background_material := _flat_material(MENU_BACKGROUND_COLOR)
 		background_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		background_material.render_priority = -1
 		var background := MeshInstance3D.new()
 		background.mesh = background_mesh
 		background.material_override = background_material
@@ -2138,54 +2444,18 @@ func _build_buttons() -> void:
 	add_child(_vdd)
 	_topology = DisplayTopology.new()
 	_topology.finished.connect(_on_topology_finished)
+	_topology.modes_listed.connect(_on_modes_listed)
+	_topology.instances_counted.connect(_on_instances_counted)
 	add_child(_topology)
+	_monitor_menu = MonitorMenu.new()
+	_monitor_menu.visible = false
+	_monitor_menu.apply_requested.connect(_on_monitor_menu_apply)
+	_monitor_menu.close_requested.connect(_close_monitor_menu)
+	add_child(_monitor_menu)
+	_buttons.append_array(_monitor_menu.buttons)
 
-	var remove_button := _add_button("− экран", Vector3(-0.47, 1.0, -1.2), SCREEN_BUTTON_HOLD_SEC)
-	remove_button.activated.connect(_on_screen_button.bind(false))
-	var add_button := _add_button("+ экран", Vector3(-0.15, 1.0, -1.2), SCREEN_BUTTON_HOLD_SEC)
-	add_button.activated.connect(_on_screen_button.bind(true))
-	var new_instance_button := _add_button("Новый VDD", Vector3(-0.31, 0.84, -1.2), NEW_INSTANCE_BUTTON_HOLD_SEC)
-	new_instance_button.activated.connect(_on_new_instance_button)
-	var restore_button := _add_button("Вернуть раскладку", Vector3(-0.31, 0.68, -1.2), LAYOUT_RESTORE_HOLD_SEC)
-	restore_button.activated.connect(_on_restore_layout_button)
-	_screen_buttons = [remove_button, add_button, new_instance_button, restore_button]
-	_layout_reset_button = _add_button("Как в Windows", Vector3(-0.31, 0.36, -1.2), 1.0)
-	_layout_reset_button.activated.connect(_on_panels_reset_button)
 
 	# Kept apart from the others so that it is not hit by accident.
-	var exit_button := _add_button("Выход", Vector3(0.45, 1.0, -1.2), EXIT_BUTTON_HOLD_SEC)
-	exit_button.activated.connect(_quit)
-
-	var recenter_button := _add_button("Центр", Vector3(0.45, 0.52, -1.2), 0.6)
-	recenter_button.activated.connect(_recenter)
-	_ray_source_button = _add_button("Луч: Meta", Vector3(0.13, 0.52, -1.2), 0.6)
-	_ray_source_button.activated.connect(_on_ray_source_button)
-
-	# Mix of our own ray: how much it follows the wrist rotation versus the hand position.
-	var less_rotation_button := _add_button("Кисть −", Vector3(0.13, 0.36, -1.2), 0.3)
-	less_rotation_button.activated.connect(_on_rotation_weight_button.bind(-ROTATION_WEIGHT_STEP))
-	var more_rotation_button := _add_button("Кисть +", Vector3(0.45, 0.36, -1.2), 0.3)
-	more_rotation_button.activated.connect(_on_rotation_weight_button.bind(ROTATION_WEIGHT_STEP))
-	var ray_reset_button := _add_button("Как у Meta", Vector3(0.77, 0.36, -1.2), 1.0)
-	ray_reset_button.activated.connect(_on_ray_reset_button)
-
-	_ray_info = Label3D.new()
-	_ray_info.position = Vector3(-0.31, 0.5, -1.2)
-	_ray_info.pixel_size = 0.001
-	_ray_info.font_size = 34
-	_ray_info.outline_size = 8
-	add_child(_ray_info)
-	_update_ray_info()
-
-	# Temporary tuning aid: the chosen value ends up in the log and becomes the default.
-	var ray_up_button := _add_button("Луч выше", Vector3(0.29, 0.84, -1.2), 0.3)
-	ray_up_button.activated.connect(_on_ray_pitch_button.bind(-RAY_PITCH_STEP_DEG))
-	var ray_down_button := _add_button("Луч ниже", Vector3(0.61, 0.84, -1.2), 0.3)
-	ray_down_button.activated.connect(_on_ray_pitch_button.bind(RAY_PITCH_STEP_DEG))
-	var ray_left_button := _add_button("Луч влево", Vector3(0.29, 0.68, -1.2), 0.3)
-	ray_left_button.activated.connect(_on_ray_yaw_button.bind(-RAY_YAW_STEP_DEG))
-	var ray_right_button := _add_button("Луч вправо", Vector3(0.61, 0.68, -1.2), 0.3)
-	ray_right_button.activated.connect(_on_ray_yaw_button.bind(RAY_YAW_STEP_DEG))
 
 
 func _add_button(text: String, at: Vector3, hold_time: float) -> VrButton:
@@ -2201,56 +2471,334 @@ func _add_button_to(parent: Node3D, text: String, at: Vector3, size: Vector2, ho
 
 
 ## Settings panel behind the user, where no screen panel reaches (the screens span
-## at most 300 degrees in front): every gesture and cursor tunable with − / +
-## buttons. Shown and hidden with the "Настройки" button; saved on each change.
+## at most 300 degrees in front), in tabs so that it stays small: each tunable
+## with − / + buttons, the hand ray, saved arrangements, the display driver.
+## Shown and hidden with the "Настройки" button; saved on each change.
 func _build_settings_panel() -> void:
 	_settings_root = Node3D.new()
 	_settings_root.position = Vector3(0.0, 1.25, 0.9)
 	# Turned to face the user when they turn round.
 	_settings_root.rotation = Vector3(0.0, PI, 0.0)
-	_settings_root.visible = false
+	# Always there behind the user (18.10.2026: nothing stays in front of the screens).
 	add_child(_settings_root)
 
-	_settings_label("Жесты и курсор", Vector3(0.0, 0.59, 0.0), 40)
+	for t in SETTINGS_TABS.size():
+		var tab := Node3D.new()
+		tab.visible = t == 0
+		_settings_root.add_child(tab)
+		_settings_tabs.append(tab)
+		var button := _add_button_to(_settings_root, SETTINGS_TABS[t], Vector3((t - (SETTINGS_TABS.size() - 1) * 0.5) * 0.23, 0.62, 0.0),
+				Vector2(0.21, 0.06), 0.2)
+		button.activated.connect(_show_settings_tab.bind(t))
+		_settings_tab_buttons.append(button)
+	_show_settings_tab(0)
+
 	var small := Vector2(0.07, 0.052)
-	# Two columns: the list no longer fits one.
-	var per_column := ceili(TUNABLES.size() / 2.0)
+	var rows: Array[int] = []
+	rows.resize(SETTINGS_TABS.size())
 	for i in TUNABLES.size():
-		var x := -0.25 + (i / per_column) * 0.95
-		var y := 0.5 - (i % per_column) * 0.062
-		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26)
+		var t: int = TUNABLE_TABS.get(TUNABLES[i][1], 0)
+		var tab := _settings_tabs[t]
+		var y := 0.52 - rows[t] * 0.062
+		rows[t] += 1
+		var x := 0.15
+		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26, tab)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		_add_button_to(_settings_root, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
-		_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26))
-		_add_button_to(_settings_root, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
-	var bottom := 0.5 - per_column * 0.062 - 0.03
-	_add_button_to(_settings_root, "По умолчанию", Vector3(-0.25, bottom, 0.0),
-			Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
+		_add_button_to(tab, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
+		_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26, tab))
+		_add_button_to(tab, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+
+	var gestures := _settings_tabs[0]
+	var bottom := 0.52 - rows[0] * 0.062 - 0.03
+	_add_button_to(gestures, "По умолчанию", Vector3(-0.55, bottom, 0.0), Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
 	# Self-tuning: record a few touches and derive the thresholds from them.
-	_add_button_to(_settings_root, "Настроить щипок", Vector3(0.25, bottom, 0.0),
-			Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
-	_add_button_to(_settings_root, "Настроить бок (СКМ)", Vector3(0.6, bottom, 0.0),
-			Vector2(0.34, 0.08), 0.6).activated.connect(_start_calibration.bind(2))
-	_add_button_to(_settings_root, "Настроить прокрутку", Vector3(0.95, bottom, 0.0),
-			Vector2(0.32, 0.08), 0.6).activated.connect(_start_calibration.bind(CALIBRATE_POSE))
-	_calibration_status = _settings_label("Настройка: нажмите кнопку и повторяйте жест 5–8 раз", Vector3(0.35, bottom - 0.09, 0.0), 26)
+	_add_button_to(gestures, "Настроить щипок", Vector3(-0.2, bottom, 0.0), Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
+	_add_button_to(gestures, "Настроить бок (СКМ)", Vector3(0.17, bottom, 0.0), Vector2(0.34, 0.08), 0.6).activated.connect(_start_calibration.bind(2))
+	_add_button_to(gestures, "Настроить прокрутку", Vector3(0.54, bottom, 0.0), Vector2(0.32, 0.08), 0.6).activated.connect(_start_calibration.bind(CALIBRATE_POSE))
+	_calibration_status = _settings_label("Настройка: нажмите кнопку и повторяйте жест 5–8 раз", Vector3(0.0, bottom - 0.09, 0.0), 26, gestures)
 
-	_add_button("Настройки", Vector3(0.77, 0.52, -1.2), 0.4).activated.connect(_on_settings_toggle)
+	_build_ray_section(_settings_tabs[SETTINGS_TABS.find("Луч")])
+	_build_layout_section(_settings_tabs[SETTINGS_TABS.find("Раскладки")])
+	_build_driver_section(_settings_tabs[SETTINGS_TABS.find("Драйвер")])
+
+	# Kept apart from the tabs so that it is not hit by accident.
+	_add_button_to(_settings_root, "Выход", Vector3(1.0, 0.62, 0.0), Vector2(0.2, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
 
 
-func _settings_label(text: String, at: Vector3, font_size: int) -> Label3D:
+func _settings_label(text: String, at: Vector3, font_size: int, parent: Node3D = null) -> Label3D:
 	var label := Label3D.new()
 	label.text = text
 	label.position = at + Vector3(0.0, 0.0, 0.002)
 	label.pixel_size = 0.001
 	label.font_size = font_size
 	label.outline_size = 8
-	_settings_root.add_child(label)
+	(parent if parent != null else _settings_root).add_child(label)
 	return label
 
 
-func _on_settings_toggle() -> void:
-	_settings_root.visible = not _settings_root.visible
+func _show_settings_tab(index: int) -> void:
+	for t in _settings_tabs.size():
+		_settings_tabs[t].visible = t == index
+		_settings_tab_buttons[t].set_text(("» %s «" if t == index else "%s") % SETTINGS_TABS[t])
+	if SETTINGS_TABS[index] == "Драйвер" and _driver_count_label != null:
+		_refresh_driver_section(true)
+
+
+## The hand ray: Meta's or our own, and our own ray's mix and trim (they used to
+## stand in front of the user; moved here on 18.10.2026).
+func _build_ray_section(tab: Node3D) -> void:
+	_ray_info = _settings_label("", Vector3(0.0, 0.47, 0.0), 30, tab)
+	var size := Vector2(0.3, 0.08)
+	_ray_source_button = _add_button_to(tab, "Луч: Meta", Vector3(-0.33, 0.3, 0.0), size, 0.6)
+	_ray_source_button.activated.connect(_on_ray_source_button)
+	# Mix of our own ray: how much it follows the wrist rotation versus the hand position.
+	_add_button_to(tab, "Кисть −", Vector3(0.0, 0.3, 0.0), size, 0.3).activated.connect(_on_rotation_weight_button.bind(-ROTATION_WEIGHT_STEP))
+	_add_button_to(tab, "Кисть +", Vector3(0.33, 0.3, 0.0), size, 0.3).activated.connect(_on_rotation_weight_button.bind(ROTATION_WEIGHT_STEP))
+	_add_button_to(tab, "Луч выше", Vector3(-0.33, 0.19, 0.0), size, 0.3).activated.connect(_on_ray_pitch_button.bind(-RAY_PITCH_STEP_DEG))
+	_add_button_to(tab, "Луч ниже", Vector3(0.0, 0.19, 0.0), size, 0.3).activated.connect(_on_ray_pitch_button.bind(RAY_PITCH_STEP_DEG))
+	_add_button_to(tab, "Как у Meta", Vector3(0.33, 0.19, 0.0), size, 1.0).activated.connect(_on_ray_reset_button)
+	_add_button_to(tab, "Луч влево", Vector3(-0.33, 0.08, 0.0), size, 0.3).activated.connect(_on_ray_yaw_button.bind(-RAY_YAW_STEP_DEG))
+	_add_button_to(tab, "Луч вправо", Vector3(0.0, 0.08, 0.0), size, 0.3).activated.connect(_on_ray_yaw_button.bind(RAY_YAW_STEP_DEG))
+	_update_ray_info()
+
+
+## Arrangements: back to the default of the current way of moving, and saved ones.
+func _build_layout_section(tab: Node3D) -> void:
+	_settings_label("Положение панелей", Vector3(0.0, 0.52, 0.0), 28, tab)
+	_add_button_to(tab, "Сбросить положение", Vector3(0.0, 0.43, 0.0), Vector2(0.42, 0.07), 1.0).activated.connect(_on_layout_reset)
+	for slot in LAYOUT_SLOTS:
+		var y := 0.31 - slot * 0.09
+		var label := _settings_label("", Vector3(-0.42, y, 0.0), 24, tab)
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		_slot_labels.append(label)
+		_add_button_to(tab, "Сохранить", Vector3(0.22, y, 0.0), Vector2(0.22, 0.07), 1.0).activated.connect(_on_slot_save.bind(slot + 1))
+		_add_button_to(tab, "Загрузить", Vector3(0.46, y, 0.0), Vector2(0.22, 0.07), 1.0).activated.connect(_on_slot_load.bind(slot + 1))
+	_layout_status = _settings_label("", Vector3(0.0, 0.31 - LAYOUT_SLOTS * 0.09, 0.0), 22, tab)
+	_refresh_layout_section()
+
+
+func _refresh_layout_section() -> void:
+	for slot in _slot_labels.size():
+		var data: Dictionary = _layout_slots.get(str(slot + 1), {})
+		if data.is_empty():
+			_slot_labels[slot].text = "%d: пусто" % (slot + 1)
+		else:
+			_slot_labels[slot].text = "%d: %d экр., %s, %s" % [slot + 1, int(data.get("count", 0)),
+					"VR" if int(data.get("mode", 0)) == 1 else "Windows", str(data.get("time", "")).substr(5, 11).replace("T", " ")]
+
+
+func _mode_key() -> String:
+	return "vr" if _panel_options.move_mode == 1 else "windows"
+
+
+func _on_layout_reset() -> void:
+	_apply_arrangement({})
+	_save_settings()
+	_place_panels([], true)
+	print("[panels] положение сброшено (%s)" % _mode_key())
+
+
+## A saved arrangement: the way of moving, both VR arrangements, how many screens
+## and where each was in the Windows layout (by device path: stays the same when
+## the driver restarts, unlike the \\.\DISPLAYnn names).
+func _on_slot_save(slot: int) -> void:
+	var positions := {}
+	for panel in _panels:
+		positions[panel.monitor_key] = panel.monitor_rect.position
+	_arrangements[_mode_key()] = _own_arrangement()
+	_layout_slots[str(slot)] = {"mode": _panel_options.move_mode, "count": _panels.size(), "positions": positions,
+			"arrangements": _arrangements.duplicate(true), "time": Time.get_datetime_string_from_system(false, true)}
+	_save_settings()
+	_refresh_layout_section()
+	_layout_status.text = "сохранено в ячейку %d" % slot
+	print("[layouts] сохранено в ячейку %d: %d экранов, %s" % [slot, _panels.size(), _mode_key()])
+
+
+## Loads a saved arrangement. If it had more or fewer screens, screens are added
+## or removed one by one first (and driver instances created if there are not
+## enough: then Quest Link reconnects and the load goes on after the restart).
+func _on_slot_load(slot: int) -> void:
+	var data: Dictionary = _layout_slots.get(str(slot), {})
+	if data.is_empty():
+		_layout_status.text = "ячейка %d пуста" % slot
+		return
+	# The arrangements are taken over once the number of screens matches.
+	_arrangements[_mode_key()] = _own_arrangement()
+	_panel_options.move_mode = int(data.get("mode", 0))
+	_apply_arrangement(_arrangements.get(_mode_key(), {}))
+	_slot_loading = data.duplicate(true)
+	_slot_load_steps = 0
+	_slot_waiting_count = -1
+	_save_settings()
+	_refresh_settings_panel()
+	_place_panels([], true)
+	print("[layouts] загружаю ячейку %d: %d экранов, %s" % [slot, int(data.get("count", 0)), _mode_key()])
+	_continue_slot_load()
+
+
+## One step of loading: a screen added or removed, or, once the number matches,
+## the saved Windows layout applied. Called again when the panels are rebuilt.
+##
+## Called both when the panels have been rebuilt and when the topology script is
+## done (it keeps watching windows for several seconds after a change): the next
+## step waits until the panels show the screen added or removed and the script is
+## free. Without that the load stopped half-way (18.10.2026: 3 wanted, 4 left).
+func _continue_slot_load() -> void:
+	if _slot_loading.is_empty() or _topology.busy or _vdd.busy:
+		return
+	if _slot_waiting_count >= 0 and _panels.size() != _slot_waiting_count:
+		return
+	_slot_waiting_count = -1
+	_slot_load_steps += 1
+	var want := int(_slot_loading.get("count", _panels.size()))
+	if _slot_load_steps > 20:
+		_layout_status.text = "не удалось подобрать число экранов (%d)" % want
+		_finish_slot_load()
+		return
+	# The saved monitors themselves where possible: detach those not in the save,
+	# attach those in it (the primary was a different one after a load, 18.10.2026).
+	var saved_keys: Array = _normalized_keys(_slot_loading.get("positions", {})).keys()
+	if _panels.size() < want:
+		var missing := ""
+		var present: Array = _panels.map(func(panel: ScreenPanel) -> String: return panel.monitor_key)
+		for key: String in saved_keys:
+			if not present.has(key):
+				missing = key
+				break
+		_layout_status.text = "добавляю экран (%d из %d)…" % [_panels.size() + 1, want]
+		_slot_waiting_count = _panels.size() + 1
+		_topology.add_screen(missing)
+		return
+	if _panels.size() > want:
+		var extra := ""
+		for panel in _panels:
+			if not panel.primary and not saved_keys.has(panel.monitor_key):
+				extra = panel.monitor_key
+				break
+		_layout_status.text = "убираю экран (%d → %d)…" % [_panels.size(), want]
+		_slot_waiting_count = _panels.size() - 1
+		_topology.remove_screen(extra)
+		return
+	# The number matches: saved monitors to the ones there are now, then the VR
+	# arrangements and the Windows layout under the current monitors' keys.
+	var saved_positions: Dictionary = _normalized_keys(_slot_loading.get("positions", {}))
+	var mapping := _slot_mapping(saved_positions.keys())
+	var arrangements: Dictionary = _slot_loading.get("arrangements", {})
+	for mode: String in ["windows", "vr"]:
+		_arrangements[mode] = _remapped_arrangement(arrangements.get(mode, {}), mapping)
+	_apply_arrangement(_arrangements[_mode_key()])
+	var positions := _slot_positions(saved_positions, mapping)
+	_finish_slot_load()
+	_save_settings()
+	_place_panels([], true)
+	if positions.is_empty():
+		_layout_status.text = "экраны на месте; сохранённая раскладка Windows к ним не подходит"
+		print("[layouts] сохранённая раскладка Windows к нынешним экранам не подходит")
+		return
+	_layout_status.text = "раскладка загружена"
+	print("[layouts] загружено: ", positions)
+	_layout_pending.clear()
+	_topology.arrange(positions)
+
+
+## Whether "Apply" left a layout to put back ([driver] restore_layout). The flag
+## stays in the settings until the restore is sent: the self-restart after Link
+## may take several processes that never get a session (attempt 7 on 18.10.2026).
+func _take_restore_after_apply() -> void:
+	var config := ConfigFile.new()
+	if config.load(SETTINGS_PATH) != OK or not bool(config.get_value("driver", "restore_layout", false)):
+		return
+	_restore_after_apply = true
+	_driver_restore_pending = true
+	_driver_restore_request = str(config.get_value("driver", "restore_request", ""))
+	_restore_wait_started = Time.get_ticks_msec() / 1000.0
+	print("[screens] верну раскладку, бывшую до «Применить», когда помощник закончит")
+	_restore_layout_after_apply()
+
+
+## After the restart that new driver instances bring: a load that was under way goes on, once.
+func _resume_slot_load() -> void:
+	if not _slot_loading.is_empty():
+		return
+	var config := ConfigFile.new()
+	if config.load(SETTINGS_PATH) != OK or not config.has_section_key("layouts", "pending"):
+		return
+	var pending: Variant = config.get_value("layouts", "pending")
+	config.erase_section_key("layouts", "pending")
+	config.save(SETTINGS_PATH)
+	if pending is Dictionary:
+		_slot_loading = pending
+		_slot_load_steps = 10
+		print("[layouts] продолжаю загрузку после перезапуска драйвера")
+
+
+func _finish_slot_load() -> void:
+	_slot_loading = {}
+	var config := ConfigFile.new()
+	if config.load(SETTINGS_PATH) == OK and config.has_section_key("layouts", "pending"):
+		config.erase_section_key("layouts", "pending")
+		config.save(SETTINGS_PATH)
+
+
+## Saved monitor keys -> the current monitors' keys: the same monitor where it is
+## still there, the rest in order of their keys.
+func _slot_mapping(saved_keys: Array) -> Dictionary:
+	var mapping := {}
+	var left: Array = saved_keys.duplicate()
+	left.sort()
+	var free_keys: Array[String] = []
+	for panel in _panels:
+		if left.has(panel.monitor_key):
+			mapping[panel.monitor_key] = panel.monitor_key
+			left.erase(panel.monitor_key)
+		else:
+			free_keys.append(panel.monitor_key)
+	free_keys.sort()
+	for i in mini(free_keys.size(), left.size()):
+		mapping[left[i]] = free_keys[i]
+	return mapping
+
+
+## Monitor keys made stable (see ScreenPanel.key_of): older saves used whole paths.
+func _normalized_keys(by_monitor: Dictionary) -> Dictionary:
+	var result := {}
+	for key: String in by_monitor:
+		result[ScreenPanel.key_of(key)] = by_monitor[key]
+	return result
+
+
+func _remapped_arrangement(arrangement: Dictionary, mapping: Dictionary) -> Dictionary:
+	var result := {"row_pitches": (arrangement.get("row_pitches", {}) as Dictionary).duplicate()}
+	for part: String in ["positions", "scales", "pitches", "curvatures"]:
+		var remapped := {}
+		var saved: Dictionary = _normalized_keys(arrangement.get(part, {}))
+		for key: String in saved:
+			if mapping.has(key):
+				remapped[mapping[key]] = saved[key]
+		result[part] = remapped
+	return result
+
+
+## Saved positions for the screens there are now (through `mapping`). Empty if
+## that is not a valid layout, e.g. the sizes are different now.
+func _slot_positions(saved: Dictionary, mapping: Dictionary) -> Dictionary:
+	var by_key := {}
+	for key: String in saved:
+		if mapping.has(key):
+			by_key[mapping[key]] = saved[key]
+	var rects: Array[Rect2i] = []
+	var primary := -1
+	for i in _panels.size():
+		var at: Vector2i = by_key.get(_panels[i].monitor_key, _panels[i].monitor_rect.position)
+		rects.append(Rect2i(at, _panels[i].monitor_rect.size))
+		if at == Vector2i.ZERO:
+			primary = i
+	if primary < 0 or not LayoutEdit.is_valid(rects, primary):
+		return {}
+	var positions := {}
+	for i in _panels.size():
+		positions[_panels[i].monitor_name] = rects[i].position
+	return positions
 
 
 func _tunable_target(section: String) -> Object:
@@ -2280,7 +2828,13 @@ func _on_tunable_button(index: int, direction: float) -> void:
 			value = minf(value, _gesture_settings.side_release - 0.005)
 		"side_release":
 			value = maxf(value, _gesture_settings.side_press + 0.005)
+	var switching: bool = tunable[1] == "move_mode" and int(value) != _panel_options.move_mode
+	if switching:
+		_arrangements[_mode_key()] = _own_arrangement()
 	target.set(tunable[1], value)
+	if switching:
+		_apply_arrangement(_arrangements.get(_mode_key(), {}))
+		_place_panels([], true)
 	_save_settings()
 	_refresh_settings_panel()
 	print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
@@ -2289,8 +2843,13 @@ func _on_tunable_button(index: int, direction: float) -> void:
 func _on_tunables_default() -> void:
 	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new(),
 			"pause": ExtraGestures.Pause.new(), "panels": PanelOptions.new()}
+	var mode_before := _mode_key()
+	_arrangements[mode_before] = _own_arrangement()
 	for tunable: Array in TUNABLES:
 		_tunable_target(tunable[0]).set(tunable[1], (defaults[tunable[0]] as Object).get(tunable[1]))
+	if _mode_key() != mode_before:
+		_apply_arrangement(_arrangements.get(_mode_key(), {}))
+		_place_panels([], true)
 	_save_settings()
 	_refresh_settings_panel()
 	print("[settings] жесты и курсор — значения по умолчанию")
@@ -2308,6 +2867,8 @@ func _refresh_settings_panel() -> void:
 			_settings_values[i].text = "диск" if value >= 0.5 else "направление"
 		elif tunable[1] == "grab_mode":
 			_settings_values[i].text = ["ручка", "ручка и кулак", "только кулак", "выключен"][clampi(roundi(value), 0, 3)]
+		elif tunable[1] == "monitor_menu":
+			_settings_values[i].text = "показано" if value >= 0.5 else "скрыто"
 		elif tunable[1] == "tilt_mode":
 			_settings_values[i].text = "монитор" if value >= 0.5 else "ряд"
 		elif tunable[1] == "move_mode":

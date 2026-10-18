@@ -102,23 +102,24 @@ static func arrange(monitors: Array[Rect2i], primary_index: int, eye: Vector3, d
 		new_curvatures.append(curvature)
 		half_azimuths.append(half_azimuth(sizes[i], new_elevations[i], pitch, curvature, distance))
 
-	# Sideways, row by row: neighbours keep the gap they had (none, if they touched).
+	# Sideways, row by row: neighbours keep the gap they had (none, if they touched),
+	# and the middle of the row stays where it was, so a row that grows (bigger,
+	# leaning or curved panels) grows evenly to both sides: two leaning panels over
+	# the seams of the row below kept their seam off-centre when one of them stayed
+	# put (18.10.2026).
 	var new_headings := headings.duplicate()
 	for row in row_list:
-		var anchor := 0
-		for k in row.size():
-			if absf(headings[row[k]]) < absf(headings[row[anchor]]):
-				anchor = k
-		for k in range(anchor + 1, row.size()):
+		for k in range(1, row.size()):
 			var a := row[k - 1]
 			var b := row[k]
 			var gap := (headings[b] - half_widths[b]) - (headings[a] + half_widths[a])
 			new_headings[b] = new_headings[a] + half_azimuths[a] + gap + half_azimuths[b]
-		for k in range(anchor - 1, -1, -1):
-			var a := row[k]
-			var b := row[k + 1]
-			var gap := (headings[b] - half_widths[b]) - (headings[a] + half_widths[a])
-			new_headings[a] = new_headings[b] - half_azimuths[b] - gap - half_azimuths[a]
+		var first := row[0]
+		var last := row[row.size() - 1]
+		var was: float = ((headings[first] - half_widths[first]) + (headings[last] + half_widths[last])) * 0.5
+		var now: float = ((new_headings[first] - half_azimuths[first]) + (new_headings[last] + half_azimuths[last])) * 0.5
+		for i in row:
+			new_headings[i] += was - now
 
 	for i in monitors.size():
 		placements.append(placement_at(new_headings[i], new_elevations[i], sizes[i], eye, distance, new_pitches[i], new_curvatures[i]))
@@ -198,7 +199,8 @@ static func snap_angles(heading: float, elevation: float, half: Vector2, others:
 		var other := others[k]
 		var width: float = own_widths[k] if k < own_widths.size() else half.x
 		var sideways := [other.x - other.z - width, other.x + other.z + width,  # touching
-				other.x - other.z + width, other.x + other.z - width, other.x]  # edges, middles in line
+				other.x - other.z + width, other.x + other.z - width, other.x,  # edges, middles in line
+				other.x - other.z, other.x + other.z]  # middle over its edge (above or below a seam)
 		var vertical := [other.y - other.w - half.y, other.y + other.w + half.y,
 				other.y - other.w + half.y, other.y + other.w - half.y, other.y]
 		for candidate: float in sideways:

@@ -21,9 +21,9 @@ func _initialize() -> void:
 
 	# Mouse injection round trip: "moving" the cursor to where it already is must
 	# leave it there, which checks the pixel-to-SendInput mapping without disturbing the user.
-	var before := DisplayServer.mouse_get_position()
+	var before := MouseInput.get_position()
 	MouseInput.move_to(before)
-	var after := DisplayServer.mouse_get_position()
+	var after := MouseInput.get_position()
 	if (after - before).abs().x > 1 or (after - before).abs().y > 1:
 		printerr("probe: ПРОВАЛ, курсор сместился: %s -> %s" % [before, after])
 		quit(1)

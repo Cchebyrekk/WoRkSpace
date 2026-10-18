@@ -11,6 +11,7 @@ namespace workplace {
 struct MonitorInfo {
 	void *handle = nullptr; // HMONITOR
 	std::string device_name; // \\.\DISPLAYnn, changes when the display driver restarts
+	std::string device_path; // \\?\DISPLAY#MTT1337#..., the monitor itself: stays the same
 	int32_t x = 0;
 	int32_t y = 0;
 	int32_t width = 0;
@@ -41,6 +42,8 @@ public:
 // Mouse input injected into Windows with SendInput. Coordinates are pixels of the
 // virtual desktop (the same space as MonitorInfo::x / y).
 void mouse_move(int32_t x, int32_t y);
+// Where the cursor is, in real pixels of the virtual desktop.
+void mouse_position(int32_t &x, int32_t &y);
 void mouse_button(int32_t button, bool down); // 0 left, 1 right, 2 middle
 void mouse_wheel(int32_t delta); // 120 is one notch, positive scrolls up
 void mouse_hwheel(int32_t delta); // 120 is one notch, positive scrolls right

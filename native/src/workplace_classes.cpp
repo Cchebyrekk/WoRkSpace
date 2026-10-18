@@ -34,6 +34,7 @@ TypedArray<Dictionary> ScreenCapture::list_monitors() {
 		entry["position"] = Vector2i(monitor.x, monitor.y);
 		entry["size"] = Vector2i(monitor.width, monitor.height);
 		entry["primary"] = monitor.primary;
+		entry["path"] = String::utf8(monitor.device_path.c_str());
 		result.push_back(entry);
 	}
 	return result;
@@ -168,6 +169,7 @@ String ScreenCapture::get_last_error() const {
 
 void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("move_to", "position"), &MouseInput::move_to);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_position"), &MouseInput::get_position);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("set_button", "button", "pressed"), &MouseInput::set_button);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll", "delta"), &MouseInput::scroll);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll_horizontal", "delta"), &MouseInput::scroll_horizontal);
@@ -177,6 +179,13 @@ void MouseInput::_bind_methods() {
 	BIND_ENUM_CONSTANT(BUTTON_LEFT);
 	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
 	BIND_ENUM_CONSTANT(BUTTON_MIDDLE);
+}
+
+Vector2i MouseInput::get_position() {
+	int32_t x = 0;
+	int32_t y = 0;
+	workplace::mouse_position(x, y);
+	return Vector2i(x, y);
 }
 
 void MouseInput::move_to(const Vector2i &p_position) {

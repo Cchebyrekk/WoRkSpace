@@ -6,6 +6,8 @@ extends Node
 signal finished(ok: bool, message: String)
 
 const TASK_NAME := "WoRkPlaceVddHelper"
+## The helper version this app needs (tools/vdd_helper.ps1, $HelperVersion).
+const HELPER_VERSION := 5
 const TIMEOUT_SEC := 120.0
 const POLL_INTERVAL_SEC := 0.25
 
@@ -28,6 +30,27 @@ func remove_screen() -> void:
 	_request("remove")
 
 
+## Brings the number of working driver instances to `count` and restarts the
+## driver so that it reads its settings file again (new resolutions). Quest Link
+## reconnects; the app restarts itself.
+func apply(count: int) -> void:
+	_request("apply %d" % count)
+
+
+## The id of the last request sent (to find its answer after a self-restart).
+func last_request_id() -> String:
+	return _request_id
+
+
+## Whether the helper has answered request `id` (the answer stays in response.txt
+## until the next request).
+func has_answered(id: String) -> bool:
+	if not FileAccess.file_exists(_response_path()):
+		return false
+	var parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(_response_path()))
+	return parsed is Dictionary and str((parsed as Dictionary).get("id", "")) == id
+
+
 func _process(delta: float) -> void:
 	if not busy:
 		return
@@ -40,7 +63,13 @@ func _process(delta: float) -> void:
 	var response := _read_response()
 	if not response.is_empty():
 		busy = false
-		finished.emit(bool(response.get("ok", false)), str(response.get("message", "")))
+		var message := str(response.get("message", ""))
+		# The installed copy is older than this app: it lacks commands or fixes.
+		if int(response.get("version", 0)) < HELPER_VERSION:
+			message = "помощник устарел (%s): заново запустите tools/install_vdd_helper.ps1 от администратора (вне VR)" % message
+		elif message in ["malformed request", "unknown command"]:
+			message = "помощник старой версии: заново запустите tools/install_vdd_helper.ps1 от администратора (вне VR)"
+		finished.emit(bool(response.get("ok", false)), message)
 	elif _elapsed > TIMEOUT_SEC:
 		busy = false
 		finished.emit(false, "помощник не ответил за %d с" % int(TIMEOUT_SEC))

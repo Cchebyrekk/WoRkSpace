@@ -54,6 +54,36 @@ func _initialize() -> void:
 	_check(int(grip.x) == ScreenPanel.Grip.NONE, "запрещённая ручка не ловится")
 	panel.show_grips(true, [ScreenPanel.Grip.MOVE], ScreenPanel.Grip.MOVE, ScreenPanel.Grip.NONE)
 	panel.close()
+
+	# The monitor menu: stepping through modes and scales, and what "Применить" sends.
+	var menu := MonitorMenu.new()
+	root.add_child(menu)
+	var sent := []
+	menu.apply_requested.connect(func(monitor_name: String, mode: String, scale: int) -> void: sent.append([monitor_name, mode, scale]))
+	menu.show_loading("\\\\.\\DISPLAY9")
+	menu.set_modes({"name": "\\\\.\\DISPLAY9", "width": 1920, "height": 1080, "refresh": 120, "scale": 100,
+			"modes": ["1920x1080@120", "1920x1080@60", "2560x1440@120", "2560x1440@60"], "scales": [100, 125, 150]})
+	menu._step(0, 1)  # 2560x1440, keeps 120 Hz
+	menu._step(1, -1)  # 60 Hz
+	menu._step(2, 1)  # 125 %
+	menu._on_apply()
+	_check(sent == [["\\\\.\\DISPLAY9", "2560x1440@60", 125]], "меню экрана: отправлено %s" % [sent])
+	menu.set_modes({"name": "\\\\.\\DISPLAY9", "width": 1920, "height": 1080, "refresh": 120, "scale": 100,
+			"modes": ["1920x1080@120"], "scales": [100]})
+	sent.clear()
+	menu._on_apply()
+	_check(sent == [["\\\\.\\DISPLAY9", "", 0]], "меню экрана: без изменений ничего не меняется")
+	_check(menu.hit_distance(Vector3(0, 0, 1), Vector3.FORWARD) > 0.0, "меню экрана: луч по меню ловится")
+	menu.visible = false
+	_check(menu.hit_distance(Vector3(0, 0, 1), Vector3.FORWARD) < 0.0, "меню экрана: скрытое не ловит луч")
+
+	for monitor: Dictionary in ScreenCapture.list_monitors():
+		print("panel_probe: %s -> %s" % [monitor["name"], monitor.get("path", "")])
+		_check(str(monitor.get("path", "")).begins_with("\\\\?\\DISPLAY#"), "у монитора есть путь устройства")
+
+	var driver := VddConfig.read()
+	print("panel_probe: разрешения драйвера сейчас ", driver)
+	_check(driver.size() >= 1, "настройки драйвера читаются")
 	print("panel_probe: %s" % ("всё в порядке" if _failures == 0 else "%d провалов" % _failures))
 	quit(1 if _failures > 0 else 0)
 

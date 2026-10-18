@@ -11,12 +11,17 @@ extends Node
 ## The grips around a panel, all in the gap under it (the screen's own edges stay
 ## free for scroll bars): move in the middle, tilt to the left, curve to the
 ## right, resize at the bottom-right corner, and at the far left a button that
-## makes this monitor the primary one in Windows.
-enum Grip { NONE, MOVE, RESIZE, TILT, CURVE, PRIMARY }
+## makes this monitor the primary one in Windows; at the far right one that opens
+## the monitor's menu (resolution, refresh rate, scale), if enabled in settings.
+enum Grip { NONE, MOVE, RESIZE, TILT, CURVE, PRIMARY, MENU }
 
-const GRIP_NAMES := {Grip.MOVE: "перенос", Grip.RESIZE: "размер", Grip.TILT: "наклон", Grip.CURVE: "изгиб", Grip.PRIMARY: "сделать основным"}
+const GRIP_NAMES := {Grip.MOVE: "перенос", Grip.RESIZE: "размер", Grip.TILT: "наклон", Grip.CURVE: "изгиб", Grip.PRIMARY: "сделать основным", Grip.MENU: "настройки экрана"}
 
 var monitor_name := ""
+## What VR sizes, places, tilts and saved arrangements are kept under: the
+## monitor's device path, which stays the same when the driver restarts (the
+## \\.\DISPLAYnn names change); the name if the path is not known.
+var monitor_key := ""
 ## The monitor's rectangle on the Windows virtual desktop, in pixels.
 var monitor_rect := Rect2i()
 var primary := false
@@ -34,10 +39,12 @@ const ACTIVE_HOLD_SEC := 1.0
 ## Below the bottom edge, to the middle of the grips.
 const GRIP_DROP := 0.036
 const GRIP_SIZES := {Grip.MOVE: Vector2(0.18, 0.022), Grip.TILT: Vector2(0.07, 0.022),
-		Grip.CURVE: Vector2(0.07, 0.022), Grip.RESIZE: Vector2(0.045, 0.045), Grip.PRIMARY: Vector2(0.03, 0.03)}
+		Grip.CURVE: Vector2(0.07, 0.022), Grip.RESIZE: Vector2(0.045, 0.045), Grip.PRIMARY: Vector2(0.03, 0.03),
+		Grip.MENU: Vector2(0.03, 0.03)}
 ## Hit areas are larger than the drawn shapes: a hand ray is not that steady.
 const GRIP_HITS := {Grip.MOVE: Vector2(0.22, 0.06), Grip.TILT: Vector2(0.09, 0.06),
-		Grip.CURVE: Vector2(0.09, 0.06), Grip.RESIZE: Vector2(0.08, 0.08), Grip.PRIMARY: Vector2(0.06, 0.06)}
+		Grip.CURVE: Vector2(0.09, 0.06), Grip.RESIZE: Vector2(0.08, 0.08), Grip.PRIMARY: Vector2(0.06, 0.06),
+		Grip.MENU: Vector2(0.06, 0.06)}
 const SIDE_GRIP_OFFSET := 0.175
 const PRIMARY_GRIP_OFFSET := 0.29
 const GRIP_COLOR := Color(0.85, 0.88, 0.95, 0.55)
@@ -65,6 +72,8 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	var panel := ScreenPanel.new()
 	panel.capture = new_capture
 	panel.monitor_name = monitor["name"]
+	var path := str(monitor.get("path", ""))
+	panel.monitor_key = key_of(path) if path != "" else panel.monitor_name
 	panel.monitor_rect = Rect2i(monitor["position"], new_capture.get_size())
 	panel.primary = monitor["primary"]
 	panel._origin = origin
@@ -111,6 +120,20 @@ func _make_layer(curved: bool) -> void:
 		layer.sort_order = -1
 		layer.enable_hole_punch = true
 	_origin.add_child(layer)
+
+
+## The part of a monitor's device path that stays the same: from
+## "\\?\DISPLAY#MTT1337#1&2240405a&2&UID256#{...}" it is "MTT1337#1&2240405a&UID256".
+## The third part ("&2") changed when the driver was reinstalled (18.10.2026), so
+## saved places were not found. Anything else is returned as it is.
+static func key_of(path: String) -> String:
+	var parts := path.split("#")
+	if parts.size() < 3 or not parts[0].ends_with("DISPLAY"):
+		return path
+	var instance := parts[2].split("&")
+	if instance.size() == 4:
+		instance.remove_at(2)
+	return parts[1] + "#" + "&".join(instance)
 
 
 static func _flat_quad(size: Vector2) -> MeshInstance3D:
@@ -161,6 +184,8 @@ func _grip_transform(grip: int) -> Transform3D:
 			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(SIDE_GRIP_OFFSET, below, 0.0))
 		Grip.PRIMARY:
 			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(-PRIMARY_GRIP_OFFSET, below, 0.0))
+		Grip.MENU:
+			return placement.transform * Transform3D(Basis.IDENTITY, Vector3(PRIMARY_GRIP_OFFSET, below, 0.0))
 		Grip.RESIZE:
 			var edge := _edge(1.0)
 			return placement.transform * Transform3D(Basis.IDENTITY,

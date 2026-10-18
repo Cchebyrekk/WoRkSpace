@@ -11,6 +11,10 @@
 #   -Action save     remember the current layout and which monitors are attached
 #   -Action restore  bring back the remembered layout (re-attach / detach VDD
 #                    monitors, then positions); never leaves fewer than one screen
+#   -Action instances  how many MttVDD device instances work (and how many exist)
+#   -Action modes    each monitor's mode, the modes it offers and its Windows scale
+#   -Action setmode -Monitor \\.\DISPLAY3 -Mode 2560x1440@60 -Scale 150
+#                    change one monitor's mode and/or scale (either may be left out)
 #
 # Prints one JSON line: {"ok":true,"code":"detached","detail":"..","attached":5}
 # Monitors are identified by their device path (\\?\DISPLAY#MTT1337#...), which
@@ -20,8 +24,14 @@
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less script as ANSI.
 # The embedded C# has to stay C# 5 (no string interpolation, no "out var").
 param(
-    [ValidateSet('list', 'add', 'remove', 'arrange', 'save', 'restore')][string]$Action = 'list',
+    [ValidateSet('list', 'add', 'remove', 'arrange', 'save', 'restore', 'modes', 'setmode', 'instances')][string]$Action = 'list',
     [string]$Positions = '',
+    [string]$Monitor = '',
+    [string]$Mode = '',
+    [int]$Scale = 0,
+    # save/restore: 'start' = the layout before the session (emergency exit),
+    # 'apply' = the layout before the driver restart of "Apply".
+    [ValidateSet('start', 'apply')][string]$Backup = 'start',
     [switch]$DryRun
 )
 
@@ -158,6 +168,22 @@ public static class WindowKeeper {
         }
         if (foreground != IntPtr.Zero && Responds(foreground)) SetForegroundWindow(foreground);
         return moved;
+    }
+
+    // A window read back from a file (the snapshot taken before "Apply").
+    public static SavedWindow Make(long handle, string device, int monitorX, int monitorY, int showCmd,
+            int minX, int minY, int maxX, int maxY, int left, int top, int right, int bottom) {
+        SavedWindow saved = new SavedWindow();
+        saved.Handle = new IntPtr(handle);
+        saved.Device = device;
+        saved.MonitorX = monitorX; saved.MonitorY = monitorY;
+        saved.Placement.length = Marshal.SizeOf(typeof(Placement));
+        saved.Placement.showCmd = showCmd;
+        saved.Placement.minPosition.X = minX; saved.Placement.minPosition.Y = minY;
+        saved.Placement.maxPosition.X = maxX; saved.Placement.maxPosition.Y = maxY;
+        saved.Placement.normalPosition.Left = left; saved.Placement.normalPosition.Top = top;
+        saved.Placement.normalPosition.Right = right; saved.Placement.normalPosition.Bottom = bottom;
+        return saved;
     }
 
     static void Shift(ref RECT rect, int dx, int dy) {
@@ -354,6 +380,15 @@ public static class Ccd {
         return GetSourceName(ref request) == 0 ? request.viewGdiDeviceName : "";
     }
 
+    // Active monitors: GDI name (\\.\DISPLAYnn) -> device path.
+    public static Dictionary<string, string> GdiToPath() {
+        PATH_INFO[] paths; MODE_INFO[] modes;
+        Query(QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (PATH_INFO path in paths) result[GdiName(path.sourceInfo)] = TargetPath(path.targetInfo);
+        return result;
+    }
+
     // Moves the given monitors in one SetDisplayConfig call. `byGdiName`: the keys are
     // \\.\DISPLAYnn names, otherwise device paths. -1 if one of them is not active.
     public static int SetPositions(string[] names, int[] xs, int[] ys, bool byGdiName) {
@@ -375,6 +410,25 @@ public static class Ccd {
         return SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, SDC_FLAGS);
     }
 
+    // One monitor's resolution and refresh rate (by GDI name); the target mode is
+    // left for Windows to pick from the refresh rate given on the path.
+    public static int SetMode(string gdiName, int width, int height, int refresh) {
+        PATH_INFO[] paths; MODE_INFO[] modes;
+        Query(QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
+        for (int i = 0; i < paths.Length; i++) {
+            if (!Same(GdiName(paths[i].sourceInfo), gdiName)) continue;
+            uint index = paths[i].sourceInfo.modeInfoIdx;
+            if (index >= modes.Length || modes[index].infoType != MODE_SOURCE) return -1;
+            modes[index].srcWidth = (uint)width;
+            modes[index].srcHeight = (uint)height;
+            paths[i].targetInfo.modeInfoIdx = INVALID;
+            paths[i].targetInfo.refreshNumerator = (uint)refresh;
+            paths[i].targetInfo.refreshDenominator = 1;
+            return SetDisplayConfig((uint)paths.Length, paths, (uint)modes.Length, modes, SDC_FLAGS);
+        }
+        return -1;
+    }
+
     public static int SetPosition(string devicePath, int x, int y) {
         PATH_INFO[] paths; MODE_INFO[] modes;
         Query(QDC_ONLY_ACTIVE_PATHS, out paths, out modes);
@@ -389,12 +443,142 @@ public static class Ccd {
         return -1;
     }
 }
+// Display modes (resolution, refresh rate) per monitor and the Windows scale
+// ("Settings > Display > Scale"). The scale is set the way that page does it:
+// DisplayConfigSetDeviceInfo with the undocumented DPI types (-3 get, -4 set),
+// as steps relative to the recommended scale.
+public class MonitorModes {
+    public string Name;
+    public int Width, Height, Refresh, Scale;
+    public List<string> Modes = new List<string>();
+    public List<int> Scales = new List<int>();
+}
+
+public static class DisplayModes {
+    public static readonly int[] ScaleSteps = { 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500 };
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields;
+        public int dmPositionX, dmPositionY; public int dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct LUID { public uint LowPart; public int HighPart; }
+    [StructLayout(LayoutKind.Sequential)] struct PATH_SOURCE { public LUID adapterId; public uint id; public uint modeInfoIdx; public uint statusFlags; }
+    [StructLayout(LayoutKind.Sequential)] struct PATH_TARGET { public LUID adapterId; public uint id; public uint modeInfoIdx; public uint outputTechnology; public uint rotation; public uint scaling; public uint refreshNumerator; public uint refreshDenominator; public uint scanLineOrdering; public int targetAvailable; public uint statusFlags; }
+    [StructLayout(LayoutKind.Sequential)] struct PATH_INFO { public PATH_SOURCE sourceInfo; public PATH_TARGET targetInfo; public uint flags; }
+    [StructLayout(LayoutKind.Explicit, Size = 64)] struct MODE_INFO { [FieldOffset(0)] public uint infoType; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct SOURCE_NAME { public int type; public uint size; public LUID adapterId; public uint id; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string name; }
+    [StructLayout(LayoutKind.Sequential)] struct GET_DPI { public int type; public uint size; public LUID adapterId; public uint id; public int minScaleRel; public int curScaleRel; public int maxScaleRel; }
+    [StructLayout(LayoutKind.Sequential)] struct SET_DPI { public int type; public uint size; public LUID adapterId; public uint id; public int scaleRel; }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string name, int mode, ref DEVMODE dm);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int ChangeDisplaySettingsEx(string name, ref DEVMODE dm, IntPtr hwnd, uint flags, IntPtr param);
+    [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint p, out uint m);
+    [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint p, [In, Out] PATH_INFO[] paths, ref uint m, [In, Out] MODE_INFO[] modes, IntPtr t);
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetName(ref SOURCE_NAME r);
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetDpi(ref GET_DPI r);
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigSetDeviceInfo")] static extern int SetDpi(ref SET_DPI r);
+
+    static DEVMODE NewMode() { DEVMODE dm = new DEVMODE(); dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE)); return dm; }
+
+    // Active sources by GDI name.
+    static Dictionary<string, PATH_SOURCE> Sources() {
+        uint p, m;
+        GetDisplayConfigBufferSizes(2, out p, out m);
+        PATH_INFO[] paths = new PATH_INFO[p];
+        MODE_INFO[] modes = new MODE_INFO[m];
+        QueryDisplayConfig(2, ref p, paths, ref m, modes, IntPtr.Zero);
+        var result = new Dictionary<string, PATH_SOURCE>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < p; i++) {
+            SOURCE_NAME n = new SOURCE_NAME();
+            n.type = 1; n.size = (uint)Marshal.SizeOf(typeof(SOURCE_NAME));
+            n.adapterId = paths[i].sourceInfo.adapterId; n.id = paths[i].sourceInfo.id;
+            if (GetName(ref n) == 0) result[n.name] = paths[i].sourceInfo;
+        }
+        return result;
+    }
+
+    static bool ReadDpi(PATH_SOURCE source, out GET_DPI dpi) {
+        dpi = new GET_DPI();
+        dpi.type = -3; dpi.size = (uint)Marshal.SizeOf(typeof(GET_DPI));
+        dpi.adapterId = source.adapterId; dpi.id = source.id;
+        return GetDpi(ref dpi) == 0;
+    }
+
+    public static List<MonitorModes> List() {
+        var result = new List<MonitorModes>();
+        foreach (var pair in Sources()) {
+            MonitorModes item = new MonitorModes();
+            item.Name = pair.Key;
+            DEVMODE now = NewMode();
+            EnumDisplaySettings(pair.Key, -1, ref now);
+            item.Width = now.dmPelsWidth; item.Height = now.dmPelsHeight; item.Refresh = now.dmDisplayFrequency;
+            var seen = new HashSet<string>();
+            for (int i = 0; ; i++) {
+                DEVMODE dm = NewMode();
+                if (!EnumDisplaySettings(pair.Key, i, ref dm)) break;
+                string mode = dm.dmPelsWidth + "x" + dm.dmPelsHeight + "@" + dm.dmDisplayFrequency;
+                if (seen.Add(mode)) item.Modes.Add(mode);
+            }
+            GET_DPI dpi;
+            if (ReadDpi(pair.Value, out dpi)) {
+                int recommended = -dpi.minScaleRel;
+                for (int k = dpi.minScaleRel; k <= dpi.maxScaleRel; k++) {
+                    int index = recommended + k;
+                    if (index >= 0 && index < ScaleSteps.Length) item.Scales.Add(ScaleSteps[index]);
+                }
+                int current = recommended + dpi.curScaleRel;
+                item.Scale = current >= 0 && current < ScaleSteps.Length ? ScaleSteps[current] : 0;
+            }
+            result.Add(item);
+        }
+        return result;
+    }
+
+    // 0 on success, a SetDisplayConfig error, or -100 if the mode is not offered.
+    // Through the CCD API like the moves: ChangeDisplaySettingsEx re-applied old
+    // saved settings to the other monitors (18.10.2026: one went back from
+    // 2560x1440 to 1920x1080, another lost its scale).
+    public static int SetMode(string name, int width, int height, int refresh) {
+        for (int i = 0; ; i++) {
+            DEVMODE dm = NewMode();
+            if (!EnumDisplaySettings(name, i, ref dm)) break;
+            if (dm.dmPelsWidth == width && dm.dmPelsHeight == height && dm.dmDisplayFrequency == refresh) {
+                return Ccd.SetMode(name, width, height, refresh);
+            }
+        }
+        return -100;
+    }
+
+    // 0 on success, -100 if this scale is not allowed for the monitor, -101 if not found.
+    public static int SetScale(string name, int percent) {
+        PATH_SOURCE source;
+        if (!Sources().TryGetValue(name, out source)) return -101;
+        GET_DPI dpi;
+        if (!ReadDpi(source, out dpi)) return -101;
+        int target = Array.IndexOf(ScaleSteps, percent);
+        int relative = target - (-dpi.minScaleRel);
+        if (target < 0 || relative < dpi.minScaleRel || relative > dpi.maxScaleRel) return -100;
+        SET_DPI set = new SET_DPI();
+        set.type = -4; set.size = (uint)Marshal.SizeOf(typeof(SET_DPI));
+        set.adapterId = source.adapterId; set.id = source.id; set.scaleRel = relative;
+        return SetDpi(ref set);
+    }
+}
+
 '@
 
 $StateDir = Join-Path $env:LOCALAPPDATA 'WoRkPlace'
 $StatePath = Join-Path $StateDir 'detached.json'
 $LogPath = Join-Path $StateDir 'topology.log'
-$BackupPath = Join-Path $StateDir 'layout_backup.json'
+$BackupPath = Join-Path $StateDir $(if ($Backup -eq 'apply') { 'layout_apply.json' } else { 'layout_backup.json' })
+# With -Backup apply: the windows too, by monitor key (\\.\DISPLAYnn names change with the driver restart).
+$WindowsPath = Join-Path $StateDir 'windows_apply.json'
 New-Item -ItemType Directory -Force $StateDir | Out-Null
 
 # Compiling the C# takes about a second on every run: keep the compiled assembly,
@@ -470,6 +654,17 @@ function Wait-Active([string]$path, [bool]$expected) {
     return $false
 }
 
+# The part of a device path that stays the same when the driver is reinstalled
+# (as ScreenPanel.key_of in the app): MTT1337#1&2240405a&UID256.
+function Get-Key([string]$path) {
+    $parts = $path -split '#'
+    if ($parts.Count -lt 3 -or -not $parts[0].EndsWith('DISPLAY')) { return $path }
+    $instance = @($parts[2] -split '&')
+    if ($instance.Count -eq 4) { $instance = @($instance[0], $instance[1], $instance[3]) }
+    return $parts[1] + '#' + ($instance -join '&')
+}
+
+# -Monitor <key>: detach that monitor (if it may be detached), else the default choice.
 function Remove-Screen {
     $screens = Get-Screens
     Write-ScreensToLog $screens
@@ -480,6 +675,10 @@ function Remove-Screen {
 
     # The one furthest from the primary, so the rest of the layout stays intact.
     $target = $candidates | Sort-Object { [math]::Abs($_.X) + [math]::Abs($_.Y) }, Path | Select-Object -Last 1
+    if ($Monitor -ne '') {
+        $asked = @($candidates | Where-Object { (Get-Key $_.Path) -eq $Monitor })
+        if ($asked.Count -gt 0) { $target = $asked[0] }
+    }
     if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "would detach $($target.Short) at $($target.X),$($target.Y)" } }
 
     $code = [Ccd]::Detach($target.Path)
@@ -507,6 +706,10 @@ function Add-Screen {
     }
     foreach ($screen in $free) {
         if ($plan.Path -notcontains $screen.Path) { $plan += [pscustomobject]@{ Path = $screen.Path; HasPosition = $false; X = 0; Y = 0 } }
+    }
+    # -Monitor <key>: that monitor first.
+    if ($Monitor -ne '') {
+        $plan = @($plan | Where-Object { (Get-Key $_.Path) -eq $Monitor }) + @($plan | Where-Object { (Get-Key $_.Path) -ne $Monitor })
     }
     if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "would attach $(Get-ShortName $plan[0].Path)" } }
 
@@ -542,26 +745,92 @@ function Set-Arrangement {
     return @{ ok = $true; code = 'arranged'; detail = '' }
 }
 
+function Get-Modes {
+    $monitors = @([DisplayModes]::List() | ForEach-Object {
+        [ordered]@{ name = $_.Name; width = $_.Width; height = $_.Height; refresh = $_.Refresh; scale = $_.Scale
+            modes = @($_.Modes); scales = @($_.Scales) }
+    })
+    return @{ ok = $true; code = 'modes'; detail = ''; monitors = $monitors }
+}
+
+function Get-Instances {
+    $all = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\MttVDD' })
+    $working = @($all | Where-Object { $_.Status -eq 'OK' })
+    return @{ ok = $true; code = 'instances'; detail = ''; working = $working.Count; total = $all.Count }
+}
+
+function Set-Mode {
+    if ($Monitor -eq '') { return @{ ok = $false; code = 'failed'; detail = 'no -Monitor' } }
+    $done = @()
+    # Windows puts a monitor back to its recommended scale when its mode changes:
+    # keep the one it had unless a new one is asked for.
+    $keepScale = 0
+    if ($Mode -ne '' -and $Scale -le 0) {
+        $before = [DisplayModes]::List() | Where-Object { $_.Name -eq $Monitor }
+        if ($null -ne $before) { $keepScale = $before.Scale }
+    }
+    if ($Mode -ne '') {
+        if ($Mode -notmatch '^(\d+)x(\d+)@(\d+)$') { return @{ ok = $false; code = 'failed'; detail = "bad mode '$Mode'" } }
+        if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "$Monitor -> $Mode" } }
+        $code = [DisplayModes]::SetMode($Monitor, [int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+        Write-Log "SetMode $Monitor $Mode -> $code"
+        if ($code -ne 0) { return @{ ok = $false; code = 'failed'; detail = "mode $Mode on ${Monitor}: $code" } }
+        $done += $Mode
+    }
+    if ($keepScale -gt 0) {
+        $code = [DisplayModes]::SetScale($Monitor, $keepScale)
+        Write-Log "SetScale $Monitor $keepScale (kept) -> $code"
+    }
+    if ($Scale -gt 0) {
+        if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "$Monitor -> $Scale %" } }
+        $code = [DisplayModes]::SetScale($Monitor, $Scale)
+        Write-Log "SetScale $Monitor $Scale -> $code"
+        if ($code -ne 0) { return @{ ok = $false; code = 'failed'; detail = "scale $Scale on ${Monitor}: $code" } }
+        $done += "$Scale %"
+    }
+    return @{ ok = $true; code = 'mode_set'; detail = "$Monitor $($done -join ', ')" }
+}
+
 function Save-Layout {
     $screens = Get-Screens
     Write-ScreensToLog $screens
     $items = @($screens | ForEach-Object { [pscustomobject]@{ Path = $_.Path; Active = [bool]$_.Active; X = $_.X; Y = $_.Y } | ConvertTo-Json -Compress })
     if (-not $DryRun) { [System.IO.File]::WriteAllText($BackupPath, '[' + ($items -join ',') + ']') }
+    if ($Backup -eq 'apply') {
+        $paths = [Ccd]::GdiToPath()
+        $windows = @([WindowKeeper]::Snapshot() | Where-Object { $paths.ContainsKey($_.Device) } | ForEach-Object {
+            $p = $_.Placement
+            [pscustomobject]@{ Handle = $_.Handle.ToInt64(); Key = (Get-Key $paths[$_.Device]); MonitorX = $_.MonitorX; MonitorY = $_.MonitorY
+                ShowCmd = $p.showCmd; MinX = $p.minPosition.X; MinY = $p.minPosition.Y; MaxX = $p.maxPosition.X; MaxY = $p.maxPosition.Y
+                Left = $p.normalPosition.Left; Top = $p.normalPosition.Top; Right = $p.normalPosition.Right; Bottom = $p.normalPosition.Bottom } | ConvertTo-Json -Compress
+        })
+        Write-Log "$($windows.Count) windows remembered"
+        if (-not $DryRun) { [System.IO.File]::WriteAllText($WindowsPath, '[' + ($windows -join ',') + ']') }
+    }
     return @{ ok = $true; code = 'saved'; detail = "$(@($screens | Where-Object Active).Count) active" }
 }
 
+# The local list is not called $backup: PowerShell names ignore case, and it would
+# overwrite the -Backup parameter (the windows were never put back, 19.10.2026).
 function Restore-Layout {
     if (-not (Test-Path $BackupPath)) { return @{ ok = $false; code = 'no_backup'; detail = '' } }
     $parsed = Get-Content $BackupPath -Raw | ConvertFrom-Json
-    $backup = @($parsed | Where-Object { $_.Path -is [string] })
+    $remembered = @($parsed | Where-Object { $_.Path -is [string] })
     $screens = Get-Screens
     Write-ScreensToLog $screens
-    if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "$($backup.Count) remembered" } }
+    # A driver restart may change the middle of a device path: such a monitor is
+    # found by its key.
+    foreach ($entry in $remembered) {
+        if (@($screens | Where-Object { $_.Path -eq $entry.Path }).Count -gt 0) { continue }
+        $same = @($screens | Where-Object { (Get-Key $_.Path) -eq (Get-Key $entry.Path) })
+        if ($same.Count -gt 0) { $entry.Path = $same[0].Path }
+    }
+    if ($DryRun) { return @{ ok = $true; code = 'dry_run'; detail = "$($remembered.Count) remembered: $(@($remembered | Where-Object Active | ForEach-Object { Get-ShortName $_.Path }) -join ', ') attached" } }
     $errors = @()
     $state = @(Read-State)
 
     # Attach first, so the number of screens never drops on the way.
-    foreach ($entry in @($backup | Where-Object Active)) {
+    foreach ($entry in @($remembered | Where-Object Active)) {
         $screen = $screens | Where-Object { $_.Path -eq $entry.Path }
         if ($null -eq $screen -or $screen.Active) { continue }
         $code = [Ccd]::Attach($entry.Path)
@@ -571,7 +840,7 @@ function Restore-Layout {
     }
     # Then detach VDD monitors that were not attached before; never the primary, never the last.
     foreach ($screen in @(Get-Screens | Where-Object { $_.Active -and $_.IsVdd -and -not $_.Primary })) {
-        $entry = $backup | Where-Object { $_.Path -eq $screen.Path }
+        $entry = $remembered | Where-Object { $_.Path -eq $screen.Path }
         if ($null -eq $entry -or $entry.Active) { continue }
         if (@(Get-Screens | Where-Object Active).Count -le 1) { break }
         $code = [Ccd]::Detach($screen.Path)
@@ -584,19 +853,37 @@ function Restore-Layout {
 
     # Positions of everything that is attached now and was attached then.
     $active = @(Get-Screens | Where-Object Active)
-    $place = @($backup | Where-Object { $_.Active -and ($active.Path -contains $_.Path) })
+    $place = @($remembered | Where-Object { $_.Active -and ($active.Path -contains $_.Path) })
     if ($place.Count -gt 0) {
         $code = [Ccd]::SetPositions([string[]]@($place.Path), [int[]]@($place | ForEach-Object { $_.X }), [int[]]@($place | ForEach-Object { $_.Y }), $false)
         Write-Log "SetPositions ($($place.Count)) -> $code"
         if ($code -ne 0) { $errors += "positions: $code" }
     }
+    if ($Backup -eq 'apply') { $script:windows = Read-SavedWindows }
     if ($errors.Count -gt 0) { return @{ ok = $false; code = 'failed'; detail = ($errors -join '; ') } }
     return @{ ok = $true; code = 'restored'; detail = '' }
 }
 
+# The windows remembered before "Apply", on the monitors' current GDI names.
+function Read-SavedWindows {
+    $result = New-Object 'System.Collections.Generic.List[SavedWindow]'
+    if (-not (Test-Path $WindowsPath)) { return ,$result }
+    $byKey = @{}
+    foreach ($entry in ([Ccd]::GdiToPath()).GetEnumerator()) { $byKey[(Get-Key $entry.Value)] = $entry.Key }
+    $parsed = Get-Content $WindowsPath -Raw | ConvertFrom-Json
+    foreach ($w in @($parsed | Where-Object { $null -ne $_.Key })) {
+        if (-not $byKey.ContainsKey($w.Key)) { continue }
+        $result.Add([WindowKeeper]::Make([int64]$w.Handle, $byKey[$w.Key], $w.MonitorX, $w.MonitorY, $w.ShowCmd,
+            $w.MinX, $w.MinY, $w.MaxX, $w.MaxY, $w.Left, $w.Top, $w.Right, $w.Bottom))
+    }
+    Remove-Item $WindowsPath -ErrorAction SilentlyContinue
+    Write-Log "$($result.Count) windows to put back from before Apply"
+    return ,$result
+}
+
 try {
     $windows = $null
-    if (-not $DryRun -and @('add', 'remove', 'arrange', 'restore') -contains $Action) { $windows = [WindowKeeper]::Snapshot() }
+    if (-not $DryRun -and @('add', 'remove', 'arrange', 'restore', 'setmode') -contains $Action) { $windows = [WindowKeeper]::Snapshot() }
     switch ($Action) {
         'list'    { Get-Screens | Select-Object Short, IsVdd, Active, Primary, X, Y, Width, Height | Format-Table -AutoSize | Out-String -Width 200 | Write-Output; exit 0 }
         'remove'  { $result = Remove-Screen }
@@ -604,6 +891,9 @@ try {
         'arrange' { $result = Set-Arrangement }
         'save'    { $result = Save-Layout }
         'restore' { $result = Restore-Layout }
+        'modes'   { $result = Get-Modes }
+        'setmode' { $result = Set-Mode }
+        'instances' { $result = Get-Instances }
     }
 } catch {
     $result = @{ ok = $false; code = 'failed'; detail = "$($_.Exception.Message)" }
@@ -612,7 +902,7 @@ if ($null -ne $windows) {
     try { Restore-Windows $windows } catch { Write-Log "Windows: $($_.Exception.Message)" }
 }
 $result.attached = @(Get-Screens | Where-Object Active).Count
-$json = $result | ConvertTo-Json -Compress
+$json = $result | ConvertTo-Json -Compress -Depth 5
 if (-not $DryRun) {
     Write-Log $json
     Write-ScreensToLog (Get-Screens)

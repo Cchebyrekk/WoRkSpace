@@ -2,11 +2,12 @@
 # disabling or creating a MttVDD device instance. Started by the scheduled task
 # WoRkPlaceVddHelper; reads a single request and writes a single response.
 #
-# Request  (request.txt):  "<id> add" | "<id> remove"
+# Request  (request.txt):  "<id> add" | "<id> remove" | "<id> apply <count>"
 # Response (response.txt): {"id":"..","ok":true,"screens":5,"message":".."}
 #
-# Only the two verbs above are accepted and nothing from the request is ever
-# executed, because this script runs elevated on behalf of an unelevated app.
+# Only the verbs above (and a count of 1..$MaxScreens) are accepted and nothing
+# from the request is ever executed, because this script runs elevated on behalf
+# of an unelevated app.
 #
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less script as ANSI.
 param(
@@ -17,6 +18,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $HardwareId = 'Root\MttVDD'
 $MaxScreens = 8
+# Raised whenever the commands change; the app warns when the installed copy is older.
+$HelperVersion = 5
 $Nefconc = 'C:\ProgramData\scoop\shims\nefconc.exe'
 $LogPath = Join-Path $Dir 'helper.log'
 
@@ -24,12 +27,15 @@ function Write-Log([string]$text) {
     Add-Content -Path $LogPath -Value ('{0:HH:mm:ss.fff} {1}' -f (Get-Date), $text)
 }
 
+# -ErrorAction SilentlyContinue: right after the driver host is ended there may be
+# no such device at all, and Get-PnpDevice then throws instead of returning nothing
+# (19.10.2026: the whole "apply" failed on that).
 function Get-VddInstances {
-    @(Get-PnpDevice -Class Display | Where-Object { $_.HardwareID -contains $HardwareId } | Sort-Object InstanceId)
+    @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains $HardwareId } | Sort-Object InstanceId)
 }
 
 function Get-ScreenCount {
-    @(Get-PnpDevice -Class Monitor -PresentOnly | Where-Object { $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }).Count
+    @(Get-PnpDevice -Class Monitor -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'DISPLAY\MTT1337\*' -and $_.Status -eq 'OK' }).Count
 }
 
 function Wait-ScreenCount([int]$Expected, [int]$TimeoutSec) {
@@ -56,10 +62,15 @@ function Add-Screen {
     if ($disabled.Count -gt 0) {
         $id = $disabled[0].InstanceId
         $code = Invoke-Tool 'pnputil.exe' @('/enable-device', $id)
-        if ($code -ne 0 -and $code -ne 3010) { throw "pnputil /enable-device ${id}: exit code $code" }
         if ($DryRun) { return "dry run: would enable $id" }
-        if (-not (Wait-ScreenCount ($before + 1) 30)) { throw "$id enabled, but no screen appeared in 30 s" }
-        return "enabled $id"
+        if ($code -eq 0 -or $code -eq 3010) {
+            if (-not (Wait-ScreenCount ($before + 1) 30)) { throw "$id enabled, but no screen appeared in 30 s" }
+            return "enabled $id"
+        }
+        # 18.10.2026: an instance disabled days before refused with 1167 ("device not
+        # connected"). Such a one is removed and a fresh instance created below.
+        Write-Log "cannot enable $id (exit $code): removing it and creating a new instance"
+        Invoke-Tool 'pnputil.exe' @('/remove-device', $id) | Out-Null
     }
 
     if (-not (Test-Path $Nefconc)) { throw "$Nefconc not found" }
@@ -103,6 +114,79 @@ function Remove-Screen {
     return "disabled $id"
 }
 
+function Get-Working {
+    @(Get-VddInstances | Where-Object { $_.Status -eq 'OK' })
+}
+
+# "Apply" from the app: bring the number of working instances to $Target, then
+# restart every instance so that the driver reads vdd_settings.xml again (the app
+# has written the user's resolutions there). One driver restart for everything,
+# so Quest Link reconnects once. Disabled instances are enabled before new ones
+# are created; surplus ones are removed, the highest-numbered first.
+# Ends the WUDFHost process(es) the MttVDD driver runs in; Windows restarts them
+# with the devices. True once the screens are back.
+function Restart-DriverHost([int]$Screens) {
+    $hosts = @(Get-Process WUDFHost -ErrorAction SilentlyContinue | Where-Object {
+        try { @($_.Modules | Where-Object { $_.ModuleName -like 'mttvdd*' }).Count -gt 0 } catch { $false }
+    })
+    if ($hosts.Count -eq 0) {
+        Write-Log 'no driver host process with MttVDD.dll found'
+        return $false
+    }
+    foreach ($process in $hosts) {
+        Write-Log "ending driver host process $($process.Id) (started $($process.StartTime))"
+        if (-not $DryRun) { Stop-Process -Id $process.Id -Force }
+    }
+    if ($DryRun) { return $true }
+    Start-Sleep -Seconds 2
+    if (Wait-ScreenCount $Screens 30) { return $true }
+    # Not back by themselves: start the instances again.
+    foreach ($instance in (Get-VddInstances)) {
+        Invoke-Tool 'pnputil.exe' @('/restart-device', $instance.InstanceId) | Out-Null
+    }
+    return (Wait-ScreenCount $Screens 30)
+}
+
+function Set-InstanceCount([int]$Target) {
+    if ($Target -lt 1 -or $Target -gt $MaxScreens) { throw "count must be 1..$MaxScreens, got $Target" }
+    $steps = @()
+    while ((Get-Working).Count -gt $Target) {
+        $working = Get-Working
+        # The user sees the PC only through these displays: never go below one.
+        if ($working.Count -le 1) { break }
+        $id = $working[-1].InstanceId
+        $code = Invoke-Tool 'pnputil.exe' @('/remove-device', $id)
+        if ($code -ne 0 -and $code -ne 3010) { throw "pnputil /remove-device ${id}: exit code $code" }
+        $steps += "removed $id"
+        if ($DryRun) { break }
+    }
+    while ((Get-Working).Count -lt $Target) {
+        $steps += (Add-Screen)
+        if ($DryRun) { break }
+    }
+    # Restarting the instances one by one did not make the driver read its settings
+    # file again (18.10.2026: a new resolution was in the file but not offered; two
+    # instances answered 3010 "restart needed"). Reinstalling the driver restarts
+    # all of them at once, as it did when instances were created.
+    # Neither did --install-driver (3010, "restart needed"): the driver host process
+    # had been running since the PC started. Ending it makes Windows start the
+    # driver anew, and it reads the file then.
+    $reloaded = Restart-DriverHost (Get-ScreenCount)
+    $inf = Get-ChildItem (Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository\mttvdd.inf_amd64_*\MttVDD.inf') -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $reloaded -and $null -ne $inf -and (Test-Path $Nefconc)) {
+        $code = Invoke-Tool $Nefconc @('--install-driver', '--inf-path', $inf.FullName)
+        $reloaded = $code -eq 0 -or $code -eq 3010
+    }
+    if (-not $reloaded) {
+        foreach ($instance in (Get-Working)) {
+            Invoke-Tool 'pnputil.exe' @('/restart-device', $instance.InstanceId) | Out-Null
+        }
+    }
+    if (-not $DryRun -and -not (Wait-ScreenCount $Target 60)) { throw "instances set to $Target, but $(Get-ScreenCount) screens came up in 60 s" }
+    $steps += "driver restarted, $((Get-Working).Count) instances"
+    return ($steps -join '; ')
+}
+
 $requestPath = Join-Path $Dir 'request.txt'
 $responsePath = Join-Path $Dir 'response.txt'
 if (-not (Test-Path $requestPath)) { exit 0 }
@@ -114,10 +198,14 @@ $requestId = if ($parts[0] -match '^\d+$') { $parts[0] } else { '' }
 Write-Log "request: $($parts -join ' ') (screens $(Get-ScreenCount))"
 $ok = $false
 try {
-    if ($requestId -eq '' -or $parts.Count -ne 2) { throw 'malformed request' }
+    if ($requestId -eq '' -or $parts.Count -lt 2) { throw 'malformed request' }
     switch -CaseSensitive ($parts[1]) {
-        'add'    { $message = Add-Screen }
-        'remove' { $message = Remove-Screen }
+        'add'    { if ($parts.Count -ne 2) { throw 'malformed request' }; $message = Add-Screen }
+        'remove' { if ($parts.Count -ne 2) { throw 'malformed request' }; $message = Remove-Screen }
+        'apply'  {
+            if ($parts.Count -ne 3 -or $parts[2] -notmatch '^\d{1,2}$') { throw 'malformed request' }
+            $message = Set-InstanceCount ([int]$parts[2])
+        }
         default  { throw 'unknown command' }
     }
     $ok = $true
@@ -125,6 +213,6 @@ try {
     $message = "$($_.Exception.Message)"
 }
 
-$response = @{ id = $requestId; ok = $ok; screens = (Get-ScreenCount); message = $message } | ConvertTo-Json -Compress
+$response = @{ id = $requestId; ok = $ok; screens = (Get-ScreenCount); message = $message; version = $HelperVersion } | ConvertTo-Json -Compress
 [System.IO.File]::WriteAllText($responsePath, $response, (New-Object System.Text.UTF8Encoding($false)))
 Write-Log "response: $response"

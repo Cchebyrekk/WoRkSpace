@@ -138,6 +138,24 @@ static func move(rects: Array[Rect2i], primary_index: int, index: int, drop: Vec
 	return result
 
 
+## Whether Windows takes the layout as it is: the primary at (0, 0), no overlaps,
+## every monitor connected to the others by a shared edge.
+static func is_valid(rects: Array[Rect2i], primary_index: int) -> bool:
+	if rects[primary_index].position != Vector2i.ZERO:
+		return false
+	for i in rects.size():
+		for j in range(i + 1, rects.size()):
+			if rects[i].intersects(rects[j]):
+				return false
+	return _connected(rects, primary_index).size() == rects.size()
+
+
+## A layout that has gone wrong around monitor `index` (e.g. it changed size and
+## now overlaps a neighbour) put right: it is dropped again where its middle is.
+static func repair(rects: Array[Rect2i], primary_index: int, index: int) -> Array[Rect2i]:
+	return move(rects, primary_index, index, Vector2(rects[index].position) + Vector2(rects[index].size) * 0.5)
+
+
 ## The left edge nearest `x` at which a monitor `width` wide overlaps no one in `row`.
 static func _nearest_free(rects: Array[Rect2i], row: PackedInt32Array, width: int, x: float) -> float:
 	var options: Array[float] = [x]
