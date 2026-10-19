@@ -1,4 +1,5 @@
 #include "win_backend.h"
+#include "input_events.h"
 
 #include <windows.h>
 
@@ -19,6 +20,7 @@
 #include <future>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace workplace {
 
@@ -242,86 +244,242 @@ void mouse_position(int32_t &x, int32_t &y) {
 	y = point.y;
 }
 
-void mouse_move(int32_t x, int32_t y) {
-	RealPixels real_pixels;
-	int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-	int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-	int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-	int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-	if (width <= 1 || height <= 1) {
-		return;
+// Input goes through workplace_agent.exe while it runs: as SYSTEM it reaches
+// elevated windows (Task Manager, installers, UAC) and the secure desktop, which
+// SendInput from this process cannot. Without the agent the app injects itself.
+namespace {
+
+std::mutex agent_mutex;
+HANDLE agent_pipe = INVALID_HANDLE_VALUE;
+ULONGLONG agent_retry_at = 0;
+constexpr ULONGLONG AGENT_RETRY_MS = 2000;
+// The agent's latest word on whether the secure desktop (UAC, lock screen,
+// Ctrl+Alt+Del) is up. Updated by draining status messages; false without an agent.
+bool secure_desktop_flag = false;
+
+void close_agent_pipe() {
+	if (agent_pipe != INVALID_HANDLE_VALUE) {
+		CloseHandle(agent_pipe);
+		agent_pipe = INVALID_HANDLE_VALUE;
 	}
-	// Absolute moves take 0..65535 across the whole virtual desktop.
-	INPUT input{};
-	input.type = INPUT_MOUSE;
-	input.mi.dx = MulDiv(x - left, 65535, width - 1);
-	input.mi.dy = MulDiv(y - top, 65535, height - 1);
-	input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-	SendInput(1, &input, sizeof(INPUT));
+	agent_retry_at = GetTickCount64() + AGENT_RETRY_MS;
+	secure_desktop_flag = false;
+}
+
+// Caller holds agent_mutex and the pipe is open. Reads any status messages the
+// agent has sent (desktop changes), newest wins.
+void drain_status_locked() {
+	for (;;) {
+		DWORD available = 0;
+		if (!PeekNamedPipe(agent_pipe, nullptr, 0, nullptr, &available, nullptr)) {
+			close_agent_pipe();
+			return;
+		}
+		if (available < sizeof(StatusRecord)) {
+			return;
+		}
+		StatusRecord record{};
+		DWORD read = 0;
+		if (!ReadFile(agent_pipe, &record, sizeof(record), &read, nullptr) || read != sizeof(record)) {
+			close_agent_pipe();
+			return;
+		}
+		if (record.tag == STATUS_TAG) {
+			secure_desktop_flag = record.status == AgentStatus::DESKTOP_SECURE;
+		}
+	}
+}
+
+// Caller holds agent_mutex.
+bool open_agent_pipe() {
+	if (agent_pipe != INVALID_HANDLE_VALUE) {
+		return true;
+	}
+	if (GetTickCount64() < agent_retry_at) {
+		return false;
+	}
+	// SECURITY_IDENTIFICATION: whoever owns the pipe may learn who we are, not act as us.
+	agent_pipe = CreateFileW(AGENT_PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+			SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
+	if (agent_pipe == INVALID_HANDLE_VALUE) {
+		agent_retry_at = GetTickCount64() + AGENT_RETRY_MS;
+		return false;
+	}
+	// Wait (briefly, without blocking for good) for the agent to accept us: a
+	// refused client must not lose the input it would have sent.
+	for (int i = 0; i < 50; i++) {
+		DWORD available = 0;
+		if (!PeekNamedPipe(agent_pipe, nullptr, 0, nullptr, &available, nullptr)) {
+			break;
+		}
+		if (available > 0) {
+			uint8_t answer = 0;
+			DWORD read = 0;
+			if (ReadFile(agent_pipe, &answer, 1, &read, nullptr) && read == 1 && answer == AGENT_ACCEPTED) {
+				return true;
+			}
+			break;
+		}
+		Sleep(10);
+	}
+	close_agent_pipe();
+	return false;
+}
+
+void deliver(const InputRecord *records, size_t count) {
+	{
+		std::lock_guard<std::mutex> lock(agent_mutex);
+		if (open_agent_pipe()) {
+			DWORD written = 0;
+			if (WriteFile(agent_pipe, records, static_cast<DWORD>(count * sizeof(InputRecord)), &written, nullptr)) {
+				return;
+			}
+			// The agent went away or turned us down: inject ourselves.
+			close_agent_pipe();
+		}
+	}
+	inject_input(records, count);
+}
+
+} // namespace
+
+bool agent_connected() {
+	std::lock_guard<std::mutex> lock(agent_mutex);
+	return open_agent_pipe();
+}
+
+bool secure_desktop_active() {
+	std::lock_guard<std::mutex> lock(agent_mutex);
+	// Keep the connection up even when idle, so a prompt that appears without the
+	// user touching anything is still reported.
+	if (!open_agent_pipe()) {
+		return false;
+	}
+	drain_status_locked();
+	return secure_desktop_flag;
+}
+
+namespace {
+
+HANDLE secure_mapping = nullptr;
+const SecureFrameHeader *secure_view = nullptr;
+
+bool open_secure_section() {
+	if (secure_view != nullptr) {
+		return true;
+	}
+	secure_mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, SECURE_FRAME_SECTION);
+	if (secure_mapping == nullptr) {
+		return false;
+	}
+	secure_view = static_cast<const SecureFrameHeader *>(MapViewOfFile(secure_mapping, FILE_MAP_READ, 0, 0, SECURE_FRAME_BYTES));
+	if (secure_view == nullptr) {
+		CloseHandle(secure_mapping);
+		secure_mapping = nullptr;
+		return false;
+	}
+	return true;
+}
+
+} // namespace
+
+bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y,
+		std::vector<uint8_t> &out) {
+	if (!open_secure_section()) {
+		return false;
+	}
+	const SecureFrameHeader *header = secure_view;
+	if (header->magic != SECURE_FRAME_MAGIC) {
+		return false;
+	}
+	// Seqlock: a stable, even sequence that did not move across the copy means the
+	// frame is whole. A few tries in case the agent writes mid-read. The sequence
+	// is read through volatile with full barriers around the copy, so the compiler
+	// cannot merge the two reads or move the copy outside them.
+	const volatile uint32_t *sequence = &header->sequence;
+	for (int attempt = 0; attempt < 8; attempt++) {
+		uint32_t start = *sequence;
+		MemoryBarrier();
+		if (start & 1u) {
+			YieldProcessor();
+			continue; // the agent is writing
+		}
+		uint32_t w = header->width;
+		uint32_t h = header->height;
+		uint32_t pitch = header->pitch;
+		if (w == 0 || h == 0 || w > SECURE_FRAME_MAX_WIDTH || h > SECURE_FRAME_MAX_HEIGHT) {
+			return false; // no frame yet
+		}
+		// Never read past the section, whatever the header says (a torn header is
+		// rejected by the sequence check below, but the copy happens first).
+		if (pitch < w * 4 || static_cast<size_t>(pitch) * h > SECURE_FRAME_BYTES - sizeof(SecureFrameHeader)) {
+			continue;
+		}
+		if (start == last_sequence) {
+			return false; // nothing new since last time
+		}
+		int32_t ox = header->origin_x;
+		int32_t oy = header->origin_y;
+		out.resize(static_cast<size_t>(w) * h * 4);
+		const uint8_t *source = reinterpret_cast<const uint8_t *>(header + 1);
+		for (uint32_t row = 0; row < h; row++) {
+			const uint8_t *s = source + static_cast<size_t>(row) * pitch;
+			uint8_t *d = out.data() + static_cast<size_t>(row) * w * 4;
+			for (uint32_t x = 0; x < w; x++) {
+				d[x * 4 + 0] = s[x * 4 + 2]; // B G R A -> R G B A
+				d[x * 4 + 1] = s[x * 4 + 1];
+				d[x * 4 + 2] = s[x * 4 + 0];
+				d[x * 4 + 3] = 255;
+			}
+		}
+		MemoryBarrier();
+		if (*sequence == start) {
+			last_sequence = start;
+			width = static_cast<int32_t>(w);
+			height = static_cast<int32_t>(h);
+			origin_x = ox;
+			origin_y = oy;
+			return true;
+		}
+	}
+	return false;
+}
+
+void mouse_move(int32_t x, int32_t y) {
+	InputRecord record{ InputType::MOVE, x, y };
+	deliver(&record, 1);
 }
 
 void mouse_button(int32_t button, bool down) {
-	static const DWORD down_flags[] = { MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_MIDDLEDOWN };
-	static const DWORD up_flags[] = { MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP };
-	if (button < 0 || button > 2) {
-		return;
-	}
-	INPUT input{};
-	input.type = INPUT_MOUSE;
-	input.mi.dwFlags = down ? down_flags[button] : up_flags[button];
-	SendInput(1, &input, sizeof(INPUT));
+	InputRecord record{ InputType::BUTTON, button, down ? 1 : 0 };
+	deliver(&record, 1);
 }
 
 void mouse_wheel(int32_t delta) {
-	INPUT input{};
-	input.type = INPUT_MOUSE;
-	input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-	input.mi.mouseData = static_cast<DWORD>(delta);
-	SendInput(1, &input, sizeof(INPUT));
+	InputRecord record{ InputType::WHEEL, delta, 0 };
+	deliver(&record, 1);
 }
 
 void mouse_hwheel(int32_t delta) {
-	INPUT input{};
-	input.type = INPUT_MOUSE;
-	input.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-	input.mi.mouseData = static_cast<DWORD>(delta);
-	SendInput(1, &input, sizeof(INPUT));
-}
-
-static INPUT key_input(uint16_t virtual_key, bool down) {
-	INPUT input{};
-	input.type = INPUT_KEYBOARD;
-	input.ki.wVk = virtual_key;
-	input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC));
-	input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-	// Arrows, navigation keys and the Windows keys live on the extended part of the keyboard.
-	switch (virtual_key) {
-		case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
-		case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
-		case VK_INSERT: case VK_DELETE: case VK_LWIN: case VK_RWIN: case VK_APPS:
-			input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-			break;
-		default:
-			break;
-	}
-	return input;
+	InputRecord record{ InputType::HWHEEL, delta, 0 };
+	deliver(&record, 1);
 }
 
 void key_event(uint16_t virtual_key, bool down) {
-	INPUT input = key_input(virtual_key, down);
-	SendInput(1, &input, sizeof(INPUT));
+	InputRecord record{ InputType::KEY, virtual_key, down ? 1 : 0 };
+	deliver(&record, 1);
 }
 
 void press_keys(const std::vector<uint16_t> &virtual_keys) {
-	std::vector<INPUT> inputs;
+	std::vector<InputRecord> records;
 	for (uint16_t key : virtual_keys) {
-		inputs.push_back(key_input(key, true));
+		records.push_back({ InputType::KEY, key, 1 });
 	}
 	for (auto key = virtual_keys.rbegin(); key != virtual_keys.rend(); ++key) {
-		inputs.push_back(key_input(*key, false));
+		records.push_back({ InputType::KEY, *key, 0 });
 	}
-	if (!inputs.empty()) {
-		SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+	if (!records.empty() && records.size() <= AGENT_MAX_RECORDS) {
+		deliver(records.data(), records.size());
 	}
 }
 

@@ -117,7 +117,8 @@ func _make_layer(curved: bool) -> void:
 	layer.layer_viewport = _viewport
 	if _hole_punch:
 		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
-		layer.sort_order = -1
+		# -2: the secure-desktop prompt (main.gd, -1) sits between the panels and the scene.
+		layer.sort_order = -2
 		layer.enable_hole_punch = true
 	_origin.add_child(layer)
 

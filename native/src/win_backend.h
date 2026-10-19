@@ -50,6 +50,19 @@ void mouse_hwheel(int32_t delta); // 120 is one notch, positive scrolls right
 // Presses the Windows virtual keys in order, then releases them in reverse (a shortcut such as Ctrl+Shift+Z).
 void press_keys(const std::vector<uint16_t> &virtual_keys);
 void key_event(uint16_t virtual_key, bool down);
+// Whether input goes through workplace_agent.exe (tries to connect at most every 2 s).
+bool agent_connected();
+// Whether the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del).
+// Polls the agent's status messages; false without an agent. Call each frame.
+bool secure_desktop_active();
+
+// Copies the agent's latest secure-desktop frame (RGBA, the picture of the secure
+// desktop) into `out`, with its size and the captured monitor's virtual-desktop
+// origin. False if there is no agent, no frame yet, or nothing new since
+// `last_sequence` (which it updates). `out` is a plain byte buffer to avoid Godot
+// types here.
+bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y,
+		std::vector<uint8_t> &out);
 
 // System-wide hotkey that fires even when the Godot window is not focused.
 class HotkeyBackend {

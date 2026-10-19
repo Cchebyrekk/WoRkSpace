@@ -17,6 +17,7 @@ void initialize_workplace_module(ModuleInitializationLevel p_level) {
 
 	GDREGISTER_CLASS(ScreenCapture);
 	GDREGISTER_CLASS(GlobalHotkey);
+	GDREGISTER_CLASS(SecureDesktop);
 	GDREGISTER_ABSTRACT_CLASS(MouseInput);
 }
 

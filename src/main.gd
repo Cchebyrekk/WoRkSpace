@@ -408,6 +408,29 @@ var _topology: DisplayTopology
 var _vdd: VddControl
 var _vdd_message := ""
 var _status: Label3D
+## Whether the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del).
+var _secure_desktop := false
+## The secure desktop's picture, captured by the agent and shown on a quad in VR.
+var _secure := SecureDesktop.new()
+var _secure_viewport: SubViewport
+var _secure_rect: TextureRect
+var _secure_layer: OpenXRCompositionLayerQuad
+var _secure_shown := false
+## The quad's world transform and size (m) while shown, for mapping the laser onto it.
+var _secure_quad_xf := Transform3D.IDENTITY
+var _secure_quad_size := Vector2.ZERO
+## The captured monitor: top-left on the virtual desktop and size in pixels.
+var _secure_origin := Vector2i.ZERO
+var _secure_pixels := Vector2i.ZERO
+## The mouse button the secure cursor holds, or NONE.
+var _secure_button := HandGestures.Click.NONE
+## Which pointer pressed `_secure_button`: it alone can let go of it.
+var _secure_press_pointer := 0
+## Which pointer drives the cursor on the secure desktop (-1: none yet).
+var _secure_cursor_pointer := -1
+## How tall the secure-desktop quad stands in VR, in metres.
+const SECURE_QUAD_HEIGHT := 0.9
+const SECURE_QUAD_DISTANCE := 1.3
 var _log_timer := 0.0
 var _xr_ready := false
 var _xr: OpenXRInterface
@@ -564,6 +587,9 @@ func _ready() -> void:
 		print("[app] аварийный выход: Ctrl+Alt+Shift+F12")
 	else:
 		print("[app] не удалось занять Ctrl+Alt+Shift+F12 — сочетание уже используется")
+	# The WoRkPlaceAgent service (tools/install_agent.ps1) carries the input to
+	# elevated windows and the secure desktop; without it the app injects itself.
+	print("[input] агент ввода: ", "подключён" if MouseInput.is_agent_connected() else "нет (окна администратора и UAC недоступны)")
 
 	var xr: XRInterface = XRServer.find_interface("OpenXR")
 	if xr == null or not xr.is_initialized():
@@ -648,9 +674,13 @@ func _process(delta: float) -> void:
 	_update_grabs(delta)
 	_place_monitor_menu()
 	_update_buttons(delta)
+	# Before the cursor (which it replaces while shown) and the rays (which end on its quad).
+	_update_secure_desktop()
 	_update_cursor()
 	_update_rays()
 
+	if _secure_desktop:
+		lines.append("ЗАЩИЩЁННЫЙ РАБОЧИЙ СТОЛ (запрос администратора / экран блокировки) — виден через агента")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
@@ -739,6 +769,9 @@ func _log_tremor() -> void:
 ## Drives the Windows cursor from the pointer aimed at a screen panel: the ray's
 ## hit point becomes a pixel on that monitor, a pinch or trigger the left button.
 func _update_cursor() -> void:
+	# While the secure desktop is shown, _update_secure_cursor drives the cursor.
+	if _secure_shown:
+		return
 	if _panels.is_empty():
 		return
 	for pointer in _pointers:
@@ -1431,6 +1464,10 @@ func _recenter() -> void:
 	var turn := Basis(Vector3.UP, yaw)
 	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
 	_place_panels([], true)
+	# A prompt on show follows too ("Центр" or the Meta button), in front of the new view.
+	if _secure_shown:
+		_release_secure_button()
+		_place_secure_quad()
 	_recentered = true
 	print("[xr] сцена выровнена по взгляду, поворот %.0f°" % rad_to_deg(yaw))
 
@@ -1911,6 +1948,165 @@ func _on_vdd_finished(ok: bool, message: String) -> void:
 		_restore_after_apply = true
 		_restore_layout_after_apply()
 	_refresh_driver_section(true)
+
+
+## Builds the quad that shows the secure desktop (once, hidden).
+func _build_secure_desktop() -> void:
+	_secure_rect = TextureRect.new()
+	_secure_rect.stretch_mode = TextureRect.STRETCH_SCALE
+	_secure_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_secure_viewport = SubViewport.new()
+	_secure_viewport.disable_3d = true
+	_secure_viewport.transparent_bg = false
+	_secure_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_secure_viewport.add_child(_secure_rect)
+	add_child(_secure_viewport)
+	_secure_layer = OpenXRCompositionLayerQuad.new()
+	_secure_layer.layer_viewport = _secure_viewport
+	# Above the screen panels (sort_order -2) but behind the scene with a hole
+	# punched through it, so hands, rays and menus draw over the prompt (at 100 it
+	# covered them).
+	_secure_layer.sort_order = -1
+	_secure_layer.enable_hole_punch = true
+	_secure_layer.visible = false
+	_origin.add_child(_secure_layer)
+
+
+## Polls the agent for the secure desktop (UAC, lock screen, Ctrl+Alt+Del). Shows
+## its picture on a quad in front of the user and sends the laser's clicks to it
+## (they reach the secure desktop through the agent).
+func _update_secure_desktop() -> void:
+	var active := MouseInput.is_secure_desktop_active()
+	if active != _secure_desktop:
+		_secure_desktop = active
+		print("[secure] защищённый рабочий стол: ", "да" if active else "нет")
+	if _secure_layer == null:
+		_build_secure_desktop()
+
+	if _secure_desktop and _secure.update():
+		_secure_pixels = _secure.get_frame_size()
+		_secure_origin = _secure.get_frame_origin()
+		if _secure_viewport.size != _secure_pixels:
+			_secure_viewport.size = _secure_pixels
+		_secure_rect.texture = _secure.get_texture()
+
+	var want := _secure_desktop and _secure_pixels.x > 0
+	if want and not _secure_shown:
+		_place_secure_quad()
+		# The panel cursor stops for the while: it must not leave a button held.
+		_release_cursor_button()
+	if want != _secure_shown:
+		_secure_shown = want
+		_secure_layer.visible = want
+		_secure_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if want else SubViewport.UPDATE_DISABLED
+		if not want:
+			_release_secure_button()
+			# The next prompt shows only once its own first frame is in, not this one's.
+			_secure_pixels = Vector2i.ZERO
+
+	if _secure_shown:
+		_update_secure_cursor()
+
+
+## Puts the quad in front of the user's current view, facing them, keeping the
+## captured monitor's aspect. Fixed while shown, so clicking it is steady.
+func _place_secure_quad() -> void:
+	var aspect := float(_secure_pixels.x) / float(maxi(_secure_pixels.y, 1))
+	_secure_quad_size = Vector2(SECURE_QUAD_HEIGHT * aspect, SECURE_QUAD_HEIGHT)
+	var head := _camera.global_transform
+	var forward := -head.basis.z
+	forward.y = 0.0
+	if forward.length() < 0.01:
+		forward = Vector3.FORWARD
+	forward = forward.normalized()
+	var center := head.origin + forward * SECURE_QUAD_DISTANCE
+	center.y = head.origin.y
+	var basis := Basis.looking_at(center - head.origin, Vector3.UP)
+	_secure_quad_xf = Transform3D(basis, center)
+	_secure_layer.global_transform = _secure_quad_xf
+	_secure_layer.quad_size = _secure_quad_size
+
+
+## Where the pointer's ray meets the quad: distance (or -1), and the 0..1 spot.
+func _secure_hit(pointer: Pointer) -> Array:
+	var normal := _secure_quad_xf.basis.z.normalized()
+	var denom := pointer.direction.dot(normal)
+	if absf(denom) < 1e-6:
+		return [-1.0, Vector2.ZERO]
+	var distance := (_secure_quad_xf.origin - pointer.origin).dot(normal) / denom
+	if distance <= 0.0:
+		return [-1.0, Vector2.ZERO]
+	var local := _secure_quad_xf.affine_inverse() * (pointer.origin + pointer.direction * distance)
+	var u := local.x / _secure_quad_size.x + 0.5
+	var v := 0.5 - local.y / _secure_quad_size.y
+	if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+		return [-1.0, Vector2.ZERO]
+	return [distance, Vector2(u, v)]
+
+
+## Drives the Windows cursor on the secure desktop from the laser and pinch. Runs
+## instead of the normal panel cursor while the secure quad is shown.
+func _update_secure_cursor() -> void:
+	var hits: Array[Vector2] = [Vector2.ZERO, Vector2.ZERO]
+	var owner := -1
+	var nearest := INF
+	for i: int in [1, 0]: # right hand first
+		var pointer := _pointers[i]
+		# The panel cursor is off, so nothing else clears these this frame.
+		pointer.on_panel = false
+		pointer.panel = null
+		if not pointer.active:
+			continue
+		var hit := _secure_hit(pointer)
+		var distance: float = hit[0]
+		if distance < 0.0:
+			continue
+		hits[i] = hit[1]
+		pointer.on_panel = true
+		pointer.hit_distance = minf(pointer.hit_distance, distance)
+		if distance < nearest:
+			nearest = distance
+			owner = i
+	# While a button is held, the pointer that pressed it keeps the cursor: the
+	# other hand drifting onto the quad must not let go of it.
+	if _secure_button != HandGestures.Click.NONE:
+		var holder := _pointers[_secure_press_pointer]
+		if not holder.active or not holder.on_panel or not holder.pressed:
+			_release_secure_button()
+		else:
+			owner = _secure_press_pointer
+	if _secure_button == HandGestures.Click.NONE:
+		# Otherwise, as with the panel cursor: a press on the quad takes the cursor
+		# (the other hand can always take over with a pinch), and between presses it
+		# stays with whoever had it while that one still aims at the quad.
+		var pressing := -1
+		for i: int in [1, 0]:
+			var p := _pointers[i]
+			if p.on_panel and p.just_pressed and p.button != HandGestures.Click.NONE:
+				pressing = i
+				break
+		if pressing >= 0:
+			owner = pressing
+		elif _secure_cursor_pointer >= 0 and _pointers[_secure_cursor_pointer].on_panel:
+			owner = _secure_cursor_pointer
+	_secure_cursor_pointer = owner
+	if owner < 0:
+		return
+	var pointer := _pointers[owner]
+	var spot := (hits[owner] * Vector2(_secure_pixels)).floor()
+	var pixel := _secure_origin + Vector2i(clampi(int(spot.x), 0, _secure_pixels.x - 1), clampi(int(spot.y), 0, _secure_pixels.y - 1))
+	MouseInput.move_to(pixel)
+	if _secure_button == HandGestures.Click.NONE and pointer.just_pressed and pointer.button != HandGestures.Click.NONE:
+		_secure_button = pointer.button
+		_secure_press_pointer = owner
+		MouseInput.set_button(_secure_button as MouseInput.Button, true)
+		print("[secure] %s в %s на защищённом столе" % [CLICK_LABELS[_secure_button], pixel])
+
+
+func _release_secure_button() -> void:
+	if _secure_button != HandGestures.Click.NONE:
+		MouseInput.set_button(_secure_button as MouseInput.Button, false)
+		_secure_button = HandGestures.Click.NONE
 
 
 ## Moves the joint spheres of one hand; returns how many joints have a valid position.

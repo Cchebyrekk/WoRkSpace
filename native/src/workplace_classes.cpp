@@ -2,11 +2,14 @@
 
 #include "win_backend.h"
 
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rd_texture_view.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/core/class_db.hpp>
+
+#include <vector>
 
 namespace godot {
 
@@ -175,6 +178,8 @@ void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll_horizontal", "delta"), &MouseInput::scroll_horizontal);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("press_keys", "virtual_keys"), &MouseInput::press_keys);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("set_key", "virtual_key", "pressed"), &MouseInput::set_key);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("is_agent_connected"), &MouseInput::is_agent_connected);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("is_secure_desktop_active"), &MouseInput::is_secure_desktop_active);
 
 	BIND_ENUM_CONSTANT(BUTTON_LEFT);
 	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
@@ -216,6 +221,14 @@ void MouseInput::set_key(int p_virtual_key, bool p_pressed) {
 	workplace::key_event(static_cast<uint16_t>(p_virtual_key), p_pressed);
 }
 
+bool MouseInput::is_agent_connected() {
+	return workplace::agent_connected();
+}
+
+bool MouseInput::is_secure_desktop_active() {
+	return workplace::secure_desktop_active();
+}
+
 void GlobalHotkey::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start", "ctrl", "alt", "shift", "virtual_key"), &GlobalHotkey::start);
 	ClassDB::bind_method(D_METHOD("stop"), &GlobalHotkey::stop);
@@ -247,6 +260,53 @@ void GlobalHotkey::stop() {
 
 bool GlobalHotkey::consume_pressed() {
 	return backend != nullptr && backend->consume_pressed();
+}
+
+void SecureDesktop::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("update"), &SecureDesktop::update);
+	ClassDB::bind_method(D_METHOD("get_texture"), &SecureDesktop::get_texture);
+	ClassDB::bind_method(D_METHOD("get_frame_size"), &SecureDesktop::get_frame_size);
+	ClassDB::bind_method(D_METHOD("get_frame_origin"), &SecureDesktop::get_frame_origin);
+}
+
+bool SecureDesktop::update() {
+	std::vector<uint8_t> buffer;
+	int32_t width = 0;
+	int32_t height = 0;
+	int32_t origin_x = 0;
+	int32_t origin_y = 0;
+	uint32_t sequence = last_sequence;
+	if (!workplace::read_secure_frame(sequence, width, height, origin_x, origin_y, buffer)) {
+		return false;
+	}
+	last_sequence = sequence;
+	PackedByteArray data;
+	data.resize(static_cast<int64_t>(buffer.size()));
+	memcpy(data.ptrw(), buffer.data(), buffer.size());
+	Ref<Image> image = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
+	if (image.is_null()) {
+		return false;
+	}
+	if (texture.is_null() || frame_size != Vector2i(width, height)) {
+		texture = ImageTexture::create_from_image(image);
+	} else {
+		texture->update(image);
+	}
+	frame_size = Vector2i(width, height);
+	frame_origin = Vector2i(origin_x, origin_y);
+	return true;
+}
+
+Ref<ImageTexture> SecureDesktop::get_texture() const {
+	return texture;
+}
+
+Vector2i SecureDesktop::get_frame_size() const {
+	return frame_size;
+}
+
+Vector2i SecureDesktop::get_frame_origin() const {
+	return frame_origin;
 }
 
 } // namespace godot

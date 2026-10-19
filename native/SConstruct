@@ -27,3 +27,22 @@ library = env.SharedLibrary(
 
 env.NoCache(library)
 Default(library)
+
+# workplace_agent.exe (see agent/agent.cpp): a plain Win32 program, no Godot.
+# Static C runtime, so that it runs as SYSTEM without anything else installed;
+# Windows subsystem, so that no console window appears in the user's session.
+agent_env = Environment(TARGET_ARCH="x86_64", tools=["msvc", "mslink"])
+agent_env.Append(CPPPATH=["src/"])
+agent_env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE"])
+agent_env.Append(CXXFLAGS=["/std:c++17", "/EHsc", "/MT", "/O2", "/W3"])
+agent_env.Append(LINKFLAGS=["/SUBSYSTEM:WINDOWS", "/ENTRY:wmainCRTStartup"])
+agent_env.Append(LIBS=["user32", "advapi32", "wtsapi32", "d3d11", "dxgi"])
+agent = agent_env.Program(
+    "../bin/workplace_agent.exe",
+    [
+        agent_env.Object("agent/agent.obj", "agent/agent.cpp"),
+        agent_env.Object("agent/secure_capture.obj", "agent/secure_capture.cpp"),
+        agent_env.Object("agent/input_events_agent.obj", "src/input_events.cpp"),
+    ],
+)
+Default(agent)

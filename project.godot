@@ -15,6 +15,10 @@ run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Mobile")
 config/icon="res://icon.svg"
 
+[debug]
+
+file_logging/max_log_files=20
+
 [display]
 
 window/stretch/mode="canvas_items"
@@ -36,7 +40,3 @@ openxr/startup_alert=false
 openxr/extensions/hand_tracking=true
 openxr/extensions/hand_interaction_profile=true
 shaders/enabled=true
-
-[debug]
-
-file_logging/max_log_files=20

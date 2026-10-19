@@ -1,9 +1,11 @@
 #pragma once
 
+#include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 
 namespace workplace {
 class CaptureBackend;
@@ -76,6 +78,10 @@ public:
 	// Windows virtual-key codes pressed in order and released in reverse, e.g. [0x11, 0x5A] for Ctrl+Z.
 	static void press_keys(const PackedInt32Array &p_virtual_keys);
 	static void set_key(int p_virtual_key, bool p_pressed);
+	// True while input goes through workplace_agent.exe (elevated windows, secure desktop).
+	static bool is_agent_connected();
+	// True while the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del). Poll each frame.
+	static bool is_secure_desktop_active();
 };
 
 // System-wide keyboard shortcut that works while another window has focus.
@@ -95,6 +101,30 @@ public:
 	void stop();
 	// True once per press; poll it every frame.
 	bool consume_pressed();
+};
+
+// The secure desktop's picture (UAC prompt, lock screen, Ctrl+Alt+Del), captured
+// by the agent and shared through memory. The app shows it in VR while
+// MouseInput.is_secure_desktop_active() is true, and maps clicks onto it with the
+// frame's origin and size (virtual-desktop pixels).
+class SecureDesktop : public RefCounted {
+	GDCLASS(SecureDesktop, RefCounted)
+
+	uint32_t last_sequence = 0xFFFFFFFF; // anything but a real sequence, so the first frame reads
+	Ref<ImageTexture> texture;
+	Vector2i frame_size;
+	Vector2i frame_origin;
+
+protected:
+	static void _bind_methods();
+
+public:
+	// Reads the latest frame if a new one is ready; true when the texture changed.
+	bool update();
+	Ref<ImageTexture> get_texture() const;
+	// The captured monitor's size in pixels and its top-left on the virtual desktop.
+	Vector2i get_frame_size() const;
+	Vector2i get_frame_origin() const;
 };
 
 } // namespace godot
