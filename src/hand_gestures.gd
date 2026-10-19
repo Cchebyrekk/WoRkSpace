@@ -6,6 +6,8 @@ extends RefCounted
 ##   thumb tip + index tip                    -> left button
 ##   thumb tip + middle tip                   -> right button
 ##   thumb tip against the side of the index  -> middle button
+##   (the defaults: since 20.10.2026 any touch of Contact can make any button,
+##   see Settings.left_contact and GestureCatalog)
 ##   index and middle straight and pointing up, thumb out to the side, ring
 ##   finger curled                            -> scroll disc (see ScrollDisc)
 ##
@@ -20,6 +22,9 @@ extends RefCounted
 ## could not trigger it reliably and asked for the side touch instead.
 
 enum Click { NONE = -1, LEFT = 0, RIGHT = 1, MIDDLE = 2 }
+## The thumb touching: a fingertip or the side of the index finger.
+enum Contact { INDEX = 0, MIDDLE = 1, RING = 2, PINKY = 3, SIDE = 4 }
+const CONTACT_COUNT := 5
 
 
 ## Every threshold and delay is tunable in VR (settings panel in main.gd).
@@ -71,6 +76,12 @@ class Settings:
 	var grab_mode := 0
 	## Fist: the tips of all four fingers nearer the palm than this.
 	var fist_curl := 0.07
+	## Which touch makes which button (Contact, -1 = the button is off). The user
+	## picks them in the settings (GestureCatalog); a touch bound to no button does
+	## nothing at all. Ring and little fingertips use the pinch thresholds.
+	var left_contact := 0  # Contact.INDEX
+	var right_contact := 1  # Contact.MIDDLE
+	var middle_contact := 4  # Contact.SIDE
 
 
 ## One frame of hand data. Distances in metres; `*_align` are cosines between the
@@ -79,8 +90,13 @@ class Frame:
 	var time := 0.0
 	var thumb_index := 1.0
 	var thumb_middle := 1.0
+	var thumb_ring := 1.0
+	var thumb_pinky := 1.0
 	## Thumb tip to the first segment (knuckle to middle joint) of the index finger.
 	var thumb_side := 1.0
+	## The scroll pose as decided by the caller (a pose the user picked: 1 held,
+	## 0 not), or -1 to use the built-in scroll pose below.
+	var scroll_pose := -1
 	var index_straightness := 0.0
 	var middle_straightness := 0.0
 	var index_align := 0.0
@@ -108,18 +124,17 @@ class Output:
 
 
 enum _State { IDLE, PENDING, PRESSED, TAP, DISC_PENDING, DISC, BLOCKED }
-enum _Contact { INDEX, MIDDLE, SIDE }
 
 var settings := Settings.new()
 
 var _state := _State.IDLE
 var _since := 0.0
 var _button := Click.NONE
-var _in := [false, false, false]
+var _in := [false, false, false, false, false]
 ## Deepest contact of each kind during the recognition window, as distance / press threshold.
-var _depth := [INF, INF, INF]
+var _depth := [INF, INF, INF, INF, INF]
 ## Last time each contact's distance was beyond `approach` (the finger was open).
-var _open_time := [0.0, 0.0, 0.0]
+var _open_time := [0.0, 0.0, 0.0, 0.0, 0.0]
 var _pose := false
 
 
@@ -127,21 +142,25 @@ var _pose := false
 func reset() -> void:
 	_state = _State.IDLE
 	_button = Click.NONE
-	_in = [false, false, false]
+	_in = [false, false, false, false, false]
 	_pose = false
 
 
 func update(frame: Frame) -> Output:
 	var s := settings
-	var distances := [frame.thumb_index, frame.thumb_middle, frame.thumb_side]
-	var presses := [s.pinch_press, s.pinch_press, s.side_press]
-	var releases := [s.pinch_release, s.pinch_release, s.side_release]
-	for contact in 3:
-		_in[contact] = distances[contact] < (releases[contact] if _in[contact] else presses[contact])
+	var distances := [frame.thumb_index, frame.thumb_middle, frame.thumb_ring, frame.thumb_pinky, frame.thumb_side]
+	var any_in := false
+	for contact in CONTACT_COUNT:
+		var side := contact == Contact.SIDE
+		var press := s.side_press if side else s.pinch_press
+		var release := s.side_release if side else s.pinch_release
+		# A touch that makes no button is ignored, so it can never click by accident.
+		_in[contact] = _button_of(contact) != Click.NONE \
+				and distances[contact] < (release if _in[contact] else press)
 		if distances[contact] > s.approach:
 			_open_time[contact] = frame.time
-	var any_in: bool = _in[0] or _in[1] or _in[2]
-	_pose = _is_disc_pose(frame)
+		any_in = any_in or _in[contact]
+	_pose = _is_disc_pose(frame) if frame.scroll_pose < 0 else frame.scroll_pose > 0
 
 	# A tap is held for exactly one frame.
 	if _state == _State.TAP:
@@ -154,13 +173,13 @@ func update(frame: Frame) -> Output:
 			if any_in:
 				_state = _State.PENDING
 				_since = frame.time
-				_depth = [INF, INF, INF]
-				_track_depth(distances, presses)
+				_depth = [INF, INF, INF, INF, INF]
+				_track_depth(distances)
 			elif _pose:
 				_state = _State.DISC_PENDING
 				_since = frame.time
 		_State.PENDING:
-			_track_depth(distances, presses)
+			_track_depth(distances)
 			if not any_in:
 				# Opened again before the window ran out: a quick click.
 				_button = _decide()
@@ -200,32 +219,40 @@ func update(frame: Frame) -> Output:
 	return output
 
 
-func _track_depth(distances: Array, presses: Array) -> void:
-	for contact in 3:
+func _track_depth(distances: Array) -> void:
+	for contact in CONTACT_COUNT:
 		if _in[contact]:
-			_depth[contact] = minf(_depth[contact], distances[contact] / presses[contact])
+			var press := settings.side_press if contact == Contact.SIDE else settings.pinch_press
+			_depth[contact] = minf(_depth[contact], distances[contact] / press)
 
 
 ## When the first of the contacts in the window started closing.
 func _anchor_time() -> float:
 	var earliest := INF
-	for contact in 3:
+	for contact in CONTACT_COUNT:
 		if _depth[contact] < INF:
 			earliest = minf(earliest, _open_time[contact])
 	return earliest
 
 
+## The button of the deepest contact in the window.
 func _decide() -> Click:
-	var best := _Contact.INDEX
-	for contact in 3:
-		if _depth[contact] < _depth[best]:
+	var best := -1
+	for contact in CONTACT_COUNT:
+		if _depth[contact] < INF and (best < 0 or _depth[contact] < _depth[best]):
 			best = contact
-	match best:
-		_Contact.MIDDLE:
-			return Click.RIGHT
-		_Contact.SIDE:
-			return Click.MIDDLE
-	return Click.LEFT
+	return _button_of(best) if best >= 0 else Click.NONE
+
+
+## Which button a contact makes under the current bindings (NONE if it makes none).
+func _button_of(contact: int) -> Click:
+	if contact == settings.left_contact:
+		return Click.LEFT
+	if contact == settings.right_contact:
+		return Click.RIGHT
+	if contact == settings.middle_contact:
+		return Click.MIDDLE
+	return Click.NONE
 
 
 func _is_disc_pose(frame: Frame) -> bool:

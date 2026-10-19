@@ -20,6 +20,8 @@ func _init() -> void:
 	_test_panel_layout()
 	_test_layout_edit()
 	_test_hand_gestures()
+	_test_hand_pose()
+	_test_gesture_catalog()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -502,6 +504,173 @@ func _disc_pose(time: float, ring_to_palm := 0.05, align := 0.95, together := 0.
 	frame.thumb_spread = 0.08
 	frame.ring_to_palm = ring_to_palm
 	return frame
+
+
+## Joints of a synthesized hand moved and turned somewhere in the room, the way the
+## tracker would report them.
+func _placed(joints: PackedVector3Array, where: Transform3D) -> PackedVector3Array:
+	var result := PackedVector3Array()
+	for joint in joints:
+		result.append(where * joint)
+	return result
+
+
+func _test_hand_pose() -> void:
+	var open := HandPose.synthesize([0.0, 0.0, 0.0, 0.0, 0.0], 0.6)
+	var fist := HandPose.synthesize([0.7, 1.0, 1.0, 1.0, 1.0], 0.1)
+	var open_features := HandPose.features(open)
+	var fist_features := HandPose.features(fist)
+	_check(open_features.size() == HandPose.FEATURE_COUNT, "признаков столько, сколько объявлено")
+	_check(open_features[1] > 0.95 and fist_features[1] < 0.8, "прямота указательного: раскрытая %.2f, кулак %.2f" % [open_features[1], fist_features[1]])
+	_check(fist_features[6] < open_features[6] - 0.03, "согнутый палец ближе к ладони (%.3f против %.3f)" % [fist_features[6], open_features[6]])
+	_check(open_features[11] > 0.9 and fist_features[11] < 0.5, "палец вдоль кисти: %.2f / %.2f" % [open_features[11], fist_features[11]])
+
+	# Where the hand is and how it is turned does not matter.
+	var moved := HandPose.features(_placed(open, Transform3D(Basis(Vector3(0.3, 1.0, 0.2).normalized(), 1.1), Vector3(0.4, 1.3, -0.5))))
+	var same := true
+	for f in HandPose.FEATURE_COUNT:
+		same = same and absf(moved[f] - open_features[f]) < 0.001
+	_check(same, "признаки не зависят от положения и поворота руки")
+	_check(HandPose.features(PackedVector3Array()).is_empty(), "без суставов — нет признаков")
+
+	# Recording: frames around one pose make a template that takes it and refuses others.
+	var samples: Array[PackedFloat32Array] = []
+	for k in 60:
+		var curls: Array[float] = [0.1, 0.5 + 0.1 * sin(k * 0.7), 0.0, 0.0, 0.0]
+		samples.append(HandPose.features(HandPose.synthesize(curls, 0.85)))
+	_check(HandPose.record(samples.slice(0, 20), "custom:1", "x") == null, "слишком короткая запись — нет шаблона")
+	var template := HandPose.record(samples, "custom:1", "Своя поза 1")
+	_check(template != null and template.is_valid(), "шаблон из записи")
+	_check(HandPose.distance(template, samples[7]) <= 1.0, "записанная поза узнаётся (%.2f)" % HandPose.distance(template, samples[7]))
+	_check(HandPose.distance(template, open_features) > 1.0, "раскрытая рука — не эта поза (%.2f)" % HandPose.distance(template, open_features))
+	_check(HandPose.distance(template, fist_features) > 1.0, "кулак — не эта поза")
+	var narrowest := INF
+	for f in HandPose.FEATURE_COUNT:
+		narrowest = minf(narrowest, template.tolerance[f] / HandPose.MIN_TOLERANCE[f])
+	_check(narrowest >= 0.999, "допуск не уже минимального")
+	var stored := HandPose.Template.from_dictionary(template.to_dictionary())
+	_check(stored.id == "custom:1" and stored.name == "Своя поза 1" and stored.is_valid()
+			and is_equal_approx(HandPose.distance(stored, samples[3]), HandPose.distance(template, samples[3])), "шаблон переживает сохранение")
+	_check(HandPose.overlap(template, samples) > 0.9, "своя запись почти вся в своём шаблоне")
+	var fists: Array[PackedFloat32Array] = [fist_features, fist_features]
+	_check(HandPose.overlap(template, fists) == 0.0, "кулак шаблону чужой")
+
+	# The matcher: dwell to come on, grace over a short loss, off after a longer one.
+	var matcher := HandPose.Matcher.new()
+	var hit := samples[0]
+	_check(not matcher.update(template, hit, 0.0), "сразу не включается")
+	_check(not matcher.update(template, hit, 0.05), "до выдержки — нет")
+	_check(matcher.update(template, hit, 0.15), "после выдержки — поза")
+	_check(matcher.update(template, open_features, 0.3), "короткий провал позу не снимает")
+	_check(matcher.update(template, PackedFloat32Array(), 0.45), "короткая потеря слежения — тоже")
+	_check(not matcher.update(template, open_features, 0.7), "долгий провал снимает позу")
+	_check(not matcher.update(template, hit, 0.75), "после снятия снова нужна выдержка")
+
+	# Built-in locomotion sign: the values the user showed are it; an open hand, a fist and the scroll pose are not.
+	var sign := GestureCatalog.move_template()
+	var shown := PackedFloat32Array([0.98, 0.66, 1.0, 1.0, 0.99, 0.08, 0.069, 0.118, 0.11, 0.093,
+			0.92, 0.25, 0.97, 0.99, 0.98, 0.087, 0.018, 0.034, 0.05])
+	_check(HandPose.distance(sign, shown) <= 1.0, "знак движения из журнала узнаётся (%.2f)" % HandPose.distance(sign, shown))
+	var shown_right := PackedFloat32Array([0.99, 0.64, 1.0, 1.0, 0.99, 0.101, 0.073, 0.12, 0.114, 0.099,
+			0.54, 0.43, 0.94, 0.94, 0.94, 0.096, 0.021, 0.038, 0.06])
+	_check(HandPose.distance(sign, shown_right) <= 1.0, "и правой рукой (%.2f)" % HandPose.distance(sign, shown_right))
+	var open_logged := PackedFloat32Array([0.99, 1.0, 1.0, 1.0, 0.99, 0.099, 0.112, 0.12, 0.112, 0.1,
+			0.8, 0.99, 1.0, 0.99, 0.99, 0.032, 0.023, 0.04, 0.06])
+	_check(HandPose.distance(sign, open_logged) > 1.35, "раскрытая рука — не знак, даже с запасом удержания (%.2f)" % HandPose.distance(sign, open_logged))
+	_check(HandPose.distance(sign, fist_features) > 1.35, "кулак — не знак")
+	# One misread finger is forgiven, a clearly different hand is not.
+	var one_off := shown.duplicate()
+	one_off[13] = 0.95 - 0.2 * 1.8  # ring "along" out by 1.8 tolerances
+	_check(HandPose.distance(sign, one_off) <= 1.0, "один сбойный палец не снимает позу (%.2f)" % HandPose.distance(sign, one_off))
+	var two_off := one_off.duplicate()
+	two_off[12] = 0.95 - 0.2 * 1.8
+	_check(HandPose.distance(sign, two_off) > 1.35, "два сбойных — уже не поза")
+	var far_off := shown.duplicate()
+	far_off[13] = 0.95 - 0.2 * 3.0
+	_check(HandPose.distance(sign, far_off) > 1.35, "один, но далеко за допуском — не поза")
+	var old := HandPose.Template.from_dictionary(template.to_dictionary())
+	old.tolerance[12] = 0.05
+	old.widen_to_minimum()
+	_check(is_equal_approx(old.tolerance[12], HandPose.MIN_TOLERANCE[12]) and is_inf(sign.tolerance[10]), "старые позы расширяются до минимума, «любое» остаётся")
+	var miss := HandPose.describe_miss(sign, open_logged)
+	_check(miss.begins_with("промежуток указательный-средний") or miss.begins_with("указательный"), "в журнал — признак, вышедший за допуск: " + miss)
+	_check(HandPose.describe_miss(sign, shown).begins_with("в пределах"), "поза в допуске — так и сказано")
+	_check(HandPose.distance(sign, HandPose.features(GestureCatalog.preview_joints("pose:scroll", []))) > 1.35, "поза прокрутки — не знак")
+
+	# Previews: every built-in gesture has a whole hand; a left hand is mirrored to look like a right one.
+	for id: String in GestureCatalog.TOUCHES.keys() + GestureCatalog.POSES.keys():
+		_check(GestureCatalog.preview_joints(id, []).size() == HandPose.JOINT_COUNT, "превью для " + id)
+	var right_local := HandPose.local_joints(_placed(open, Transform3D(Basis(Vector3.UP, 0.8), Vector3(0.2, 1.2, -0.3))), 1.0)
+	_check(right_local[HandPose.WRIST].length() < 0.0001 and right_local[HandPose.MIDDLE_KNUCKLE].y > 0.08
+			and absf(right_local[HandPose.MIDDLE_KNUCKLE].x) < 0.001, "превью: запястье в нуле, пальцы вверх")
+	_check(right_local[HandPose.INDEX_KNUCKLE].x > 0.0, "превью: большой палец со стороны +X")
+	var mirror := Basis.FLIP_X
+	var left_local := HandPose.local_joints(_placed(open, Transform3D(mirror, Vector3.ZERO)), -1.0)
+	_check(left_local[HandPose.INDEX_KNUCKLE].x > 0.0 and absf(left_local[HandPose.INDEX_KNUCKLE].x - right_local[HandPose.INDEX_KNUCKLE].x) < 0.001,
+			"левая рука в превью выглядит как правая")
+	# A touch preview really touches.
+	var touch := GestureCatalog.preview_joints("touch:ring", [])
+	_check(touch[HandPose.FINGERS[0][3]].distance_to(touch[HandPose.FINGERS[3][3]]) < 0.001, "превью касания: большой у безымянного")
+
+
+func _test_gesture_catalog() -> void:
+	var bindings := GestureCatalog.sanitize({}, [])
+	_check(bindings == GestureCatalog.DEFAULTS, "без настроек — назначения по умолчанию")
+	# Taking a touch another button has: the two swap.
+	var swapped := GestureCatalog.assign(bindings, "left", "touch:middle")
+	_check(swapped["left"] == "touch:middle" and swapped["right"] == "touch:index", "занятое касание: кнопки меняются (%s)" % swapped)
+	_check(swapped["middle"] == "touch:side", "третья кнопка не тронута")
+	var off := GestureCatalog.assign(bindings, "middle", GestureCatalog.OFF)
+	_check(off["middle"] == GestureCatalog.OFF and off["left"] == "touch:index", "выключение ни у кого ничего не забирает")
+	var shared := GestureCatalog.assign(bindings, "scroll", "pose:move")
+	_check(shared["scroll"] == "pose:move" and shared["move"] == "pose:move", "позу могут делить несколько действий")
+
+	var custom := HandPose.Template.new()
+	custom.id = "custom:3"
+	custom.name = "Ладонь"
+	var customs: Array[HandPose.Template] = [custom]
+	var with_custom := GestureCatalog.assign(bindings, "turn", "custom:3")
+	_check(GestureCatalog.sanitize(with_custom, customs)["turn"] == "custom:3", "своя поза остаётся, пока она есть")
+	_check(GestureCatalog.sanitize(with_custom, [])["turn"] == GestureCatalog.OFF, "удалённая поза — действие выключено")
+	_check(GestureCatalog.sanitize({"left": "pose:fist"}, [])["left"] == GestureCatalog.OFF, "поза на щелчке недопустима")
+	var touch_names: Array = GestureCatalog.options("left", customs).map(func(o: Array) -> String: return o[0])
+	_check(touch_names.has("touch:pinky") and not touch_names.has("custom:3") and touch_names.back() == GestureCatalog.OFF,
+			"для щелчка — касания и «выключено»")
+	var pose_names: Array = GestureCatalog.options("move", customs).map(func(o: Array) -> String: return o[0])
+	_check(pose_names.has("custom:3") and pose_names.has("pose:fist") and not pose_names.has("touch:index"), "для движения — позы и свои")
+	_check(GestureCatalog.name_of("custom:3", customs) == "Ладонь" and GestureCatalog.contact_of("touch:side") == HandGestures.Contact.SIDE,
+			"имена и касания")
+
+	# HandGestures with other bindings: the ring finger clicks left, the index does nothing.
+	var gestures := HandGestures.new()
+	gestures.settings.left_contact = HandGestures.Contact.RING
+	gestures.settings.right_contact = -1
+	var frame := _hand(0.0, 0.012)
+	var out := gestures.update(frame)
+	_check(out.button == HandGestures.Click.NONE and not out.pending, "неназначенное касание ничего не делает")
+	frame = _hand(0.5, 0.06)
+	frame.thumb_ring = 0.012
+	gestures.update(frame)
+	frame = _hand(0.7, 0.06)
+	frame.thumb_ring = 0.012
+	out = gestures.update(frame)
+	_check(out.button == HandGestures.Click.LEFT, "безымянный назначен на левую — левая")
+	frame = _hand(0.9, 0.06, 0.012)
+	frame.thumb_ring = 0.06
+	gestures.update(frame)
+	out = gestures.update(_hand(1.1, 0.06, 0.012))
+	_check(out.button == HandGestures.Click.NONE, "правая выключена — средний не щёлкает")
+	# The scroll pose decided by the caller.
+	var scrolling := HandGestures.new()
+	var plain := _hand(2.0, 0.09, 0.09, 0.07)
+	plain.scroll_pose = 1
+	scrolling.update(plain)
+	plain = _hand(2.3, 0.09, 0.09, 0.07)
+	plain.scroll_pose = 1
+	_check(scrolling.update(plain).disc, "своя поза прокрутки включает прокрутку")
+	var refused := _disc_pose(3.0)
+	refused.scroll_pose = 0
+	_check(not HandGestures.new().update(refused).disc_pending, "прокрутка выключена — встроенная поза не действует")
 
 
 func _test_hand_gestures() -> void:

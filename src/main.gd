@@ -171,12 +171,17 @@ const PANEL_SCALE_MIN := 0.5
 const PANEL_SCALE_MAX := 2.5
 ## A fist lets go only once the fingers open this much further than it took to close.
 const FIST_RELEASE_MARGIN := 0.015
+## A thumb this straight and this far from the palm is up, so the hand is no fist
+## (logged 20.10.2026: thumb up 0.98 / 94 mm, thumb over a fist 0.84-0.89 / 64-69 mm).
+const FIST_DWELL_SEC := 0.15
+const FIST_THUMB_UP_STRAIGHT := 0.94
+const FIST_THUMB_UP_DISTANCE := 0.082
 ## A monitor's menu floats this far in front of its panel (metres).
 const MONITOR_MENU_FORWARD := 0.25
 ## Driver section of the settings panel: where it is, the instance limit (as in
 ## tools/vdd_helper.ps1) and how long "Применить" has to be held.
 ## Settings panel tabs, and which tab each tunable is on (the rest are on the first).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер"]
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения"]
 const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
@@ -354,6 +359,19 @@ class Pointer:
 	var contact_distances := Vector3.ONE
 	## The scroll pose's measurements, for calibrating it (see ExtraGestures.calibrate_pose).
 	var pose_features := PackedFloat32Array()
+	## The hand's joints this frame (tracker space) and its shape (HandPose
+	## features); empty while the hand is not tracked.
+	var hand_joints := PackedVector3Array()
+	var hand_features := PackedFloat32Array()
+	## A recogniser per pose action ("scroll", "grab", "move", "turn") and which of
+	## those actions' poses this hand holds now (GestureCatalog bindings).
+	var pose_matchers := {}
+	var poses := {}
+	## The hand is within range of one of the user's own bound poses (before its
+	## dwell too): the built-in fist then stays off, the recorded pose wins.
+	var near_own_pose := false
+	## When the built-in fist started forming (NAN when it is not), for its dwell.
+	var fist_since := NAN
 	var menu := ExtraGestures.Radial.new()
 	var menu_open := false
 	var menu_selected := -1
@@ -544,6 +562,37 @@ var _menu_labels: Array = [[], []]
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
+## What each action is bound to (GestureCatalog), the poses the user recorded and
+## the built-in locomotion sign. Saved in [bindings] and [poses].
+var _bindings: Dictionary = GestureCatalog.DEFAULTS.duplicate()
+var _custom_poses: Array[HandPose.Template] = []
+var _next_custom_pose := 1
+var _move_template := GestureCatalog.move_template()
+## Which hand moves with the movement pose (0 left, 1 right); the other one turns.
+var _move_hand := 0
+## The "Назначения" tab: a choice button and a preview per action, the open list
+## of choices (one action at a time) and the user's own poses.
+var _binding_buttons := {}
+var _binding_previews := {}
+var _binding_menu_action := ""
+var _binding_menu_title: Label3D
+var _binding_options: Array[VrButton] = []
+var _binding_option_previews: Array[HandPreview] = []
+var _binding_option_ids: Array[String] = []
+var _move_hand_button: VrButton
+var _pose_status: Label3D
+var _pose_rows: Array[Node3D] = []
+## Recording a pose: which hand (-1 = not recording), until when the countdown
+## or the recording runs, and what was recorded.
+var _pose_recording := -1
+var _pose_recording_until := 0.0
+var _pose_recording_started := false
+var _pose_record_samples: Array[PackedFloat32Array] = []
+var _pose_record_joints: Array[PackedVector3Array] = []
+const POSE_COUNTDOWN_SEC := 3.0
+const POSE_RECORD_SEC := 5.0
+const BINDING_MENU_ROWS := 12
+const POSE_ROWS := 6
 var _engagement_settings := HandEngagement.Settings.new()
 var _disc_rings: Array[MeshInstance3D] = []
 var _disc_markers: Array[MeshInstance3D] = []
@@ -553,6 +602,11 @@ var _settings_values: Array[Label3D] = []
 var _cursor_owner := -1
 var _cursor_press_armed := false
 var _recentered := false
+## Temporary: log every hand's pose ([pose]) to design the locomotion gesture from
+## the sign the user shows (20.10.2026). Turn off once the gesture is in.
+const POSE_LOG := false
+const POSE_LOG_STEP_SEC := 0.25
+var _pose_log_next: Array[float] = [0.0, 0.0]
 ## Seconds since focus while waiting for a tracked head to align the scene; -1 when not waiting.
 var _recenter_wait_sec := -1.0
 ## Align anyway after this long without a tracked head.
@@ -707,10 +761,14 @@ func _process(delta: float) -> void:
 					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation), pointer.fist_mm]
 		if pointer.grab_panel != null:
 			lines[-1] += " | %s %s" % ["переношу" if pointer.grab_kind == GRAB_MOVE else "меняю размер", pointer.grab_panel.monitor_name]
+		for action: String in ["move", "turn"]:
+			if pointer.poses.get(action, false):
+				lines[-1] += " | %s (%s)" % [GestureCatalog.label_of(action).to_upper(), GestureCatalog.name_of(_bindings[action], _custom_poses)]
 	_probe_mark(2)
 
 	_update_two_hand_gestures()
 	_update_calibration()
+	_update_pose_recording()
 	_update_grabs(delta)
 	_place_monitor_menu()
 	_update_buttons(delta)
@@ -852,6 +910,15 @@ func _warm_up_key(node: Node) -> String:
 		for i in instance.mesh.get_surface_count():
 			materials.append(str(instance.get_active_material(i)))
 		return "mesh|%s|%s|%s" % [instance.mesh.get_class(), instance.cast_shadow, "|".join(materials)]
+	if node is MultiMeshInstance3D:
+		# Hand previews and the like: by mesh kind and material settings (each
+		# instance has its own material object, but the same shader).
+		var multi := node as MultiMeshInstance3D
+		if multi.multimesh == null or multi.multimesh.mesh == null or multi.multimesh.instance_count == 0:
+			return ""
+		var material := multi.material_override as BaseMaterial3D
+		return "multimesh|%s|%s|%s|%s" % [multi.multimesh.mesh.get_class(), multi.multimesh.use_colors,
+				material.shading_mode if material != null else -1, material.vertex_color_use_as_albedo if material != null else false]
 	return ""
 
 
@@ -885,6 +952,347 @@ func _probe_pipelines() -> String:
 			described.append("%s %d" % [kinds[i][0], count - _probe_pipelines_seen[i]])
 			_probe_pipelines_seen[i] = count
 	return ("собрано шейдеров: " + ", ".join(described)) if not described.is_empty() else "шейдеры не собирались"
+
+
+## Pose actions: which bound poses this hand holds now; a hand at rest holds
+## nothing. Moving and turning split the hands (`_move_hand` moves, the other
+## turns) only when both have the same gesture; with different gestures either
+## hand does either (20.10.2026: a pose recorded with the right hand and bound to
+## moving waited for the left hand, and the user saw it as broken). The built-in
+## fist and scroll pose are recognised elsewhere (main.gd, HandGestures).
+func _update_bound_poses(index: int, pointer: Pointer, time: float, resting: bool) -> void:
+	var held := {}
+	var split: bool = _bindings.get("move") == _bindings.get("turn")
+	pointer.near_own_pose = false
+	for action: String in ["scroll", "grab", "move", "turn"]:
+		if split and ((action == "move" and index != _move_hand) or (action == "turn" and index == _move_hand)):
+			continue
+		var id: String = _bindings.get(action, GestureCatalog.OFF)
+		var template := _pose_template(id)
+		if template == null:
+			continue
+		if id.begins_with("custom:") and not resting and HandPose.distance(template, pointer.hand_features) <= 1.0:
+			pointer.near_own_pose = true
+		if not pointer.pose_matchers.has(action):
+			pointer.pose_matchers[action] = HandPose.Matcher.new()
+		var matcher: HandPose.Matcher = pointer.pose_matchers[action]
+		held[action] = matcher.update(template, PackedFloat32Array() if resting else pointer.hand_features, time)
+		if id.begins_with("custom:") and held[action]:
+			pointer.near_own_pose = true
+	_set_poses(index, pointer, held)
+
+
+## Stores the poses held and logs each one that starts or ends; on an end, which
+## feature left its range (for tuning the tolerances).
+func _set_poses(index: int, pointer: Pointer, held: Dictionary) -> void:
+	for action: String in ["scroll", "grab", "move", "turn"]:
+		var now: bool = held.get(action, false)
+		if now == bool(pointer.poses.get(action, false)) or action not in ["move", "turn"]:
+			continue
+		var why := ""
+		var template := _pose_template(_bindings.get(action, GestureCatalog.OFF))
+		if not now and template != null:
+			why = " (%s)" % HandPose.describe_miss(template, pointer.hand_features) if not pointer.hand_features.is_empty() else " (рука не видна)"
+		print("[gesture] %s: %s — %s%s" % [SIDE_LABELS[index], GestureCatalog.label_of(action).to_lower(),
+				("«%s»" % GestureCatalog.name_of(_bindings[action], _custom_poses)) if now else "отпущено", why])
+	pointer.poses = held
+
+
+## The template for a pose id, or null for "off" and for the built-in poses that
+## have their own recognisers.
+func _pose_template(id: String) -> HandPose.Template:
+	if id == "pose:move":
+		return _move_template
+	return GestureCatalog.find(id, _custom_poses)
+
+
+## After the bindings change (or load): keeps them valid and hands the touches to
+## the click recogniser.
+func _apply_bindings() -> void:
+	_bindings = GestureCatalog.sanitize(_bindings, _custom_poses)
+	_gesture_settings.left_contact = GestureCatalog.contact_of(_bindings["left"])
+	_gesture_settings.right_contact = GestureCatalog.contact_of(_bindings["right"])
+	_gesture_settings.middle_contact = GestureCatalog.contact_of(_bindings["middle"])
+	for pointer in _pointers:
+		pointer.gestures.reset()
+		for matcher: HandPose.Matcher in pointer.pose_matchers.values():
+			matcher.reset()
+
+
+## The "Назначения" tab. Left: each action, its gesture on a button (press it to
+## choose another) and a small hand showing that gesture. Middle: the list of
+## choices for one action, each with its own hand. Right: the user's own poses,
+## recorded with either hand, each with its hand and a delete button.
+func _build_bindings_section(tab: Node3D) -> void:
+	var row := 0
+	for entry: Array in GestureCatalog.ACTIONS:
+		var action: String = entry[0]
+		var y := 0.5 - row * 0.08
+		row += 1
+		var label := _settings_label(entry[1], Vector3(-0.55, y, 0.0), 26, tab)
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		var button := _add_button_to(tab, "", Vector3(-0.33, y, 0.0), Vector2(0.4, 0.06), 0.2)
+		button.activated.connect(_open_binding_menu.bind(action))
+		_binding_buttons[action] = button
+		var preview := HandPreview.new()
+		preview.position = Vector3(-0.07, y, 0.01)
+		tab.add_child(preview)
+		_binding_previews[action] = preview
+	var y_hand := 0.5 - row * 0.08
+	var hand_label := _settings_label("Движение — рука", Vector3(-0.55, y_hand, 0.0), 26, tab)
+	hand_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_move_hand_button = _add_button_to(tab, "", Vector3(-0.33, y_hand, 0.0), Vector2(0.4, 0.06), 0.2)
+	_move_hand_button.activated.connect(_on_move_hand_button)
+	_settings_label("Если у движения и поворота один жест: эта рука\nдвижется, другая поворачивает. Разные жесты — любой рукой",
+			Vector3(-0.33, y_hand - 0.07, 0.0), 20, tab)
+
+	# The list of choices; only the rows in use are shown.
+	_binding_menu_title = _settings_label("", Vector3(0.28, 0.555, 0.0), 22, tab)
+	for i in BINDING_MENU_ROWS:
+		var y := 0.5 - i * 0.07
+		var option := _add_button_to(tab, "", Vector3(0.2, y, 0.0), Vector2(0.36, 0.055), 0.2)
+		option.activated.connect(_on_binding_option.bind(i))
+		option.visible = false
+		_binding_options.append(option)
+		var preview := HandPreview.new(0.06)
+		preview.position = Vector3(0.43, y, 0.01)
+		preview.visible = false
+		tab.add_child(preview)
+		_binding_option_previews.append(preview)
+
+	# Own poses.
+	_settings_label("Свои позы", Vector3(0.75, 0.53, 0.0), 26, tab)
+	_add_button_to(tab, "Записать левой", Vector3(0.63, 0.46, 0.0), Vector2(0.24, 0.06), 0.6).activated.connect(_start_pose_recording.bind(0))
+	_add_button_to(tab, "Записать правой", Vector3(0.88, 0.46, 0.0), Vector2(0.24, 0.06), 0.6).activated.connect(_start_pose_recording.bind(1))
+	_pose_status = _settings_label("Нажмите, покажите позу этой рукой\nи держите её 5 с, слегка двигая рукой", Vector3(0.75, 0.37, 0.0), 20, tab)
+	for i in POSE_ROWS:
+		var pose_row := Node3D.new()
+		pose_row.position = Vector3(0.0, 0.24 - i * 0.085, 0.0)
+		tab.add_child(pose_row)
+		var name_label := _settings_label("", Vector3(0.62, 0.0, 0.0), 24, pose_row)
+		name_label.name = "Name"
+		var preview := HandPreview.new(0.065)
+		preview.name = "Preview"
+		preview.position = Vector3(0.77, 0.0, 0.01)
+		pose_row.add_child(preview)
+		_add_button_to(pose_row, "Удалить", Vector3(0.92, 0.0, 0.0), Vector2(0.14, 0.05), 1.0).activated.connect(_delete_custom_pose.bind(i))
+		_pose_rows.append(pose_row)
+	_refresh_bindings_section()
+
+
+func _refresh_bindings_section() -> void:
+	if _move_hand_button == null:
+		return
+	for action: String in _binding_buttons:
+		var id: String = _bindings.get(action, GestureCatalog.OFF)
+		(_binding_buttons[action] as VrButton).set_text(("» %s «" if action == _binding_menu_action else "%s")
+				% GestureCatalog.name_of(id, _custom_poses))
+		(_binding_previews[action] as HandPreview).set_joints(GestureCatalog.preview_joints(id, _custom_poses))
+	_move_hand_button.set_text("левая" if _move_hand == 0 else "правая")
+	for i in POSE_ROWS:
+		var row := _pose_rows[i]
+		row.visible = i < _custom_poses.size()
+		if row.visible:
+			(row.get_node("Name") as Label3D).text = _custom_poses[i].name
+			(row.get_node("Preview") as HandPreview).set_joints(_custom_poses[i].joints)
+
+
+func _open_binding_menu(action: String) -> void:
+	if _binding_menu_action == action:
+		_close_binding_menu()
+		return
+	_binding_menu_action = action
+	var options := GestureCatalog.options(action, _custom_poses)
+	_binding_option_ids.clear()
+	for i in BINDING_MENU_ROWS:
+		var shown := i < options.size()
+		_binding_options[i].visible = shown
+		if shown:
+			var id: String = options[i][0]
+			_binding_option_ids.append(id)
+			var current: bool = _bindings.get(action) == id
+			_binding_options[i].set_text(("» %s" if current else "%s") % options[i][1])
+			_binding_option_previews[i].set_joints(GestureCatalog.preview_joints(id, _custom_poses))
+		else:
+			_binding_option_previews[i].visible = false
+	_binding_menu_title.text = "%s:" % GestureCatalog.label_of(action)
+	_refresh_bindings_section()
+
+
+func _close_binding_menu() -> void:
+	_binding_menu_action = ""
+	for i in _binding_options.size():
+		_binding_options[i].visible = false
+		_binding_option_previews[i].visible = false
+	if _binding_menu_title != null:
+		_binding_menu_title.text = ""
+	_refresh_bindings_section()
+
+
+func _on_binding_option(row: int) -> void:
+	if _binding_menu_action == "" or row >= _binding_option_ids.size():
+		return
+	var action := _binding_menu_action
+	var before := _bindings.duplicate()
+	_bindings = GestureCatalog.assign(_bindings, action, _binding_option_ids[row])
+	_apply_bindings()
+	_save_settings()
+	for key: String in _bindings:
+		if _bindings[key] != before.get(key):
+			print("[bindings] %s: %s" % [GestureCatalog.label_of(key), GestureCatalog.name_of(_bindings[key], _custom_poses)])
+	_close_binding_menu()
+
+
+func _on_move_hand_button() -> void:
+	_move_hand = 1 - _move_hand
+	_apply_bindings()
+	_save_settings()
+	_refresh_bindings_section()
+	print("[bindings] движение — %s рука, поворот — %s" % ["левая" if _move_hand == 0 else "правая", "правая" if _move_hand == 0 else "левая"])
+
+
+func _start_pose_recording(hand: int) -> void:
+	if _pose_recording >= 0 or _calibrating >= 0:
+		return
+	_close_binding_menu()
+	_pose_recording = hand
+	_pose_recording_started = false
+	_pose_recording_until = Time.get_ticks_msec() / 1000.0 + POSE_COUNTDOWN_SEC
+	_pose_record_samples.clear()
+	_pose_record_joints.clear()
+	print("[poses] запись позы %s рукой: отсчёт" % ["левой", "правой"][hand])
+
+
+## Every frame while recording: a countdown to form the pose, then POSE_RECORD_SEC
+## of the hand's shape; meanwhile the hands control nothing.
+func _update_pose_recording() -> void:
+	if _pose_recording < 0:
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	var hand := ["левой", "правой"][_pose_recording] as String
+	if not _pose_recording_started:
+		if now < _pose_recording_until:
+			_pose_status.text = "Покажите позу %s рукой… %d" % [hand, ceili(_pose_recording_until - now)]
+			return
+		_pose_recording_started = true
+		_pose_recording_until = now + POSE_RECORD_SEC
+	var pointer := _pointers[_pose_recording]
+	if not pointer.hand_features.is_empty():
+		_pose_record_samples.append(pointer.hand_features)
+		_pose_record_joints.append(HandPose.local_joints(pointer.hand_joints, SIDE_SIGNS[_pose_recording]))
+	if now < _pose_recording_until:
+		_pose_status.text = "Запись %s рукой: держите позу… %d\n(кадров %d)" % [hand, ceili(_pose_recording_until - now), _pose_record_samples.size()]
+		return
+	_finish_pose_recording()
+
+
+func _finish_pose_recording() -> void:
+	var hand := _pose_recording
+	_pose_recording = -1
+	var id := "custom:%d" % _next_custom_pose
+	var joints := _pose_record_joints[_pose_record_joints.size() / 2] if not _pose_record_joints.is_empty() else PackedVector3Array()
+	var template := HandPose.record(_pose_record_samples, id, "Своя поза %d" % _next_custom_pose, joints)
+	if template == null:
+		_pose_status.text = "Не записано: рука была видна только %d кадров.\nДержите её перед собой и повторите." % _pose_record_samples.size()
+		print("[poses] не записано: %d кадров" % _pose_record_samples.size())
+		return
+	if _custom_poses.size() >= POSE_ROWS:
+		_custom_poses.pop_front()
+	_custom_poses.append(template)
+	_next_custom_pose += 1
+	var warnings := _pose_warnings(template)
+	_apply_bindings()
+	_save_settings()
+	_refresh_bindings_section()
+	_pose_status.text = "«%s» записана (%s рукой, %d кадров).%s" % [template.name, ["левой", "правой"][hand], _pose_record_samples.size(),
+			("\nПохожа на: " + ", ".join(warnings)) if not warnings.is_empty() else "\nНазначьте её действию слева."]
+	print("[poses] записана «%s»: %d кадров, похожа на: %s; середина %s, допуск %s" % [template.name, _pose_record_samples.size(),
+			", ".join(warnings) if not warnings.is_empty() else "ничто", template.middle, template.tolerance])
+
+
+## Which gestures already in use the recorded frames look like: the built-in
+## fist and scroll pose (by their own rules), an open hand (swipes), the
+## locomotion sign and the other own poses (by template).
+func _pose_warnings(recorded: HandPose.Template) -> PackedStringArray:
+	var warnings: PackedStringArray = []
+	var counts := {"Кулак": 0, "Поза прокрутки": 0, "Раскрытая ладонь (смахивание)": 0}
+	for sample in _pose_record_samples:
+		var thumb_up := sample[0] > FIST_THUMB_UP_STRAIGHT and sample[5] > FIST_THUMB_UP_DISTANCE
+		if maxf(maxf(sample[6], sample[7]), maxf(sample[8], sample[9])) < _gesture_settings.fist_curl and not thumb_up:
+			counts["Кулак"] += 1
+		if sample[1] >= _gesture_settings.disc_straightness and sample[2] >= _gesture_settings.disc_straightness \
+				and sample[11] >= _gesture_settings.disc_align and sample[12] >= _gesture_settings.disc_align \
+				and sample[15] < _gesture_settings.disc_together and sample[18] >= _gesture_settings.disc_thumb_spread:
+			counts["Поза прокрутки"] += 1
+		if sample[1] > 0.85 and sample[2] > 0.85 and sample[3] > 0.85:
+			counts["Раскрытая ладонь (смахивание)"] += 1
+	for name: String in counts:
+		if counts[name] > _pose_record_samples.size() * 0.3:
+			warnings.append(name)
+	var others: Array[HandPose.Template] = [_move_template]
+	for template in _custom_poses:
+		if template != recorded:
+			others.append(template)
+	for template in others:
+		if HandPose.overlap(template, _pose_record_samples) > 0.3:
+			warnings.append("«%s»" % template.name)
+	return warnings
+
+
+func _delete_custom_pose(row: int) -> void:
+	if row >= _custom_poses.size():
+		return
+	var template := _custom_poses[row]
+	_custom_poses.remove_at(row)
+	_apply_bindings()
+	_save_settings()
+	_close_binding_menu()
+	_pose_status.text = "«%s» удалена; действия с ней выключены." % template.name
+	print("[poses] удалена «%s»" % template.name)
+
+
+## One line per hand describing its pose, for designing a new gesture from what
+## the user shows (the locomotion sign, 20.10.2026). Per finger: straightness
+## (1 = straight), tip to palm and tip to thumb tip (mm), and how far it points
+## along the hand (1 = in line with wrist->knuckle, 0 = across, -1 = curled back).
+## Then the palm: its normal against up and towards the head, the hand's axis
+## against up, and the gaps between neighbouring fingertips (mm).
+func _log_pose(index: int, tracker: XRHandTracker, to_world: Transform3D, pointer: Pointer) -> void:
+	var j := func(joint: int) -> Vector3: return tracker.get_hand_joint_transform(joint).origin
+	var fingers := [
+		["большой", XRHandTracker.HAND_JOINT_THUMB_METACARPAL, XRHandTracker.HAND_JOINT_THUMB_PHALANX_PROXIMAL,
+				XRHandTracker.HAND_JOINT_THUMB_PHALANX_DISTAL, XRHandTracker.HAND_JOINT_THUMB_TIP],
+		["указ", XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_PROXIMAL, XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_INTERMEDIATE,
+				XRHandTracker.HAND_JOINT_INDEX_FINGER_PHALANX_DISTAL, XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP],
+		["средн", XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_INTERMEDIATE,
+				XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_DISTAL, XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP],
+		["безым", XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_PROXIMAL, XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_INTERMEDIATE,
+				XRHandTracker.HAND_JOINT_RING_FINGER_PHALANX_DISTAL, XRHandTracker.HAND_JOINT_RING_FINGER_TIP],
+		["мизин", XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_PROXIMAL, XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_INTERMEDIATE,
+				XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_DISTAL, XRHandTracker.HAND_JOINT_PINKY_FINGER_TIP],
+	]
+	var palm: Vector3 = j.call(XRHandTracker.HAND_JOINT_PALM)
+	var wrist: Vector3 = j.call(XRHandTracker.HAND_JOINT_WRIST)
+	var thumb_tip: Vector3 = j.call(XRHandTracker.HAND_JOINT_THUMB_TIP)
+	var axis: Vector3 = (j.call(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_PHALANX_PROXIMAL) - wrist).normalized()
+	var parts: PackedStringArray = []
+	var tips: Array[Vector3] = []
+	for finger: Array in fingers:
+		var a: Vector3 = j.call(finger[1])
+		var b: Vector3 = j.call(finger[2])
+		var c: Vector3 = j.call(finger[3])
+		var tip: Vector3 = j.call(finger[4])
+		tips.append(tip)
+		parts.append("%s прям %.2f, к ладони %.0f, к большому %.0f, вдоль %+.2f" % [finger[0], HandGestures.straightness(a, b, c, tip),
+				tip.distance_to(palm) * 1000.0, tip.distance_to(thumb_tip) * 1000.0, (tip - a).normalized().dot(axis)])
+	var gaps: PackedStringArray = []
+	for k in range(1, tips.size() - 1):
+		gaps.append("%.0f" % (tips[k].distance_to(tips[k + 1]) * 1000.0))
+	var head := (_camera.global_position - pointer.palm_world).normalized()
+	print("[pose] %s: %s | ладонь вверх %+.2f, к голове %+.2f, кисть вверх %+.2f | промежутки кончиков %s | щипок %.0f, кулак %.0f, ниже глаз %.0f см" % [
+			SIDE_LABELS[index], "; ".join(parts), pointer.palm_normal.dot(Vector3.UP), pointer.palm_normal.dot(head),
+			(to_world.basis * axis).normalized().dot(Vector3.UP), "/".join(gaps), pointer.pinch_mm, pointer.fist_mm,
+			(_camera.global_position.y - pointer.palm_world.y) * 100.0])
 
 
 ## The startup probe's stopwatch inside _process: -1 starts the frame, `part`
@@ -1774,6 +2182,20 @@ func _load_settings() -> void:
 	var slots: Variant = config.get_value("layouts", "slots", {})
 	if slots is Dictionary:
 		_layout_slots = slots
+	_custom_poses.clear()
+	var poses: Variant = config.get_value("poses", "custom", [])
+	if poses is Array:
+		for data: Variant in poses:
+			var template := HandPose.Template.from_dictionary(data) if data is Dictionary else null
+			if template != null and template.is_valid():
+				template.widen_to_minimum()
+				_custom_poses.append(template)
+	_next_custom_pose = int(config.get_value("poses", "next", _next_custom_pose))
+	var bindings: Variant = config.get_value("bindings", "actions", {})
+	if bindings is Dictionary:
+		_bindings.merge(bindings, true)
+	_move_hand = clampi(int(config.get_value("bindings", "move_hand", _move_hand)), 0, 1)
+	_apply_bindings()
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
 
@@ -1791,6 +2213,10 @@ func _save_settings() -> void:
 	_arrangements[_mode_key()] = _own_arrangement()
 	config.set_value("panels", "arrangements", _arrangements)
 	config.set_value("layouts", "slots", _layout_slots)
+	config.set_value("poses", "custom", _custom_poses.map(func(t: HandPose.Template) -> Dictionary: return t.to_dictionary()))
+	config.set_value("poses", "next", _next_custom_pose)
+	config.set_value("bindings", "actions", _bindings)
+	config.set_value("bindings", "move_hand", _move_hand)
 	if not _slot_loading.is_empty():
 		config.set_value("layouts", "pending", _slot_loading)
 	if _driver_restore_pending:
@@ -2406,8 +2832,15 @@ func _update_pointer(index: int, delta: float) -> void:
 			unfiltered_target = target
 			ray_origin = controller.global_position
 		var middle_tip := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_MIDDLE_FINGER_TIP).origin
-		# Any finger closing on the thumb freezes the rotation part of the ray.
-		var tip_distance := minf(thumb_tip.distance_to(index_tip), thumb_tip.distance_to(middle_tip))
+		# Any finger closing on the thumb freezes the rotation part of the ray: the
+		# touches bound to a button (GestureCatalog), the index and middle without bindings.
+		var tip_distance := INF
+		for contact: int in [_gesture_settings.left_contact, _gesture_settings.right_contact, _gesture_settings.middle_contact]:
+			if contact >= 0 and contact < HandGestures.Contact.SIDE:
+				tip_distance = minf(tip_distance, thumb_tip.distance_to(
+						tracker.get_hand_joint_transform(HandPose.FINGERS[contact + 1][3]).origin))
+		if is_inf(tip_distance):
+			tip_distance = minf(thumb_tip.distance_to(index_tip), thumb_tip.distance_to(middle_tip))
 		var was_hand := pointer.mode == "рука"
 		if not was_hand or (not was_pressed and tip_distance > PINCH_FREEZE_DISTANCE):
 			pointer.rotation_offset = Quaternion(shoulder_direction, target)
@@ -2465,6 +2898,17 @@ func _update_pointer(index: int, delta: float) -> void:
 				tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_RING_FINGER_TIP).origin)
 		var open_hand := frame.index_straightness > 0.85 and frame.middle_straightness > 0.85 and ring_straightness > 0.85 \
 				and frame.thumb_index > _gesture_settings.pinch_release
+		var joints := PackedVector3Array()
+		joints.resize(HandPose.JOINT_COUNT)
+		for joint in HandPose.JOINT_COUNT:
+			joints[joint] = tracker.get_hand_joint_transform(joint).origin
+		pointer.hand_joints = joints
+		pointer.hand_features = HandPose.features(joints)
+		frame.thumb_ring = thumb_tip.distance_to(joints[HandPose.FINGERS[3][3]])
+		frame.thumb_pinky = thumb_tip.distance_to(joints[HandPose.FINGERS[4][3]])
+		if POSE_LOG and frame.time >= _pose_log_next[index]:
+			_pose_log_next[index] = frame.time + POSE_LOG_STEP_SEC
+			_log_pose(index, tracker, to_world, pointer)
 
 		# A hand on the keyboard or the lap is at rest: hidden, no ray, no gestures.
 		pointer.palm_drop = _camera.global_position.y - palm.y
@@ -2472,7 +2916,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		var was_engaged := pointer.engagement.engaged
 		# Paused hands and hands being recorded for calibration control nothing either.
 		var resting := not pointer.engagement.update(frame.time, pointer.palm_drop, pointer.ray_elevation) \
-				or _hands_paused or _calibrating >= 0
+				or _hands_paused or _calibrating >= 0 or _pose_recording >= 0
 		if resting != not was_engaged:
 			print("[hand] %s: %s (ниже глаз %.0f см, луч %+.0f°)" % [SIDE_LABELS[index], "в покое" if resting else "в работе",
 					pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation)])
@@ -2482,14 +2926,41 @@ func _update_pointer(index: int, delta: float) -> void:
 		var curl := maxf(maxf(index_tip.distance_to(palm_local), middle_tip.distance_to(palm_local)),
 				maxf(frame.ring_to_palm, tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PINKY_FINGER_TIP).origin.distance_to(palm_local)))
 		pointer.fist_mm = curl * 1000.0
-		pointer.fist = not resting and (_gesture_settings.grab_mode == 1 or _gesture_settings.grab_mode == 2) \
-				and curl < _gesture_settings.fist_curl + (FIST_RELEASE_MARGIN if was_fist else 0.0)
+		# The poses bound to held actions (GestureCatalog): the built-in fist and
+		# scroll pose keep their own recognisers, the rest go by template.
+		_update_bound_poses(index, pointer, frame.time, resting)
+		# The built-in fist: four fingertips at the palm, and not a thumb up (a
+		# "like" has the fingers curled just the same: 20.10.2026 it was taken for a
+		# fist), nor while the hand comes close to one of the user's own poses.
+		var thumb_up := pointer.hand_features.size() == HandPose.FEATURE_COUNT \
+				and pointer.hand_features[0] > FIST_THUMB_UP_STRAIGHT and pointer.hand_features[5] > FIST_THUMB_UP_DISTANCE
+		var builtin_fist := curl < _gesture_settings.fist_curl + (FIST_RELEASE_MARGIN if was_fist else 0.0) \
+				and not thumb_up and not pointer.near_own_pose
+		# It has to hold FIST_DWELL_SEC to start: a hand folding into a thumb up
+		# passes through a fist first (20.10.2026, once right before the "like").
+		if not builtin_fist:
+			pointer.fist_since = NAN
+		elif not was_fist and is_nan(pointer.fist_since):
+			pointer.fist_since = frame.time
+		builtin_fist = builtin_fist and (was_fist or frame.time - pointer.fist_since >= FIST_DWELL_SEC)
+		var grab_pose: bool = builtin_fist if _bindings["grab"] == "pose:fist" else pointer.poses.get("grab", false)
+		pointer.fist = not resting and (_gesture_settings.grab_mode == 1 or _gesture_settings.grab_mode == 2) and grab_pose
 		pointer.fist_started = pointer.fist and not was_fist
 		if pointer.fist_started:
-			print("[gesture] %s: кулак (пальцы у ладони до %.0f мм)" % [SIDE_LABELS[index], curl * 1000.0])
-		if resting or pointer.fist:
+			print("[gesture] %s: %s (пальцы у ладони до %.0f мм)" % [SIDE_LABELS[index],
+					GestureCatalog.name_of(_bindings["grab"], _custom_poses).to_lower(), curl * 1000.0])
+		match _bindings["scroll"]:
+			"pose:scroll":
+				frame.scroll_pose = -1
+			GestureCatalog.OFF:
+				frame.scroll_pose = 0
+			_:
+				frame.scroll_pose = 1 if pointer.poses.get("scroll", false) else 0
+		# Moving or turning with a pose: no clicks meanwhile, as with the fist.
+		var travelling: bool = pointer.poses.get("move", false) or pointer.poses.get("turn", false)
+		if resting or pointer.fist or travelling:
 			pointer.gestures.reset()
-		var gesture := HandGestures.Output.new() if resting or pointer.fist else pointer.gestures.update(frame)
+		var gesture := HandGestures.Output.new() if resting or pointer.fist or travelling else pointer.gestures.update(frame)
 		pointer.button = gesture.button
 		pointer.pending = gesture.pending
 		pointer.anchor_time = gesture.anchor_time
@@ -2605,6 +3076,13 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.pending = false
 		pointer.scrolling = false
 		pointer.scroll = 0.0
+	if not pointer.tracked_hand:
+		# No hand, no pose: a hand coming back starts from scratch.
+		pointer.hand_joints = PackedVector3Array()
+		pointer.hand_features = PackedFloat32Array()
+		for matcher: HandPose.Matcher in pointer.pose_matchers.values():
+			matcher.reset()
+		_set_poses(index, pointer, {})
 	if pointer.menu_open and pointer.menu_mode != pointer.mode:
 		# Switched between hand and controller (or lost tracking): close without running.
 		pointer.menu_open = false
@@ -2887,8 +3365,8 @@ func _build_settings_panel() -> void:
 		tab.visible = t == 0
 		_settings_root.add_child(tab)
 		_settings_tabs.append(tab)
-		var button := _add_button_to(_settings_root, SETTINGS_TABS[t], Vector3((t - (SETTINGS_TABS.size() - 1) * 0.5) * 0.23, 0.62, 0.0),
-				Vector2(0.21, 0.06), 0.2)
+		var button := _add_button_to(_settings_root, SETTINGS_TABS[t], Vector3((t - (SETTINGS_TABS.size() - 1) * 0.5) * 0.215, 0.62, 0.0),
+				Vector2(0.2, 0.06), 0.2)
 		button.activated.connect(_show_settings_tab.bind(t))
 		_settings_tab_buttons.append(button)
 	_show_settings_tab(0)
@@ -2920,6 +3398,7 @@ func _build_settings_panel() -> void:
 	_build_ray_section(_settings_tabs[SETTINGS_TABS.find("Луч")])
 	_build_layout_section(_settings_tabs[SETTINGS_TABS.find("Раскладки")])
 	_build_driver_section(_settings_tabs[SETTINGS_TABS.find("Драйвер")])
+	_build_bindings_section(_settings_tabs[SETTINGS_TABS.find("Назначения")])
 
 	# Kept apart from the tabs so that it is not hit by accident.
 	_add_button_to(_settings_root, "Выход", Vector3(1.0, 0.62, 0.0), Vector2(0.2, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
@@ -2942,6 +3421,7 @@ func _show_settings_tab(index: int) -> void:
 		_settings_tab_buttons[t].set_text(("» %s «" if t == index else "%s") % SETTINGS_TABS[t])
 	if SETTINGS_TABS[index] == "Драйвер" and _driver_count_label != null:
 		_refresh_driver_section(true)
+	_close_binding_menu()
 
 
 ## The hand ray: Meta's or our own, and our own ray's mix and trim (they used to
