@@ -256,6 +256,11 @@ func refresh(session_visible: bool, copy_frames: bool, now: float) -> void:
 		_viewport.render_target_update_mode = mode
 
 
+## Whether the layer is redrawn on every frame now (its picture is changing).
+func is_redrawing() -> bool:
+	return _viewport.render_target_update_mode == SubViewport.UPDATE_ALWAYS
+
+
 ## Distance along the ray to this panel, or -1.0 on a miss.
 func hit_distance(origin: Vector3, direction: Vector3) -> float:
 	if placement.curvature > 0.0:

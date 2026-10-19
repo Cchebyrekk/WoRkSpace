@@ -10,6 +10,10 @@ const HAND_SOURCE_LABELS: Array[String] = ["неизвестен", "камеры
 const JOINT_RADIUS := 0.008
 const RAY_LENGTH := 2.0
 const LOG_INTERVAL_SEC := 1.0
+## The first seconds after start are logged finely ([startup]): some sessions began
+## at half the frame rate for 10-17 s, and the cause is to be found.
+const STARTUP_PROBE_SEC := 30.0
+const STARTUP_PROBE_STEP_SEC := 0.5
 
 # Tunables for the hand pointer; they move to a settings resource with the full gesture set.
 const SHOULDER_DROP := 0.2
@@ -502,6 +506,19 @@ var _driver_apply: VrButton
 var _driver_chips := {}
 var _session_visible := false
 var _frames_logged := 0
+## The startup probe: frames, the longest frame and capture frames over the current step.
+var _probe_step_sec := 0.0
+var _probe_frames := 0
+var _probe_max_frame_sec := 0.0
+var _probe_capture_frames := 0
+## Where the time of _process went, by part (µs), in this frame and in the last one.
+const PROBE_PARTS: Array[String] = ["панели", "сессия", "руки", "жесты и перенос", "защищённый стол", "курсор и лучи", "строка состояния"]
+var _probe_parts := PackedInt64Array()
+var _probe_mark_usec := 0
+## Pipeline compilation counters as last logged (see _probe_pipelines).
+var _probe_pipelines_seen := PackedInt64Array()
+## A frame longer than this during the probe is logged with its parts.
+const PROBE_LONG_FRAME_SEC := 0.03
 var _cursor_filter := CursorFilter.new()
 ## The button the Windows cursor currently holds, released with the same button.
 var _cursor_button := HandGestures.Click.NONE
@@ -536,6 +553,22 @@ var _settings_values: Array[Label3D] = []
 var _cursor_owner := -1
 var _cursor_press_armed := false
 var _recentered := false
+## Seconds since focus while waiting for a tracked head to align the scene; -1 when not waiting.
+var _recenter_wait_sec := -1.0
+## Align anyway after this long without a tracked head.
+const RECENTER_MAX_WAIT_SEC := 0.5
+## Shader warm-up: tiny copies of every kind of material in front of the eyes for
+## the first visible frames. The D3D12 driver keeps no pipeline cache, so each run
+## built shaders the first time something came into view: two ~110 ms frames
+## (first frame, then the panels after aligning; 19.10.2026). Now all at once, in
+## the first frame, while the runtime is still fading in.
+var _shaders_warmed := false
+var _warm_up_nodes: Array[Node3D] = []
+var _warm_up_frames := 0
+const WARM_UP_FRAMES := 4
+const WARM_UP_DISTANCE := 0.5
+## Small enough to cover no pixel; a draw is still issued, which is what builds the shader.
+const WARM_UP_SCALE := 0.0005
 ## Diagnostic switches, comma-separated in WORKPLACE_DIAG: nolayer, nocopy, nohole, nocapture.
 ## Do NOT put the capture texture on a 3D material: in VR that removes the D3D12
 ## device (0x887A0005) and crashes the engine; the composition layer path is fine.
@@ -642,9 +675,15 @@ func _process(delta: float) -> void:
 		return
 	if not _xr_ready:
 		return
+	_update_startup_probe(delta)
+	_update_first_recenter(delta)
+	_update_shader_warm_up()
+	_probe_mark(-1)
 	_update_panels(delta)
+	_probe_mark(0)
 	_calibration_boost_sec = maxf(_calibration_boost_sec - delta, 0.0)
 	_update_xr_session(delta)
+	_probe_mark(1)
 
 	var lines: PackedStringArray = []
 	for i in 2:
@@ -668,16 +707,20 @@ func _process(delta: float) -> void:
 					"Meta" if pointer.runtime_aim else "свой", pointer.palm_drop * 100.0, rad_to_deg(pointer.ray_elevation), pointer.fist_mm]
 		if pointer.grab_panel != null:
 			lines[-1] += " | %s %s" % ["переношу" if pointer.grab_kind == GRAB_MOVE else "меняю размер", pointer.grab_panel.monitor_name]
+	_probe_mark(2)
 
 	_update_two_hand_gestures()
 	_update_calibration()
 	_update_grabs(delta)
 	_place_monitor_menu()
 	_update_buttons(delta)
+	_probe_mark(3)
 	# Before the cursor (which it replaces while shown) and the rays (which end on its quad).
 	_update_secure_desktop()
+	_probe_mark(4)
 	_update_cursor()
 	_update_rays()
+	_probe_mark(5)
 
 	if _secure_desktop:
 		lines.append("ЗАЩИЩЁННЫЙ РАБОЧИЙ СТОЛ (запрос администратора / экран блокировки) — виден через агента")
@@ -685,6 +728,7 @@ func _process(delta: float) -> void:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	_status.text = "\n".join(lines)
+	_probe_mark(6)
 
 	_log_timer += delta
 	if _log_timer >= LOG_INTERVAL_SEC:
@@ -700,6 +744,161 @@ func _process(delta: float) -> void:
 		_frames_logged = frames
 		for line in lines:
 			print("[track] ", line)
+
+
+## For the first STARTUP_PROBE_SEC after start, every STARTUP_PROBE_STEP_SEC: frames,
+## the longest frame, the render time of the last frame on the CPU and the GPU,
+## how many panels redraw and how many capture frames came. Tells a slow GPU (a
+## shader compiling, many panels drawing) from a runtime that halved the rate.
+func _update_startup_probe(delta: float) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now > STARTUP_PROBE_SEC:
+		_probe_parts.clear()
+		return
+	var viewport_rid := get_viewport().get_viewport_rid()
+	if _probe_frames == 0 and _probe_step_sec == 0.0:
+		RenderingServer.viewport_set_measure_render_time(viewport_rid, true)
+	# A long frame: what the last _process spent by part, the render of the last
+	# frame, and the rest (the engine outside _process, timers and signals, and the
+	# wait for the OpenXR runtime's next frame).
+	if delta > PROBE_LONG_FRAME_SEC and _probe_parts.size() == PROBE_PARTS.size():
+		var described: PackedStringArray = []
+		var spent := 0
+		for i in PROBE_PARTS.size():
+			spent += _probe_parts[i]
+			if _probe_parts[i] >= 1000:
+				described.append("%s %.0f" % [PROBE_PARTS[i], _probe_parts[i] / 1000.0])
+		var render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(viewport_rid)
+		print("[startup] %.2f с: кадр %.0f мс — _process %.1f мс (%s), отрисовка ЦП %.1f / ГП %.1f мс, вне этого %.0f мс; %s" % [
+				now, delta * 1000.0, spent / 1000.0, ", ".join(described) if not described.is_empty() else "всё меньше 1 мс",
+				render_cpu, RenderingServer.viewport_get_measured_render_time_gpu(viewport_rid),
+				delta * 1000.0 - spent / 1000.0 - render_cpu, _probe_pipelines()])
+	_probe_frames += 1
+	_probe_max_frame_sec = maxf(_probe_max_frame_sec, delta)
+	_probe_step_sec += delta
+	if _probe_step_sec < STARTUP_PROBE_STEP_SEC:
+		return
+	var frames := 0
+	var redrawing := 0
+	for panel in _panels:
+		frames += panel.capture.get_frame_count()
+		if panel.is_redrawing():
+			redrawing += 1
+	print("[startup] %.1f с: кадров %d (%.0f/с), самый долгий %.0f мс, отрисовка ЦП %.1f / ГП %.1f мс, панелей %d (перерисовываются %d), кадров захвата %d, сессия %s; %s" % [
+			now, _probe_frames, _probe_frames / _probe_step_sec, _probe_max_frame_sec * 1000.0,
+			RenderingServer.viewport_get_measured_render_time_cpu(viewport_rid),
+			RenderingServer.viewport_get_measured_render_time_gpu(viewport_rid),
+			_panels.size(), redrawing, maxi(frames - _probe_capture_frames, 0), "видна" if _session_visible else "не видна", _probe_pipelines()])
+	_probe_capture_frames = frames
+	_probe_frames = 0
+	_probe_max_frame_sec = 0.0
+	_probe_step_sec = 0.0
+	if now + STARTUP_PROBE_STEP_SEC > STARTUP_PROBE_SEC:
+		RenderingServer.viewport_set_measure_render_time(viewport_rid, false)
+
+
+## The first alignment after focus: on the first frame with a tracked head (or
+## after RECENTER_MAX_WAIT_SEC), not a fixed half second later.
+func _update_first_recenter(delta: float) -> void:
+	if _recenter_wait_sec < 0.0:
+		return
+	_recenter_wait_sec += delta
+	var head := XRServer.get_tracker(&"head") as XRPositionalTracker
+	var pose: XRPose = head.get_pose(&"default") if head != null else null
+	var tracked := pose != null and pose.has_tracking_data
+	if tracked or _recenter_wait_sec >= RECENTER_MAX_WAIT_SEC:
+		print("[xr] выравниваю сцену через %.2f с после фокуса (%s)" % [_recenter_wait_sec, "голова отслеживается" if tracked else "голова не отслеживается"])
+		_recenter_wait_sec = -1.0
+		_recenter()
+
+
+## Puts a tiny copy of each distinct mesh/material and Label3D style in the scene
+## right in front of the camera, so that their shaders are built in the first
+## visible frames rather than whenever each first comes into view.
+func _warm_up_shaders() -> void:
+	_shaders_warmed = true
+	var seen := {}
+	var stack: Array[Node] = [self]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		stack.append_array(node.get_children())
+		var key := _warm_up_key(node)
+		if key == "" or seen.has(key):
+			continue
+		seen[key] = true
+		var copy := node.duplicate(0) as GeometryInstance3D
+		for child in copy.get_children():
+			copy.remove_child(child)
+			child.free()
+		copy.visible = true
+		_camera.add_child(copy)
+		copy.transform = Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * WARM_UP_SCALE), Vector3(0.0, 0.0, -WARM_UP_DISTANCE))
+		_warm_up_nodes.append(copy)
+	_warm_up_frames = WARM_UP_FRAMES
+	print("[startup] прогрев шейдеров: %d образцов" % _warm_up_nodes.size())
+
+
+## What decides a node's shader, or "" for a node that draws nothing of its own.
+func _warm_up_key(node: Node) -> String:
+	if node is Label3D:
+		var label := node as Label3D
+		return "label|%s|%d|%s|%s|%s|%d|%d|%s" % [label.font, label.billboard, label.no_depth_test, label.shaded, label.double_sided,
+				label.alpha_cut, label.render_priority, label.fixed_size]
+	if node is MeshInstance3D:
+		var instance := node as MeshInstance3D
+		if instance.mesh == null:
+			return ""
+		var materials: PackedStringArray = [str(instance.material_override)]
+		for i in instance.mesh.get_surface_count():
+			materials.append(str(instance.get_active_material(i)))
+		return "mesh|%s|%s|%s" % [instance.mesh.get_class(), instance.cast_shadow, "|".join(materials)]
+	return ""
+
+
+func _update_shader_warm_up() -> void:
+	if _warm_up_frames <= 0:
+		return
+	_warm_up_frames -= 1
+	if _warm_up_frames == 0:
+		for copy in _warm_up_nodes:
+			copy.queue_free()
+		_warm_up_nodes.clear()
+
+
+## Shader pipelines Godot built since the last call, by kind: one built while
+## drawing stalls that frame (a material seen for the first time).
+func _probe_pipelines() -> String:
+	var kinds := [
+		["холст", RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_CANVAS],
+		["меш", RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_MESH],
+		["поверхность", RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_SURFACE],
+		["при отрисовке", RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_DRAW],
+		["специализация", RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION],
+	]
+	if _probe_pipelines_seen.size() != kinds.size():
+		_probe_pipelines_seen.resize(kinds.size())
+		_probe_pipelines_seen.fill(0)
+	var described: PackedStringArray = []
+	for i in kinds.size():
+		var count := RenderingServer.get_rendering_info(kinds[i][1])
+		if count != _probe_pipelines_seen[i]:
+			described.append("%s %d" % [kinds[i][0], count - _probe_pipelines_seen[i]])
+			_probe_pipelines_seen[i] = count
+	return ("собрано шейдеров: " + ", ".join(described)) if not described.is_empty() else "шейдеры не собирались"
+
+
+## The startup probe's stopwatch inside _process: -1 starts the frame, `part`
+## records the time since the previous mark. Does nothing after the probe.
+func _probe_mark(part: int) -> void:
+	if Time.get_ticks_msec() > STARTUP_PROBE_SEC * 1000.0:
+		return
+	var now := Time.get_ticks_usec()
+	if part < 0:
+		_probe_parts.resize(PROBE_PARTS.size())
+		_probe_parts.fill(0)
+	else:
+		_probe_parts[part] = now - _probe_mark_usec
+	_probe_mark_usec = now
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -724,7 +923,7 @@ func _on_pose_recentered() -> void:
 
 
 func _on_session_begun(openxr: OpenXRInterface) -> void:
-	print("[xr] сессия начата, частота: ", openxr.display_refresh_rate, " Гц")
+	print("[xr] сессия начата, частота: ", openxr.display_refresh_rate, " Гц (%.1f с от старта)" % (Time.get_ticks_msec() / 1000.0))
 
 
 func _exit_tree() -> void:
@@ -1084,7 +1283,7 @@ func _rebuild_panels() -> void:
 			_panels.append(panel)
 	if hole_punch and not _panels.is_empty():
 		get_viewport().transparent_bg = true
-	print("[capture] мониторов %d, панелей %d" % [monitors.size(), _panels.size()])
+	print("[capture] мониторов %d, панелей %d (%.1f с от старта)" % [monitors.size(), _panels.size(), Time.get_ticks_msec() / 1000.0])
 	if _mode_change_monitor != "":
 		_repair_layout()
 	_resume_slot_load()
@@ -1455,6 +1654,7 @@ func _end_grab(pointer: Pointer) -> void:
 ## looking along -Z, where the panels and buttons are. The headset's own "forward"
 ## comes from the room setup and can point anywhere.
 func _recenter() -> void:
+	var recenter_start_usec := Time.get_ticks_usec()
 	var head := _camera.transform
 	var forward := -head.basis.z
 	forward.y = 0.0
@@ -1469,15 +1669,19 @@ func _recenter() -> void:
 		_release_secure_button()
 		_place_secure_quad()
 	_recentered = true
-	print("[xr] сцена выровнена по взгляду, поворот %.0f°" % rad_to_deg(yaw))
+	print("[xr] сцена выровнена по взгляду, поворот %.0f° (%.2f с от старта, заняло %.1f мс)" % [rad_to_deg(yaw),
+			Time.get_ticks_msec() / 1000.0, (Time.get_ticks_usec() - recenter_start_usec) / 1000.0])
 
 
 func _on_xr_event(event: StringName) -> void:
-	print("[xr] событие: ", event)
-	# A moment after focus, so that the head pose is valid.
+	print("[xr] событие: %s (%.1f с от старта)" % [event, Time.get_ticks_msec() / 1000.0])
+	# As soon as the head is tracked (see _update_first_recenter): then the panels
+	# are in view in the very first frames, together with the shader warm-up.
 	if event == &"session_focussed" and not _recentered:
-		get_tree().create_timer(0.5).timeout.connect(_recenter)
+		_recenter_wait_sec = 0.0
 	if event == &"session_visible" or event == &"session_focussed":
+		if not _session_visible and not _shaders_warmed:
+			_warm_up_shaders()
 		_session_visible = true
 	elif event == &"session_stopping":
 		_session_visible = false

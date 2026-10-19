@@ -86,6 +86,7 @@ func _run(action: String, arguments: Array = []) -> void:
 	if busy:
 		return
 	busy = true
+	print("[screens] запуск display_topology.ps1 -Action %s (%.2f с от старта)" % [action, Time.get_ticks_msec() / 1000.0])
 	if _thread != null:
 		_thread.wait_to_finish()
 	_thread = Thread.new()
@@ -112,6 +113,7 @@ func _invoke(action: String, arguments: Array) -> String:
 
 func _report(answer: String) -> void:
 	busy = false
+	print("[screens] display_topology.ps1 закончил (%.2f с от старта)" % (Time.get_ticks_msec() / 1000.0))
 	var parsed: Variant = JSON.parse_string(answer)
 	var result: Dictionary = parsed if parsed is Dictionary else {}
 	match str(result.get("code", "")):
