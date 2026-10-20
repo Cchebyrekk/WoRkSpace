@@ -23,6 +23,10 @@ func _init() -> void:
 	_test_hand_pose()
 	_test_gesture_catalog()
 	_test_locomotion()
+	_test_world_layout()
+	_test_slider()
+	_test_panel_back()
+	_test_menu_set()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -533,6 +537,25 @@ func _test_hand_pose() -> void:
 		same = same and absf(moved[f] - open_features[f]) < 0.001
 	_check(same, "признаки не зависят от положения и поворота руки")
 	_check(HandPose.features(PackedVector3Array()).is_empty(), "без суставов — нет признаков")
+	# The hand's turn: the same shape with the palm towards the head or away.
+	var head := Vector3(0.0, 0.1, 0.5)  # in front of the palm (+Z) of a right hand
+	var toward := HandPose.features(open, 1.0, head)
+	var away := HandPose.features(open, 1.0, Vector3(0.0, 0.1, -0.5))
+	_check(toward[19] > 0.7 and away[19] < -0.7, "ладонь к себе и от себя различаются (%.2f / %.2f)" % [toward[19], away[19]])
+	_check(toward[20] > 0.9, "кисть пальцами вверх")
+	var mirrored := HandPose.features(_placed(open, Transform3D(Basis.FLIP_X, Vector3.ZERO)), -1.0, head)
+	_check(absf(mirrored[19] - toward[19]) < 0.01, "левая рука — так же, как правая")
+	var turned_record: Array[PackedFloat32Array] = []
+	for k in 50:
+		turned_record.append(toward)
+	var palm_in := HandPose.record(turned_record, "custom:9", "к себе")
+	_check(HandPose.distance(palm_in, toward, false) <= 1.0 and HandPose.distance(palm_in, away, false) > 1.0,
+			"поза, записанная ладонью к себе, не узнаётся ладонью от себя")
+	var older := palm_in.to_dictionary()
+	older["middle"] = (older["middle"] as PackedFloat32Array).slice(0, HandPose.SHAPE_FEATURES)
+	older["tolerance"] = (older["tolerance"] as PackedFloat32Array).slice(0, HandPose.SHAPE_FEATURES)
+	var upgraded := HandPose.Template.from_dictionary(older)
+	_check(upgraded.is_valid() and HandPose.distance(upgraded, away, false) <= 1.0, "старая поза (без поворота) — поворот любой")
 
 	# Recording: frames around one pose make a template that takes it and refuses others.
 	var samples: Array[PackedFloat32Array] = []
@@ -570,13 +593,13 @@ func _test_hand_pose() -> void:
 	# Built-in locomotion sign: the values the user showed are it; an open hand, a fist and the scroll pose are not.
 	var sign := GestureCatalog.move_template()
 	var shown := PackedFloat32Array([0.98, 0.66, 1.0, 1.0, 0.99, 0.08, 0.069, 0.118, 0.11, 0.093,
-			0.92, 0.25, 0.97, 0.99, 0.98, 0.087, 0.018, 0.034, 0.05])
+			0.92, 0.25, 0.97, 0.99, 0.98, 0.087, 0.018, 0.034, 0.05, -0.6, 0.8])
 	_check(HandPose.distance(sign, shown) <= 1.0, "знак движения из журнала узнаётся (%.2f)" % HandPose.distance(sign, shown))
 	var shown_right := PackedFloat32Array([0.99, 0.64, 1.0, 1.0, 0.99, 0.101, 0.073, 0.12, 0.114, 0.099,
-			0.54, 0.43, 0.94, 0.94, 0.94, 0.096, 0.021, 0.038, 0.06])
+			0.54, 0.43, 0.94, 0.94, 0.94, 0.096, 0.021, 0.038, 0.06, -0.7, 0.75])
 	_check(HandPose.distance(sign, shown_right) <= 1.0, "и правой рукой (%.2f)" % HandPose.distance(sign, shown_right))
 	var open_logged := PackedFloat32Array([0.99, 1.0, 1.0, 1.0, 0.99, 0.099, 0.112, 0.12, 0.112, 0.1,
-			0.8, 0.99, 1.0, 0.99, 0.99, 0.032, 0.023, 0.04, 0.06])
+			0.8, 0.99, 1.0, 0.99, 0.99, 0.032, 0.023, 0.04, 0.06, -0.6, 0.8])
 	_check(HandPose.distance(sign, open_logged) > 1.35, "раскрытая рука — не знак, даже с запасом удержания (%.2f)" % HandPose.distance(sign, open_logged))
 	_check(HandPose.distance(sign, fist_features) > 1.35, "кулак — не знак")
 	# One misread finger is forgiven, a clearly different hand is not.
@@ -635,6 +658,126 @@ func _test_hand_pose() -> void:
 	# A touch preview really touches.
 	var touch := GestureCatalog.preview_joints("touch:ring", [])
 	_check(touch[HandPose.FINGERS[0][3]].distance_to(touch[HandPose.FINGERS[3][3]]) < 0.001, "превью касания: большой у безымянного")
+
+
+func _test_menu_set() -> void:
+	var menus := MenuSet.default_menus()
+	_check(menus.size() == 3 and MenuSet.items_of(menus[0]).has("copy"), "три категории по умолчанию")
+	for menu: Dictionary in menus:
+		_check(MenuSet.items_of(menu).size() <= MenuSet.MAX_ITEMS, "не больше %d пунктов в «%s»" % [MenuSet.MAX_ITEMS, menu["name"]])
+	_check(MenuSet.next_action("") == MenuSet.ACTIONS.keys()[0] and MenuSet.next_action(MenuSet.ACTIONS.keys().back()) == "",
+			"перебор действий: с пустого — первое, после последнего — пусто")
+
+	# Two levels: categories first, then the chosen one's items beyond it; back to the middle — categories again.
+	var nav := MenuSet.Navigator.new()
+	nav.menus = menus
+	var viewer := Vector3(0.0, 1.6, 0.5)
+	var at := Vector3(0.0, 1.2, 0.0)
+	nav.open(at, viewer)
+	_check(nav.level == 0 and nav.update(at) == "", "открылось — кольцо категорий, ничего не выбрано")
+	var top := nav.category_position(0)
+	nav.update(top)
+	_check(nav.level == 1 and nav.category == 0, "довёл до категории — раскрылись её пункты")
+	var first_item := nav.item_position(0, MenuSet.items_of(menus[0]).size())
+	_check(nav.update(first_item) == "copy", "дальше — пункт (%s)" % nav.update(first_item))
+	nav.update(at)
+	_check(nav.level == 0, "назад к середине — снова категории")
+	# By finger: the category's items open at once, around the hand.
+	var finger := MenuSet.Navigator.new()
+	finger.menus = menus
+	finger.mode = MenuSet.MODE_FINGER
+	finger.open(at, viewer, 1)
+	_check(finger.level == 1 and finger.update(finger.item_position(0, 7)) == "alt_tab", "по пальцу — сразу пункты своей категории")
+	_check(finger.update(at) == "" and finger.level == 1, "по пальцу середина — ничего, без возврата к категориям")
+	_check(MenuSet.shortcut_label([0x11, 0x10, 0x54]) == "Ctrl+Shift+T" and MenuSet.shortcut_label([0x12, 0x73]) == "Alt+F4",
+			"имя сочетания: «%s»" % MenuSet.shortcut_label([0x11, 0x10, 0x54]))
+	_check(MenuSet.moved(["a", "b", "c"], "a", 2) == ["b", "c", "a"] and MenuSet.moved(["a", "b", "c"], "c", 0) == ["c", "a", "b"] \
+			and MenuSet.moved(["a", "b"], "x", 1) == ["a", "x", "b"] and MenuSet.moved(["a"], "x", 9) == ["a", "x"], "перестановка пунктов меню")
+	MenuSet.custom["custom:1"] = ["Ctrl+Shift+T", [0x11, 0x10, 0x54]]
+	var with_own := {"name": "Своё", "items": ["custom:1", "nope", "copy"]}
+	_check(MenuSet.items_of(with_own) == PackedStringArray(["custom:1", "copy"]) and MenuSet.action("custom:1")[0] == "Ctrl+Shift+T",
+			"своя функция — в категории наравне с готовыми, неизвестные пропускаются")
+	MenuSet.custom.clear()
+	# Items open around the chosen category, a gap towards the middle: no item is nearer the middle than the back zone.
+	nav.open(at, viewer)
+	nav.update(nav.category_position(1))
+	var count := MenuSet.items_of(menus[1]).size()
+	var nearest := INF
+	for k in count:
+		nearest = minf(nearest, nav.item_position(k, count).distance_to(at))
+	# Neighbouring labels apart: at least ~11 cm between items, so 12-character labels do not overlap.
+	var gap := nav.item_position(0, count).distance_to(nav.item_position(1, count))
+	_check(gap > 0.1, "соседние пункты подменю не накладываются (%.3f м)" % gap)
+	_check(nav.item_centre.is_equal_approx(nav.category_position(1)) and nearest > nav.radius * 0.25,
+			"подменю — с центром на категории, пункты не в зоне возврата (%.3f)" % nearest)
+
+
+func _test_panel_back() -> void:
+	var flat := ScreenPanel.back_mesh(Vector2(1.2, 0.7), 0.0, 1.1)
+	var flat_aabb := flat.get_aabb()
+	_check(Vector2(flat_aabb.size.x, flat_aabb.size.y).is_equal_approx(Vector2(1.2, 0.7)) and flat_aabb.size.z < 0.001
+			and is_equal_approx(flat_aabb.position.z, -ScreenPanel.BACK_GAP),
+			"задняя крышка плоского экрана — его размера, чуть позади (%s)" % flat_aabb)
+	var curved := ScreenPanel.back_mesh(Vector2(1.2, 0.7), 1.0, 1.1)
+	var curved_aabb := curved.get_aabb()
+	_check(curved_aabb.position.z < 0.0 and curved_aabb.end.z > 0.1 and curved_aabb.size.x < 1.2,
+			"у изогнутого — по дуге, края к зрителю (%s)" % curved_aabb)
+
+
+func _test_slider() -> void:
+	var marks := VrSlider.notches_for(0.0, 1.0, 0.05)
+	_check(marks.size() == 11 and is_equal_approx(marks[1], 0.1) and is_equal_approx(marks[10], 1.0), "насечки: не больше 10 промежутков, по шагам, с концами")
+	var odd := VrSlider.notches_for(10.0, 80.0, 5.0)
+	_check(is_equal_approx(odd[0], 10.0) and is_equal_approx(odd[odd.size() - 1], 80.0), "насечки с обоих концов при неровном делении")
+	_check(is_equal_approx(VrSlider.value_at(0.51, 0.0, 1.0, 0.05, marks), 0.5), "у насечки — прилипает к ней")
+	_check(is_equal_approx(VrSlider.value_at(0.56, 0.0, 1.0, 0.05, marks), 0.55), "между насечками — по шагу")
+	_check(VrSlider.value_at(1.4, 0.0, 1.0, 0.05, marks) == 1.0 and VrSlider.value_at(-0.2, 0.0, 1.0, 0.05, marks) == 0.0, "за концами — конец")
+
+
+func _test_world_layout() -> void:
+	var keys := PackedStringArray(["A", "B", "C"])
+	var fixtures := WorldLayout.default_fixtures(keys)
+	_check(fixtures.size() == 1 and fixtures[0].monitors == keys and fixtures[0].centre == Vector3(0.0, 1.45, 0.0),
+			"без мира — один шар там, где была сфера, со всеми мониторами")
+	_check(is_equal_approx(WorldLayout.degrees_per_1920(1.1), 60.0) or absf(WorldLayout.degrees_per_1920(1.1) - 60.0) < 0.1,
+			"на прежнем радиусе панель прежнего размера (%.2f°)" % WorldLayout.degrees_per_1920(1.1))
+	_check(absf(WorldLayout.degrees_per_1920(2.2) - 32.2) < 0.2, "шар вдвое больше — панель меньше по углу (та же в метрах)")
+
+	var second := WorldLayout.new_fixture(fixtures, "sphere", Vector3(5.0, 1.5, 0.0), 0.5)
+	fixtures.append(second)
+	_check(second.id == 2 and second.name == "Шар 2", "новый шар: следующий номер и имя")
+	WorldLayout.assign(fixtures, "B", 2)
+	_check(not fixtures[0].monitors.has("B") and second.monitors == PackedStringArray(["B"]), "монитор переносится на другой шар")
+	_check(WorldLayout.fixture_of(fixtures, "B") == second and WorldLayout.fixture_of(fixtures, "Z") == fixtures[0],
+			"чей монитор; неизвестный — на первом")
+	fixtures[0].monitors.append("B")
+	WorldLayout.settle(fixtures, PackedStringArray(["A", "B", "C", "D"]))
+	_check(fixtures[0].monitors.count("B") == 1 and fixtures[0].monitors.has("D"), "монитор на двух шарах остаётся на одном, новый — на первом")
+	_check(not second.monitors.has("B"), "второй раз монитор не числится")
+
+	var near := WorldLayout.nearby(fixtures, Vector3(5.5, 1.6, 0.4), 1.0)
+	_check(near == second and WorldLayout.nearby(fixtures, Vector3(20.0, 1.6, 0.0), 1.0) == null, "рядом с шаром — его место, вдали — ничего")
+
+	# The seat: the head at the centre, looking at the sphere's middle.
+	var head_local := Transform3D(Basis(Vector3.UP, 0.7), Vector3(0.3, 1.6, -0.2))
+	var rig := WorldLayout.seat_rig(second, head_local)
+	var head_world := rig * head_local
+	_check(head_world.origin.is_equal_approx(second.centre), "сел: голова в центре шара")
+	_check((-head_world.basis.z).is_equal_approx(second.frame().basis * Vector3.FORWARD), "сел: лицом к середине шара")
+
+	_check(is_equal_approx(WorldLayout.dragged_radius(1.1, 0.5, 0.6), 1.3), "ручка от себя на 10 см — радиус +20 см")
+	var handle := WorldLayout.radius_handle(second)
+	_check(is_equal_approx(handle.distance_to(second.centre), second.radius) and handle.y < second.centre.y - 0.9 * second.radius,
+			"ручка радиуса — на шаре, низко")
+	var handle_ahead := second.frame().affine_inverse() * handle
+	_check(handle_ahead.z < 0.0 and absf(handle_ahead.x) < 0.001, "ручка — спереди по середине шара")
+	_check(WorldLayout.dragged_radius(1.1, 0.5, -3.0) == WorldLayout.MIN_RADIUS, "радиус не меньше минимума")
+
+	var stored := WorldLayout.Fixture.from_dictionary(second.to_dictionary())
+	_check(stored.id == 2 and stored.centre == second.centre and stored.monitors == second.monitors and is_equal_approx(stored.yaw, 0.5),
+			"шар переживает сохранение")
+	_check(WorldLayout.remove(fixtures, 2) and fixtures.size() == 1 and fixtures[0].monitors.has("C"), "удалённый шар отдаёт мониторы первому")
+	_check(not WorldLayout.remove(fixtures, fixtures[0].id), "последний шар не удаляется")
 
 
 func _test_locomotion() -> void:

@@ -180,6 +180,10 @@ void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("set_key", "virtual_key", "pressed"), &MouseInput::set_key);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("is_agent_connected"), &MouseInput::is_agent_connected);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("is_secure_desktop_active"), &MouseInput::is_secure_desktop_active);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("start_key_recording"), &MouseInput::start_key_recording);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("stop_key_recording"), &MouseInput::stop_key_recording);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_recorded_keys"), &MouseInput::get_recorded_keys);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_key_recording_seen"), &MouseInput::get_key_recording_seen);
 
 	BIND_ENUM_CONSTANT(BUTTON_LEFT);
 	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
@@ -227,6 +231,29 @@ bool MouseInput::is_agent_connected() {
 
 bool MouseInput::is_secure_desktop_active() {
 	return workplace::secure_desktop_active();
+}
+
+bool MouseInput::start_key_recording() {
+	return workplace::key_recording_start();
+}
+
+void MouseInput::stop_key_recording() {
+	workplace::key_recording_stop();
+}
+
+int MouseInput::get_key_recording_seen() {
+	return workplace::key_recording_seen();
+}
+
+PackedInt32Array MouseInput::get_recorded_keys() {
+	PackedInt32Array result;
+	std::vector<uint16_t> keys;
+	if (workplace::key_recording_result(keys)) {
+		for (uint16_t key : keys) {
+			result.append(key);
+		}
+	}
+	return result;
 }
 
 void GlobalHotkey::_bind_methods() {

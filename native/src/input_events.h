@@ -32,6 +32,11 @@ static_assert(sizeof(InputRecord) == 12, "the pipe carries these records as they
 // The agent's one-byte answer once it has checked the client; nothing comes for a refused one.
 constexpr uint8_t AGENT_ACCEPTED = 0xA5;
 
+// Put in dwExtraInfo of every key we inject, so that recording a shortcut can
+// tell our own keys from the user's — also when the user's keyboard reaches
+// Windows as injected input (a remote or virtual keyboard), 20.10.2026.
+constexpr uintptr_t INJECTED_BY_WORKPLACE = 0x57504B42; // "WPKB"
+
 // Records in one pipe message are injected together, in one SendInput call.
 constexpr size_t AGENT_MAX_RECORDS = 64;
 

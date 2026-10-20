@@ -63,13 +63,15 @@ static func plane_up(ahead: Vector3, tilt_degrees: float) -> Vector3:
 
 
 ## Smooth turning (radians per second) from the sideways offset of the turning
-## hand; positive turns right. Same dead zone and curve as moving.
+## hand; positive turns right. Same dead zone as moving, but a straight rise: the
+## squared one turned so slowly at a small offset that the user took it for not
+## turning at all (20.10.2026).
 static func turn_rate(sideways: float, reach: float, degrees_per_second: float) -> float:
 	var length := absf(sideways)
 	if length <= DEADZONE or reach <= DEADZONE:
 		return 0.0
 	var share := clampf((length - DEADZONE) / (reach - DEADZONE), 0.0, 1.0)
-	return signf(sideways) * deg_to_rad(degrees_per_second) * share * share
+	return signf(sideways) * deg_to_rad(degrees_per_second) * share
 
 
 ## Turning in steps: a step when the hand goes past `trigger` sideways, and

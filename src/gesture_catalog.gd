@@ -144,6 +144,7 @@ static func move_template() -> HandPose.Template:
 		0.7, 0.28, 0.95, 0.95, 0.93,
 		0.09, 0.02, 0.036,
 		0.0,
+		0.0, 0.0,
 	])
 	template.tolerance = PackedFloat32Array([
 		0.15, 0.25, 0.12, 0.12, 0.14,
@@ -151,6 +152,7 @@ static func move_template() -> HandPose.Template:
 		INF, 0.3, 0.2, 0.2, 0.2,
 		0.028, 0.016, 0.022,
 		INF,
+		INF, INF,
 	])
 	template.joints = preview_joints("pose:move", [])
 	return template

@@ -62,6 +62,7 @@ bool to_input(const InputRecord &record, INPUT &input) {
 			input.ki.wVk = key;
 			input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(key, MAPVK_VK_TO_VSC));
 			input.ki.dwFlags = record.b != 0 ? 0 : KEYEVENTF_KEYUP;
+			input.ki.dwExtraInfo = INJECTED_BY_WORKPLACE;
 			// Arrows, navigation keys and the Windows keys live on the extended part of the keyboard.
 			switch (key) {
 				case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:

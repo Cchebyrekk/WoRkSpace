@@ -58,6 +58,14 @@ var _rendered_frame := 0
 var _active_until := 0.0
 var _grips := {}
 var _grip_label: Label3D
+## The panel's back: a dark plate a little behind it, flat or curved like it.
+## A composition layer is seen from the front only, so from behind the screen
+## just vanished (20.10.2026); the plate is ordinary geometry, so it also hides
+## the screens behind it as a real monitor would.
+var _back: MeshInstance3D
+var _back_shape := ""
+const BACK_GAP := 0.012
+const BACK_COLOR := Color(0.11, 0.12, 0.14)
 
 
 ## `monitor` is an entry of ScreenCapture.list_monitors() and `monitor_index` its
@@ -103,7 +111,48 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel._grip_label.render_priority = 11
 	panel.add_child(panel._grip_label)
 	panel.show_grips(false, [], Grip.NONE, Grip.NONE)
+	var back_material := StandardMaterial3D.new()
+	back_material.albedo_color = BACK_COLOR
+	back_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	panel._back = MeshInstance3D.new()
+	panel._back.material_override = back_material
+	panel._back.visible = false
+	panel.add_child(panel._back)
 	return panel
+
+
+## Shows the back plate only when `head` is behind the panel (from the front the
+## screen itself is there) and the panel is drawn at all.
+func update_back(head: Vector3, shown: bool) -> void:
+	if _back == null or placement == null:
+		return
+	_back.visible = shown and (head - placement.transform.origin).dot(placement.transform.basis.z) < 0.0
+
+
+## The back plate's mesh in the panel's own frame (+Z towards the viewer): flat,
+## or the same arc as a curved panel, BACK_GAP behind it.
+static func back_mesh(size: Vector2, curvature: float, distance: float) -> ArrayMesh:
+	var columns := 1 if curvature <= 0.0 else 24
+	var radius := PanelLayout.curve_radius(curvature, distance)
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var points: Array[Vector3] = []
+	for i in columns + 1:
+		var share := float(i) / columns
+		var at := Vector3((share - 0.5) * size.x, 0.0, -BACK_GAP)
+		if columns > 1:
+			# On the arc (edges bend towards the viewer), moved out by the gap.
+			var angle := (share - 0.5) * size.x / radius
+			at = Vector3((radius + BACK_GAP) * sin(angle), 0.0, radius - (radius + BACK_GAP) * cos(angle))
+		points.append(at)
+	for i in columns:
+		var a := points[i]
+		var b := points[i + 1]
+		var half := Vector3(0.0, size.y * 0.5, 0.0)
+		for corner: Vector3 in [a - half, b - half, b + half, a - half, b + half, a + half]:
+			surface.add_vertex(corner)
+	surface.generate_normals()
+	return surface.commit()
 
 
 func _make_layer(curved: bool) -> void:
@@ -171,6 +220,12 @@ func place(new_placement: PanelLayout.Placement) -> void:
 	else:
 		(layer as OpenXRCompositionLayerQuad).quad_size = placement.size
 		layer.global_transform = placement.transform
+	if _back != null:
+		var shape := "%s|%s|%s" % [placement.size, placement.curvature, distance]
+		if shape != _back_shape:
+			_back_shape = shape
+			_back.mesh = back_mesh(placement.size, placement.curvature, distance)
+		_back.global_transform = placement.transform
 	for grip: int in _grips:
 		(_grips[grip] as Node3D).global_transform = _grip_transform(grip)
 

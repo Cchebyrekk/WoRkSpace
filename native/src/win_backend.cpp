@@ -535,4 +535,163 @@ HotkeyBackend *HotkeyBackend::create() {
 	return new Win32Hotkey();
 }
 
+// Recording a keyboard shortcut for the radial menu (20.10.2026): a low-level
+// keyboard hook on its own thread (the Godot window has no focus) swallows every
+// key while recording, so the shortcut does nothing in the focused program, and
+// keeps the first non-modifier key with the modifiers held at that moment.
+namespace {
+
+std::mutex record_mutex;
+std::thread record_thread;
+std::atomic<DWORD> record_thread_id{ 0 };
+bool record_ctrl = false, record_alt = false, record_shift = false, record_win = false;
+bool record_done = false;
+std::vector<uint16_t> record_keys;
+std::atomic<int> record_seen{ 0 };
+
+LRESULT CALLBACK record_proc(int code, WPARAM message, LPARAM data) {
+	if (code != HC_ACTION) {
+		return CallNextHookEx(nullptr, code, message, data);
+	}
+	record_seen++;
+	const KBDLLHOOKSTRUCT *key = reinterpret_cast<const KBDLLHOOKSTRUCT *>(data);
+	if (key->dwExtraInfo == INJECTED_BY_WORKPLACE) {
+		return CallNextHookEx(nullptr, code, message, data); // our own keys (gestures, the menu)
+	}
+	bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+	std::lock_guard<std::mutex> lock(record_mutex);
+	switch (key->vkCode) {
+		case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+			record_ctrl = down;
+			break;
+		case VK_MENU: case VK_LMENU: case VK_RMENU:
+			record_alt = down;
+			break;
+		case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+			record_shift = down;
+			break;
+		case VK_LWIN: case VK_RWIN:
+			record_win = down;
+			break;
+		default:
+			if (down && !record_done) {
+				record_keys.clear();
+				if (record_ctrl) record_keys.push_back(VK_CONTROL);
+				if (record_alt) record_keys.push_back(VK_MENU);
+				if (record_shift) record_keys.push_back(VK_SHIFT);
+				if (record_win) record_keys.push_back(VK_LWIN);
+				record_keys.push_back(static_cast<uint16_t>(key->vkCode));
+				record_done = true;
+				PostThreadMessageW(record_thread_id, WM_QUIT, 0, 0);
+			}
+			break;
+	}
+	return 1; // swallowed while recording
+}
+
+// The hook saw nothing in the headset (20.10.2026: 0 events in 20 s) — Windows
+// does not call a hook of an ordinary process while an elevated window has the
+// focus. So the keys are also polled; a shortcut found this way is not swallowed.
+bool record_was_down[256] = {};
+
+bool key_down_now(int key) {
+	return (GetAsyncKeyState(key) & 0x8000) != 0;
+}
+
+bool is_modifier(int key) {
+	return key == VK_SHIFT || key == VK_CONTROL || key == VK_MENU || key == VK_LWIN || key == VK_RWIN ||
+			(key >= VK_LSHIFT && key <= VK_RMENU);
+}
+
+void poll_keys(bool first) {
+	for (int key = 0x08; key <= 0xFE; key++) {
+		bool down = key_down_now(key);
+		bool pressed = down && !record_was_down[key];
+		record_was_down[key] = down;
+		if (first || !pressed || is_modifier(key) || record_seen > 0) {
+			continue;
+		}
+		std::lock_guard<std::mutex> lock(record_mutex);
+		if (record_done) {
+			return;
+		}
+		record_keys.clear();
+		if (key_down_now(VK_CONTROL)) record_keys.push_back(VK_CONTROL);
+		if (key_down_now(VK_MENU)) record_keys.push_back(VK_MENU);
+		if (key_down_now(VK_SHIFT)) record_keys.push_back(VK_SHIFT);
+		if (key_down_now(VK_LWIN) || key_down_now(VK_RWIN)) record_keys.push_back(VK_LWIN);
+		record_keys.push_back(static_cast<uint16_t>(key));
+		record_done = true;
+		return;
+	}
+}
+
+} // namespace
+
+void key_recording_stop() {
+	if (!record_thread.joinable()) {
+		return;
+	}
+	PostThreadMessageW(record_thread_id, WM_QUIT, 0, 0);
+	record_thread.join();
+	record_thread_id = 0;
+}
+
+bool key_recording_start() {
+	key_recording_stop();
+	{
+		std::lock_guard<std::mutex> lock(record_mutex);
+		record_ctrl = record_alt = record_shift = record_win = false;
+		record_done = false;
+		record_keys.clear();
+	}
+	record_seen = 0;
+	std::promise<bool> hooked;
+	std::future<bool> result = hooked.get_future();
+	record_thread = std::thread([&hooked]() {
+		HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, record_proc, GetModuleHandleW(nullptr), 0);
+		if (hook == nullptr) {
+			hooked.set_value(false);
+			return;
+		}
+		record_thread_id = GetCurrentThreadId();
+		hooked.set_value(true);
+		// The hook is called through this thread's message queue; between
+		// messages the keys are polled every 15 ms.
+		poll_keys(true);
+		bool quit = false;
+		while (!quit) {
+			MsgWaitForMultipleObjects(0, nullptr, FALSE, 15, QS_ALLINPUT);
+			MSG message;
+			while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+				if (message.message == WM_QUIT) {
+					quit = true;
+				}
+			}
+			if (!quit) {
+				poll_keys(false);
+			}
+		}
+		UnhookWindowsHookEx(hook);
+	});
+	if (result.get()) {
+		return true;
+	}
+	record_thread.join();
+	return false;
+}
+
+int key_recording_seen() {
+	return record_seen;
+}
+
+bool key_recording_result(std::vector<uint16_t> &keys) {
+	std::lock_guard<std::mutex> lock(record_mutex);
+	if (!record_done) {
+		return false;
+	}
+	keys = record_keys;
+	return true;
+}
+
 } // namespace workplace

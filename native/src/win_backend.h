@@ -64,6 +64,16 @@ bool secure_desktop_active();
 bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y,
 		std::vector<uint8_t> &out);
 
+// Records one keyboard shortcut from the physical keyboard (a low-level hook, so
+// the Godot window need not have focus; keys are swallowed while it records).
+bool key_recording_start();
+void key_recording_stop();
+// True once a shortcut was pressed: `keys` gets the modifiers held (Ctrl, Alt,
+// Shift, Win) and then the key, as Windows virtual keys.
+bool key_recording_result(std::vector<uint16_t> &keys);
+// How many keyboard events the recording hook has seen (for the log).
+int key_recording_seen();
+
 // System-wide hotkey that fires even when the Godot window is not focused.
 class HotkeyBackend {
 public:

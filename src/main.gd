@@ -197,7 +197,7 @@ const MONITOR_MENU_FORWARD := 0.25
 ## "Жесты": everything about recognising the hands — touches, pause, swipe, zoom,
 ## rest, fist, the ring's tilt and the moving hand's reach; 20.10.2026 the user
 ## asked for every setting to sit on the tab it belongs to).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения", "Мир"]
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Меню"]
 const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
@@ -206,6 +206,8 @@ const TUNABLE_TABS := {
 	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8,
 	"vignette": 8, "grid": 8, "grid_step": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8,
 }
+## The sliders of the settings rows (see VrSlider).
+var _sliders: Array[VrSlider] = []
 ## A tab with more rows than this lays them out in two columns.
 const SETTINGS_ROWS_PER_COLUMN := 11
 ## Where the column of tab buttons stands, left of the content.
@@ -402,13 +404,23 @@ class Pointer:
 	## Moving / turning: where the hand was when its pose formed (rig space), by action.
 	var travel_anchors := {}
 	var snap_turn := Locomotion.SnapTurn.new()
+	## Dragging a sphere's radius handle: the sphere's id (-1 = not), its radius and
+	## the hand's distance from its centre when taken, and how long the press was lost.
+	var radius_fixture := -1
+	var radius_start := 0.0
+	var radius_start_distance := 0.0
+	var radius_lost := 0.0
+	## The settings slider this pointer is dragging, or null.
+	var slider: VrSlider
 	## The ring shown for moving or turning: which action ("" = none) and the hand's
 	## offset in the plane facing the user (sideways, up), metres.
 	var travel_ring := ""
 	var travel_offset := Vector2.ZERO
-	var menu := ExtraGestures.Radial.new()
+	var menu := MenuSet.Navigator.new()
+	## Which finger opened the menu (0 middle, 1 ring, 2 little): it holds it open.
+	var menu_finger := 0
 	var menu_open := false
-	var menu_selected := -1
+	var menu_selected := ""
 	## Pointer mode that opened the menu: if the hand and the controller swap while
 	## it is open, it closes without running anything.
 	var menu_mode := ""
@@ -593,6 +605,10 @@ var _menu_backgrounds: Array[MeshInstance3D] = []
 var _calibration_status: Label3D
 ## Per hand: the radial menu's labels.
 var _menu_labels: Array = [[], []]
+## The radial menu's categories and how it opens (MenuSet; [menus] in settings).
+var _menus: Array = MenuSet.default_menus()
+var _menu_mode := MenuSet.MODE_TWO_LEVEL
+var _menu_editor: MenuEditor
 var _scroll_logged := 0.0
 ## Shared by both hands' recognisers; tuned on the settings panel.
 var _gesture_settings := HandGestures.Settings.new()
@@ -616,6 +632,29 @@ var _vignette_material: ShaderMaterial
 var _floor_label: Label3D
 ## Per hand: [outer ring, dead-zone ring, marker] shown while moving or turning.
 var _travel_rings: Array = []
+## The world's fixtures (slice j: spheres) and the one the user sits in (its id, or -1).
+var _fixtures: Array[WorldLayout.Fixture] = WorldLayout.default_fixtures(PackedStringArray())
+var _seated := -1
+## Smooth turning on now, and its top speed so far (degrees per second), for the log.
+var _smooth_turning := false
+var _smooth_turn_peak := 0.0
+## "Сесть": floats before the user near a sphere they are not seated in.
+var _sit_button: VrButton
+var _sit_offer: WorldLayout.Fixture
+## Beyond its radius plus this, a sphere no longer offers its seat (metres).
+const SEAT_REACH := 1.0
+## The "Заготовки" tab: a row per fixture and a row per monitor (pools, shown as needed).
+const FIXTURE_ROWS := 6
+const FIXTURE_MONITOR_ROWS := 8
+const FIXTURE_RADIUS_STEP := 0.1
+var _fixture_rows: Array[Node3D] = []
+var _fixture_monitor_rows: Array[Node3D] = []
+var _fixture_status: Label3D
+## Each sphere's radius handle (one per sphere, pooled) and its label.
+var _radius_handles: Array[MeshInstance3D] = []
+var _radius_labels: Array[Label3D] = []
+## A handle's hit area (metres around it): larger than drawn, a hand ray is not steady.
+const RADIUS_HANDLE_HIT := 0.07
 ## Controller sticks turning in steps: a separate step logic per controller.
 var _stick_snap: Array[Locomotion.SnapTurn] = []
 ## Stick values treated like a hand's offset (metres): full tilt = this far.
@@ -714,9 +753,12 @@ func _ready() -> void:
 		pointer.gestures.settings = _gesture_settings
 		pointer.engagement.settings = _engagement_settings
 	_build_buttons()
+	_build_seat_button()
+	_build_radius_handles()
 	_build_settings_panel()
 	_load_settings()
 	_refresh_floor_label()
+	_sync_menu_editor()
 	_update_ray_info()
 	_refresh_layout_section()
 	_refresh_settings_panel()
@@ -831,8 +873,12 @@ func _process(delta: float) -> void:
 	_update_calibration()
 	_update_pose_recording()
 	_update_grabs(delta)
+	_update_radius_handles(delta)
 	_place_monitor_menu()
 	_update_buttons(delta)
+	_update_sliders()
+	if _menu_editor != null:
+		_menu_editor.update(_pointers)
 	_probe_mark(3)
 	# Before the cursor (which it replaces while shown) and the rays (which end on its quad).
 	_update_secure_desktop()
@@ -1024,6 +1070,7 @@ func _probe_pipelines() -> String:
 ## placement under the rig (panel layers, the UAC quad) is put back in place.
 func _update_locomotion(delta: float) -> void:
 	var space := _world.travel_mode == 0
+	var seated := _seated >= 0
 	var to_world := _origin.global_transform.basis
 	var head := _camera.transform
 	var head_right := Vector3(head.basis.x.x, 0.0, head.basis.x.z).normalized()
@@ -1057,24 +1104,28 @@ func _update_locomotion(delta: float) -> void:
 			pointer.travel_ring = action
 			pointer.travel_offset = flat
 			if action == "move":
-				# Up = ahead, down = back, sideways = a step aside.
+				# Up = ahead, down = back, sideways = a step aside. Seated: no moving.
+				if seated:
+					pointer.travel_ring = ""
+					continue
 				var push := Locomotion.stick_velocity(Vector3(flat.x, flat.y, 0.0), _world.hand_reach, _world.move_speed, false)
 				velocity += to_world * (head_right * push.x + ahead * push.y)
 			else:
 				turn_rate += _turn_from(flat.x)
 				turn_steps += _snap_from(flat.x, pointer.snap_turn, now)
-				if space:
+				if space and not seated:
 					velocity += to_world * Locomotion.stick_velocity(Vector3(0.0, flat.y, 0.0), _world.hand_reach, _world.move_speed, false)
 		# Controllers: the left stick moves (forward where the head looks), the right turns.
 		if _stick_moves(i) and not pointer.menu_open:
 			var stick := _controllers[i].get_vector2(&"primary")
 			if i == 0:
-				var push := Locomotion.stick_velocity(Vector3(stick.x, stick.y, 0.0) * STICK_AS_REACH, STICK_AS_REACH, _world.move_speed, false)
-				velocity += to_world * (head_right * push.x + ahead * push.y)
+				if not seated:
+					var push := Locomotion.stick_velocity(Vector3(stick.x, stick.y, 0.0) * STICK_AS_REACH, STICK_AS_REACH, _world.move_speed, false)
+					velocity += to_world * (head_right * push.x + ahead * push.y)
 			else:
 				turn_rate += _turn_from(stick.x * STICK_AS_REACH)
 				turn_steps += _snap_from(stick.x * STICK_AS_REACH, _stick_snap[i], now)
-				if space:
+				if space and not seated:
 					velocity += to_world * Locomotion.stick_velocity(Vector3(0.0, stick.y * STICK_AS_REACH, 0.0), STICK_AS_REACH, _world.move_speed, false)
 
 	var rig := _origin.global_transform
@@ -1083,13 +1134,23 @@ func _update_locomotion(delta: float) -> void:
 	var angle := turn_rate * delta + turn_steps * deg_to_rad(_world.snap_degrees)
 	if angle != 0.0:
 		rig = Locomotion.turn_about(rig, _camera.global_position, angle)
-	if not space:
+	if not space and not seated:
 		rig.origin.y = Locomotion.settle(rig.origin.y, _floor_height, delta)
 	if rig != before:
 		_origin.global_transform = rig
 		_keep_world_in_place()
 		if turn_steps != 0:
 			print("[world] поворот рывком %+d°" % roundi(turn_steps * _world.snap_degrees))
+	# Smooth turning in the log: when it starts and ends, and how fast it went.
+	if turn_rate != 0.0:
+		_smooth_turn_peak = maxf(_smooth_turn_peak, absf(rad_to_deg(turn_rate)))
+		if not _smooth_turning:
+			_smooth_turning = true
+			print("[world] плавный поворот %s" % ("вправо" if turn_rate > 0.0 else "влево"))
+	elif _smooth_turning:
+		_smooth_turning = false
+		print("[world] плавный поворот закончен, до %.0f°/с" % _smooth_turn_peak)
+		_smooth_turn_peak = 0.0
 	var speed := velocity.length()
 	_set_vignette(Locomotion.vignette_strength(_world.vignette, speed, _world.move_speed,
 			turn_rate if turn_steps == 0 else deg_to_rad(_world.turn_speed_degrees), deg_to_rad(_world.turn_speed_degrees)))
@@ -1128,6 +1189,7 @@ func _keep_world_in_place() -> void:
 ## moved half a step, the mode or the floor changed. The floor shows with gravity.
 func _update_world_visuals() -> void:
 	_update_travel_rings()
+	_update_seat()
 	var head := _camera.global_position
 	var planar := _world.travel_mode == 1
 	_floor.visible = planar
@@ -1176,6 +1238,256 @@ func _update_travel_rings() -> void:
 		if pointer.travel_ring == "turn" and _world.travel_mode == 1:
 			shown_offset.y = 0.0  # with gravity the turning hand only turns
 		(parts[2] as MeshInstance3D).global_position = centre + right * shown_offset.x + up * shown_offset.y
+
+
+## Seats (slice j). Near a sphere the user does not sit in, "Сесть" floats in
+## front of them; it takes them to the sphere's centre, facing its middle.
+## Seated, the movement pose does not move them (turning still turns); "Встать"
+## in the radial menu (in place of "Центр") stands them up where they are.
+func _update_seat() -> void:
+	var head := _camera.global_transform
+	var offer := WorldLayout.nearby(_fixtures, head.origin, SEAT_REACH)
+	if offer != null and offer.id == _seated:
+		offer = null
+	_sit_offer = offer
+	_sit_button.visible = offer != null
+	if offer == null:
+		return
+	_sit_button.set_text("Сесть: %s" % offer.name)
+	var ahead := Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
+	var at := head.origin + ahead * 0.55 + Vector3.DOWN * 0.3
+	# Its face (+Z) towards the user.
+	_sit_button.global_transform = Transform3D(Basis.looking_at(ahead, Vector3.UP), at)
+
+
+func _sit() -> void:
+	if _sit_offer == null:
+		return
+	var fixture := _sit_offer
+	_seated = fixture.id
+	_origin.global_transform = WorldLayout.seat_rig(fixture, _camera.transform)
+	for pointer in _pointers:
+		pointer.travel_anchors.clear()
+	_keep_world_in_place()
+	_save_settings()
+	_refresh_fixture_section()
+	print("[world] сел в центре «%s» (радиус %.2f м)" % [fixture.name, fixture.radius])
+
+
+func _stand_up() -> void:
+	var fixture := WorldLayout.find(_fixtures, _seated)
+	_seated = -1
+	_save_settings()
+	_refresh_fixture_section()
+	print("[world] встал%s" % ((" с места «%s»" % fixture.name) if fixture != null else ""))
+
+
+## The "Заготовки" tab: left, the spheres (radius, move it here, delete) and
+## "Добавить шар здесь"; right, each monitor and the sphere it hangs on (press to
+## move it to the next sphere). Every change is saved at once.
+func _build_fixture_section(tab: Node3D) -> void:
+	_settings_label("Шары", Vector3(-0.5, 0.53, 0.0), 28, tab)
+	for r in FIXTURE_ROWS:
+		var row := Node3D.new()
+		row.position = Vector3(0.0, 0.45 - r * 0.08, 0.0)
+		tab.add_child(row)
+		var name_label := _settings_label("", Vector3(-0.8, 0.0, 0.0), 24, row)
+		name_label.name = "Name"
+		_add_button_to(row, "−", Vector3(-0.6, 0.0, 0.0), Vector2(0.07, 0.052), 0.25).activated.connect(_on_fixture_radius.bind(r, -1.0))
+		var radius_label := _settings_label("", Vector3(-0.5, 0.0, 0.0), 24, row)
+		radius_label.name = "Radius"
+		_add_button_to(row, "+", Vector3(-0.4, 0.0, 0.0), Vector2(0.07, 0.052), 0.25).activated.connect(_on_fixture_radius.bind(r, 1.0))
+		_add_button_to(row, "Сюда", Vector3(-0.23, 0.0, 0.0), Vector2(0.16, 0.055), 0.6).activated.connect(_on_fixture_here.bind(r))
+		_add_button_to(row, "Удалить", Vector3(-0.04, 0.0, 0.0), Vector2(0.17, 0.055), 1.0).activated.connect(_on_fixture_delete.bind(r))
+		_fixture_rows.append(row)
+	_add_button_to(tab, "Добавить шар здесь", Vector3(-0.45, -0.07, 0.0), Vector2(0.42, 0.07), 0.6).activated.connect(_on_fixture_add)
+	_fixture_status = _settings_label("«Сюда» — центр шара в вашу голову, лицом туда, куда смотрите.\nРадиус меняет и шарик-ручка на сфере внизу перед местом.",
+			Vector3(-0.45, -0.17, 0.0), 20, tab)
+
+	_settings_label("Мониторы", Vector3(0.6, 0.53, 0.0), 28, tab)
+	for m in FIXTURE_MONITOR_ROWS:
+		var row := Node3D.new()
+		row.position = Vector3(0.0, 0.45 - m * 0.07, 0.0)
+		tab.add_child(row)
+		var label := _settings_label("", Vector3(0.48, 0.0, 0.0), 22, row)
+		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		label.name = "Monitor"
+		var button := _add_button_to(row, "", Vector3(0.7, 0.0, 0.0), Vector2(0.3, 0.055), 0.25)
+		button.name = "Fixture"
+		button.activated.connect(_on_monitor_fixture.bind(m))
+		_fixture_monitor_rows.append(row)
+	_refresh_fixture_section()
+
+
+func _refresh_fixture_section() -> void:
+	if _fixture_rows.is_empty():
+		return
+	for r in FIXTURE_ROWS:
+		var row := _fixture_rows[r]
+		row.visible = r < _fixtures.size()
+		if row.visible:
+			var fixture := _fixtures[r]
+			(row.get_node("Name") as Label3D).text = fixture.name + (" (сижу)" if fixture.id == _seated else "")
+			(row.get_node("Radius") as Label3D).text = "%.1f м" % fixture.radius
+	for m in FIXTURE_MONITOR_ROWS:
+		var row := _fixture_monitor_rows[m]
+		row.visible = m < _panels.size()
+		if row.visible:
+			var panel := _panels[m]
+			(row.get_node("Monitor") as Label3D).text = "%s %d×%d" % [panel.monitor_name.trim_prefix("\\\\.\\"),
+					panel.monitor_rect.size.x, panel.monitor_rect.size.y]
+			(row.get_node("Fixture") as VrButton).set_text(_fixture_of(panel).name)
+
+
+func _on_fixture_radius(row: int, direction: float) -> void:
+	if row >= _fixtures.size():
+		return
+	var fixture := _fixtures[row]
+	fixture.radius = clampf(snappedf(fixture.radius + direction * FIXTURE_RADIUS_STEP, FIXTURE_RADIUS_STEP),
+			WorldLayout.MIN_RADIUS, WorldLayout.MAX_RADIUS)
+	_fixture_changed("%s: радиус %.1f м" % [fixture.name, fixture.radius])
+
+
+## The sphere's centre to the user's head, its middle where the user looks.
+func _on_fixture_here(row: int) -> void:
+	if row >= _fixtures.size():
+		return
+	var fixture := _fixtures[row]
+	var head := _camera.global_transform
+	fixture.centre = head.origin
+	fixture.yaw = atan2(head.basis.z.x, head.basis.z.z)
+	_fixture_changed("%s: центр здесь" % fixture.name)
+
+
+func _on_fixture_delete(row: int) -> void:
+	if row >= _fixtures.size():
+		return
+	var fixture := _fixtures[row]
+	if not WorldLayout.remove(_fixtures, fixture.id):
+		_fixture_status.text = "Последний шар удалить нельзя: мониторам надо где-то висеть."
+		return
+	if _seated == fixture.id:
+		_seated = -1
+	_fixture_changed("%s удалён, его мониторы — на «%s»" % [fixture.name, _fixtures[0].name])
+
+
+func _on_fixture_add() -> void:
+	if _fixtures.size() >= FIXTURE_ROWS:
+		_fixture_status.text = "Шаров уже %d — больше на вкладке не поместится." % FIXTURE_ROWS
+		return
+	var head := _camera.global_transform
+	var fixture := WorldLayout.new_fixture(_fixtures, "sphere", head.origin, atan2(head.basis.z.x, head.basis.z.z))
+	_fixtures.append(fixture)
+	_fixture_changed("%s добавлен здесь; назначьте ему мониторы справа" % fixture.name)
+
+
+## The monitor in row `m` goes to the next sphere in the list.
+func _on_monitor_fixture(m: int) -> void:
+	if m >= _panels.size() or _fixtures.size() < 2:
+		return
+	var panel := _panels[m]
+	var next := _fixtures[(_fixtures.find(_fixture_of(panel)) + 1) % _fixtures.size()]
+	WorldLayout.assign(_fixtures, panel.monitor_key, next.id)
+	_fixture_changed("%s — на «%s»" % [panel.monitor_name, next.name])
+
+
+func _fixture_changed(message: String) -> void:
+	_place_panels([], true)
+	_save_settings()
+	_refresh_fixture_section()
+	_fixture_status.text = message
+	print("[world] ", message)
+
+
+## Each sphere's radius handle: a small ball on the sphere low in front of the
+## seat. Pinch or trigger on it and pull away from the centre — bigger, towards
+## it — smaller; the screens follow live, the radius is saved on letting go.
+func _update_radius_handles(delta: float) -> void:
+	for i in _radius_handles.size():
+		var shown := i < _fixtures.size()
+		_radius_handles[i].visible = shown
+		_radius_labels[i].visible = false
+		if shown:
+			_radius_handles[i].global_position = WorldLayout.radius_handle(_fixtures[i])
+			(_radius_handles[i].material_override as StandardMaterial3D).albedo_color = ScreenPanel.GRIP_COLOR
+	for pointer in _pointers:
+		if pointer.radius_fixture >= 0:
+			var fixture := WorldLayout.find(_fixtures, pointer.radius_fixture)
+			if fixture == null:
+				pointer.radius_fixture = -1
+				continue
+			if pointer.active and pointer.pressed:
+				pointer.radius_lost = 0.0
+				var radius := WorldLayout.dragged_radius(pointer.radius_start, pointer.radius_start_distance,
+						pointer.origin.distance_to(fixture.centre))
+				if not is_equal_approx(radius, fixture.radius):
+					fixture.radius = radius
+					_place_panels()
+				_show_radius_handle(fixture, ScreenPanel.GRIP_ACTIVE_COLOR)
+				continue
+			pointer.radius_lost += delta
+			if pointer.radius_lost >= GRAB_GRACE_SEC:
+				pointer.radius_fixture = -1
+				_fixture_changed("%s: радиус %.2f м" % [fixture.name, fixture.radius])
+			continue
+		if not pointer.active or pointer.grab_panel != null:
+			continue
+		for fixture in _fixtures:
+			var at := WorldLayout.radius_handle(fixture)
+			var along := (at - pointer.origin).dot(pointer.direction)
+			if along <= 0.0 or (pointer.origin + pointer.direction * along).distance_to(at) > RADIUS_HANDLE_HIT:
+				continue
+			pointer.hit_distance = minf(pointer.hit_distance, along)
+			_show_radius_handle(fixture, ScreenPanel.GRIP_HOVER_COLOR)
+			if pointer.just_pressed:
+				pointer.radius_fixture = fixture.id
+				pointer.radius_start = fixture.radius
+				pointer.radius_start_distance = pointer.origin.distance_to(fixture.centre)
+				pointer.radius_lost = 0.0
+				print("[world] %s: радиус (%s)" % [fixture.name, pointer.mode])
+			break
+
+
+func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color) -> void:
+	var i := _fixtures.find(fixture)
+	if i < 0 or i >= _radius_handles.size():
+		return
+	(_radius_handles[i].material_override as StandardMaterial3D).albedo_color = color
+	var label := _radius_labels[i]
+	label.visible = true
+	label.text = "радиус шара %.2f м" % fixture.radius
+	label.global_position = WorldLayout.radius_handle(fixture) + Vector3.UP * 0.07
+
+
+func _build_radius_handles() -> void:
+	var ball := SphereMesh.new()
+	ball.radius = 0.025
+	ball.height = 0.05
+	for i in FIXTURE_ROWS:
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.albedo_color = ScreenPanel.GRIP_COLOR
+		var handle := MeshInstance3D.new()
+		handle.mesh = ball
+		handle.material_override = material
+		handle.visible = false
+		add_child(handle)
+		_radius_handles.append(handle)
+		var label := Label3D.new()
+		label.pixel_size = 0.001
+		label.font_size = 26
+		label.outline_size = 8
+		label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		label.visible = false
+		add_child(label)
+		_radius_labels.append(label)
+
+
+func _build_seat_button() -> void:
+	_sit_button = _add_button_to(self, "Сесть", Vector3.ZERO, Vector2(0.36, 0.09), 0.4)
+	_sit_button.visible = false
+	_sit_button.activated.connect(_sit)
 
 
 func _set_vignette(strength: float) -> void:
@@ -1740,8 +2052,9 @@ func _update_cursor() -> void:
 	for pointer in _pointers:
 		pointer.on_panel = false
 		pointer.panel = null
-		# A pointer that carries a panel does not touch the cursor; nor does one on a monitor's menu.
-		if not pointer.active or pointer.grab_panel != null:
+		# A pointer that carries a panel (or a sphere's radius) does not touch the
+		# cursor; nor does one on a monitor's menu.
+		if not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0 or pointer.slider != null:
 			continue
 		var on_menu := _monitor_menu.hit_distance(pointer.origin, pointer.direction)
 		if on_menu >= 0.0:
@@ -1988,6 +2301,22 @@ func _update_panels(delta: float) -> void:
 			panel.layer.visible = in_range
 			print("[world] %s: %s радиуса отрисовки" % [panel.monitor_name, "в пределах" if in_range else "за пределами"])
 		panel.refresh(_session_visible and in_range, copy_frames and in_range, now)
+		panel.update_back(head, in_range)
+	_order_layers(head)
+
+
+## Composition layers are drawn by sort_order, not by depth: with every panel at
+## the same order, one behind another could show over it from some angles
+## (20.10.2026). The nearest panel gets -2, each farther one a step lower; the
+## UAC quad stays above them all at -1.
+func _order_layers(head: Vector3) -> void:
+	var by_distance := _panels.duplicate()
+	by_distance.sort_custom(func(a: ScreenPanel, b: ScreenPanel) -> bool:
+		return a.placement.transform.origin.distance_squared_to(head) < b.placement.transform.origin.distance_squared_to(head))
+	for rank in by_distance.size():
+		var layer := (by_distance[rank] as ScreenPanel).layer
+		if layer != null and layer.sort_order != -2 - rank:
+			layer.sort_order = -2 - rank
 
 
 ## The same monitors, only moved around (or another one made primary): the
@@ -2064,6 +2393,12 @@ func _rebuild_panels() -> void:
 		_repair_layout()
 	_resume_slot_load()
 	_continue_slot_load()
+	# Every monitor on one fixture; new ones on the first (slice j).
+	var keys := PackedStringArray()
+	for panel in _panels:
+		keys.append(panel.monitor_key)
+	WorldLayout.settle(_fixtures, keys)
+	_refresh_fixture_section()
 	_place_panels([], true)
 
 
@@ -2089,17 +2424,44 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 	for i in _panels.size():
 		var panel := _panels[i]
 		panel.vr_scale = _panel_scales.get(panel.monitor_key, 1.0)
-		panel.distance = PANEL_DISTANCE
 		scales.append(panel.vr_scale)
 		pitches.append(_pitch_of(panel.monitor_key, row_offsets[i]))
 		curvatures.append(_panel_curvatures.get(panel.monitor_key, 0.0))
-	var placements := PanelLayout.arrange(rects, primary_index, PANEL_EYE, PANEL_DISTANCE, PANEL_WIDTH_DEG,
-			PANEL_MAX_ARC_DEG, scales, ROW_GAP, pitches, curvatures)
+	# Each fixture lays out its own monitors in its own space (centre at the origin,
+	# its middle along -Z), then the panels go where the fixture is (slice j).
+	var placements: Array[PanelLayout.Placement] = []
+	placements.resize(_panels.size())
+	for fixture in _fixtures:
+		var members: Array[int] = []
+		for i in _panels.size():
+			if _fixture_of(_panels[i]) == fixture:
+				members.append(i)
+		if members.is_empty():
+			continue
+		var sub_rects: Array[Rect2i] = []
+		var sub_scales: Array[float] = []
+		var sub_pitches: Array[float] = []
+		var sub_curvatures: Array[float] = []
+		var sub_primary := maxi(members.find(primary_index), 0)
+		for i in members:
+			sub_rects.append(rects[i])
+			sub_scales.append(scales[i])
+			sub_pitches.append(pitches[i])
+			sub_curvatures.append(curvatures[i])
+		var arranged := PanelLayout.arrange(sub_rects, sub_primary, Vector3.ZERO, fixture.radius,
+				WorldLayout.degrees_per_1920(fixture.radius), PANEL_MAX_ARC_DEG, sub_scales, ROW_GAP, sub_pitches, sub_curvatures)
+		for k in members.size():
+			var i := members[k]
+			var free_at: Variant = _panel_positions.get(_panels[i].monitor_key)
+			var placement := arranged[k]
+			if free_at is Vector2:
+				placement = PanelLayout.placement_at(free_at.x, free_at.y, placement.size, Vector3.ZERO, fixture.radius,
+						_panel_pitches.get(_panels[i].monitor_key, NAN), curvatures[i])
+			placement.transform = fixture.frame() * placement.transform
+			placements[i] = placement
+			_panels[i].distance = fixture.radius
 	for i in _panels.size():
 		var free_at: Variant = _panel_positions.get(_panels[i].monitor_key)
-		if free_at is Vector2:
-			placements[i] = PanelLayout.placement_at(free_at.x, free_at.y, placements[i].size, PANEL_EYE, PANEL_DISTANCE,
-					_panel_pitches.get(_panels[i].monitor_key, NAN), curvatures[i])
 		_panels[i].place(placements[i])
 		if log_it:
 			print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, наклон %+.0f°, изгиб %.2f, %.2f x %.2f м%s" % [
@@ -2249,8 +2611,28 @@ func _make_primary(panel: ScreenPanel) -> void:
 		_topology.arrange(positions)
 
 
+## The fixture a panel hangs on.
+func _fixture_of(panel: ScreenPanel) -> WorldLayout.Fixture:
+	return WorldLayout.fixture_of(_fixtures, panel.monitor_key)
+
+
+## Where the pointer's ray leaves the sphere of `fixture`, as heading and
+## elevation in the fixture's own space (NAN if it misses).
+func _fixture_angles(pointer: Pointer, fixture: WorldLayout.Fixture) -> Vector2:
+	var to_local := fixture.frame().affine_inverse()
+	return PanelLayout.sphere_angles(to_local * pointer.origin, to_local.basis * pointer.direction, Vector3.ZERO, fixture.radius)
+
+
+## Whether carrying a panel rearranges the Windows layout: the setting says so and
+## all monitors hang on one fixture (with several, panels move in VR only until
+## the Windows layout follows the seat the user is on).
+func _windows_moves() -> bool:
+	return _panel_options.move_mode == 0 and _fixtures.size() == 1
+
+
 func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool) -> bool:
-	var angles := PanelLayout.sphere_angles(pointer.origin, pointer.direction, PANEL_EYE, PANEL_DISTANCE)
+	var fixture := _fixture_of(panel)
+	var angles := _fixture_angles(pointer, fixture)
 	if is_nan(angles.x):
 		return false
 	pointer.grab_panel = panel
@@ -2270,18 +2652,19 @@ func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool)
 		_drag_rects = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
 		_drag_primary = _primary_index()
 		_drag_preview = _drag_rects.duplicate()
-		if _panel_options.move_mode == 0 and _panel_positions.erase(panel.monitor_key):
+		if _windows_moves() and _panel_positions.erase(panel.monitor_key):
 			# Moved in the layout: it is part of the layout again at once.
 			_save_settings()
 			_place_panels(_drag_rects)
 	print("[panels] %s: %s (%s%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], "кулак" if by_fist else pointer.mode,
-			", только VR" if kind == ScreenPanel.Grip.MOVE and _panel_options.move_mode == 1 else ""])
+			", только VR" if kind == ScreenPanel.Grip.MOVE and not _windows_moves() else ""])
 	return true
 
 
 func _drag(pointer: Pointer) -> void:
 	var panel := pointer.grab_panel
-	var angles := PanelLayout.sphere_angles(pointer.origin, pointer.direction, PANEL_EYE, PANEL_DISTANCE)
+	var fixture := _fixture_of(panel)
+	var angles := _fixture_angles(pointer, fixture)
 	if is_nan(angles.x):
 		return
 	var magnet := _panel_options.magnet != 0
@@ -2333,27 +2716,31 @@ func _drag(pointer: Pointer) -> void:
 			return
 	var at := angles - pointer.grab_offset
 	at.y = clampf(at.y, -1.2, 1.2)
-	if _panel_options.move_mode == 1:
-		# Only in VR: wherever it is put, with the magnet to the other panels.
+	if not _windows_moves():
+		# Only in VR: wherever it is put on its sphere, with the magnet to the other
+		# panels of the same sphere.
 		if magnet:
 			var raw := at
 			var others: Array[Vector4] = []
 			var own_widths: Array[float] = []
 			for other in _panels:
-				if other != panel:
-					var other_half := _visible_half(other.placement)
+				if other != panel and _fixture_of(other) == fixture:
+					var other_half := _visible_half(other.placement, fixture.radius)
 					others.append(Vector4(other.placement.heading, other.placement.elevation, other_half.x, other_half.y))
 					# This panel's width as if it stood at the other one's height.
 					own_widths.append(PanelLayout.visible_half(panel.placement.size, other.placement.elevation,
-							panel.placement.curvature, PANEL_DISTANCE).x)
-			var own_half := PanelLayout.visible_half(panel.placement.size, 0.0, panel.placement.curvature, PANEL_DISTANCE)
+							panel.placement.curvature, fixture.radius).x)
+			var own_half := PanelLayout.visible_half(panel.placement.size, 0.0, panel.placement.curvature, fixture.radius)
 			at = PanelLayout.snap_angles(at.x, at.y, own_half, others,
 					deg_to_rad(MAGNET_REACH_DEG), pointer.snap_held, own_widths)
 			pointer.snap_held = Vector2(at.x if at.x != raw.x else NAN, at.y if at.y != raw.y else NAN)
-		panel.place(PanelLayout.placement_at(at.x, at.y, panel.placement.size, PANEL_EYE, PANEL_DISTANCE,
-				_panel_pitches.get(panel.monitor_key, NAN), panel.placement.curvature))
+		var placed := PanelLayout.placement_at(at.x, at.y, panel.placement.size, Vector3.ZERO, fixture.radius,
+				_panel_pitches.get(panel.monitor_key, NAN), panel.placement.curvature)
+		placed.transform = fixture.frame() * placed.transform
+		panel.place(placed)
 		return
-	var drop := PanelLayout.to_desktop(_drag_rects, _drag_primary, PANEL_DISTANCE, PANEL_WIDTH_DEG, PANEL_MAX_ARC_DEG, at.x, at.y)
+	var drop := PanelLayout.to_desktop(_drag_rects, _drag_primary, fixture.radius, WorldLayout.degrees_per_1920(fixture.radius),
+			PANEL_MAX_ARC_DEG, at.x, at.y)
 	var preview := LayoutEdit.move(_drag_rects, _drag_primary, _panels.find(panel), drop)
 	# The carried panel stands where it will land (with the magnet to edges and
 	# seams), not freely under the hand: otherwise the magnet was not seen and the
@@ -2380,8 +2767,8 @@ func _set_pitch(panel: ScreenPanel, pitch: float) -> void:
 
 ## Half-width and half-height of a placed panel as the eye sees them (curved
 ## panels look narrower than flat ones), for the magnet.
-func _visible_half(placement: PanelLayout.Placement) -> Vector2:
-	return PanelLayout.visible_half(placement.size, placement.elevation, placement.curvature, PANEL_DISTANCE)
+func _visible_half(placement: PanelLayout.Placement, radius: float) -> Vector2:
+	return PanelLayout.visible_half(placement.size, placement.elevation, placement.curvature, radius)
 
 
 func _end_grab(pointer: Pointer) -> void:
@@ -2396,7 +2783,7 @@ func _end_grab(pointer: Pointer) -> void:
 			print("[panels] %s: размер %.2f, наклон %+.0f°, изгиб %.2f" % [panel.monitor_name, panel.vr_scale,
 					rad_to_deg(panel.placement.pitch), panel.placement.curvature])
 			return
-	if _panel_options.move_mode == 1:
+	if not _windows_moves():
 		_panel_positions[panel.monitor_key] = Vector2(panel.placement.heading, panel.placement.elevation)
 		_save_settings()
 		print("[panels] %s: свободно в VR, курс %+.1f°, возвышение %+.1f°" % [panel.monitor_name,
@@ -2445,6 +2832,13 @@ func _recenter() -> void:
 	if _settings_root != null:
 		_settings_root.global_transform = Transform3D(Basis(Vector3.UP, PI), Vector3(0.0, 1.25, 0.9))
 	_status.global_position = Vector3(0.0, 2.05, -1.2)
+	# Seated (also after a restart): back to the seat, facing its sphere's middle.
+	var seat := WorldLayout.find(_fixtures, _seated)
+	if seat != null:
+		_origin.global_transform = WorldLayout.seat_rig(seat, _camera.transform)
+		_keep_world_in_place()
+	elif _seated >= 0:
+		_seated = -1
 	# A prompt on show follows too ("Центр" or the Meta button), in front of the new view.
 	if _secure_shown:
 		_release_secure_button()
@@ -2569,6 +2963,20 @@ func _load_settings() -> void:
 		_bindings.merge(bindings, true)
 	_move_hand = clampi(int(config.get_value("bindings", "move_hand", _move_hand)), 0, 1)
 	_floor_height = float(config.get_value("world", "floor_height", _floor_height))
+	_menu_mode = clampi(int(config.get_value("menus", "mode", _menu_mode)), 0, 1)
+	var menus: Variant = config.get_value("menus", "list", [])
+	if menus is Array and not (menus as Array).is_empty() and (menus as Array).size() <= MenuSet.MAX_CATEGORIES:
+		_menus = menus
+	var own: Variant = config.get_value("menus", "custom", {})
+	if own is Dictionary:
+		MenuSet.custom = own
+	var fixtures: Variant = config.get_value("world", "fixtures", [])
+	if fixtures is Array and not (fixtures as Array).is_empty():
+		_fixtures.clear()
+		for data: Variant in fixtures:
+			if data is Dictionary:
+				_fixtures.append(WorldLayout.Fixture.from_dictionary(data))
+	_seated = int(config.get_value("world", "seated", -1))
 	_apply_bindings()
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
@@ -2592,6 +3000,11 @@ func _save_settings() -> void:
 	config.set_value("bindings", "actions", _bindings)
 	config.set_value("bindings", "move_hand", _move_hand)
 	config.set_value("world", "floor_height", _floor_height)
+	config.set_value("menus", "mode", _menu_mode)
+	config.set_value("menus", "list", _menus)
+	config.set_value("menus", "custom", MenuSet.custom)
+	config.set_value("world", "fixtures", _fixtures.map(func(f: WorldLayout.Fixture) -> Dictionary: return f.to_dictionary()))
+	config.set_value("world", "seated", _seated)
 	if not _slot_loading.is_empty():
 		config.set_value("layouts", "pending", _slot_loading)
 	if _driver_restore_pending:
@@ -2704,12 +3117,58 @@ func _apply_arrangement(own: Dictionary) -> void:
 ## Opens the menu of `panel` in front of the lower part of it, or closes it if it
 ## is already open there.
 ## A radial menu item: a keyboard shortcut, or one of the app's own actions.
-func _run_menu_item(item: Array) -> void:
-	var keys: Array = item[1]
+## The "Меню" tab (MenuEditor): bins of functions, categories, recording shortcuts.
+func _build_menu_section(tab: Node3D) -> void:
+	_menu_editor = MenuEditor.new()
+	tab.add_child(_menu_editor)
+	_menu_editor.build(_add_button_to)
+	_menu_editor.changed.connect(_on_menus_changed)
+	_sync_menu_editor()
+
+
+## After loading: the editor works on the loaded lists.
+func _sync_menu_editor() -> void:
+	if _menu_editor == null:
+		return
+	_menu_editor.menus = _menus
+	_menu_editor.mode = _menu_mode
+	_menu_editor.refresh()
+
+
+func _on_menus_changed() -> void:
+	_menu_mode = _menu_editor.mode
+	_save_settings()
+	print("[menus] %s; категорий %d, своих функций %d" % ["два уровня" if _menu_mode == MenuSet.MODE_TWO_LEVEL else "по пальцу",
+			_menus.size(), MenuSet.custom.size()])
+
+
+## The radial menu closed: runs the item the hand was on, if any.
+func _finish_menu(index: int, how: String) -> void:
+	var pointer := _pointers[index]
+	var id := pointer.menu_selected
+	pointer.menu_selected = ""
+	if id == "":
+		return
+	_run_menu_action(id)
+	print("[gesture] %s: меню — %s%s" % [SIDE_LABELS[index], _menu_label(id), how])
+
+
+func _run_menu_action(id: String) -> void:
+	var keys: Array = MenuSet.action(id)[1]
 	if not keys.is_empty():
 		MouseInput.press_keys(PackedInt32Array(keys))
-	elif item[0] == "Центр":
-		_recenter()
+	elif id == "center":
+		# Seated, the same item stands the user up (slice j); the label says so.
+		if _seated >= 0:
+			_stand_up()
+		else:
+			_recenter()
+
+
+func _menu_label(id: String) -> String:
+	if id == "center" and _seated >= 0:
+		return "Встать"
+	return MenuSet.action(id)[0]
 
 
 func _toggle_monitor_menu(panel: ScreenPanel) -> void:
@@ -3279,7 +3738,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		for joint in HandPose.JOINT_COUNT:
 			joints[joint] = tracker.get_hand_joint_transform(joint).origin
 		pointer.hand_joints = joints
-		pointer.hand_features = HandPose.features(joints)
+		pointer.hand_features = HandPose.features(joints, SIDE_SIGNS[index], _camera.transform.origin)
 		frame.thumb_ring = thumb_tip.distance_to(joints[HandPose.FINGERS[3][3]])
 		frame.thumb_pinky = thumb_tip.distance_to(joints[HandPose.FINGERS[4][3]])
 		if POSE_LOG and frame.time >= _pose_log_next[index]:
@@ -3368,24 +3827,31 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.disc_shown = gesture.disc
 		pointer.disc_pose_started = pointer.scrolling and not was_scrolling
 
-		# Radial menu: a middle-finger pinch with the palm turned to the user opens it
-		# instead of a right click; keep pinching, move to an item, let go to run it.
+		# Radial menu: with the palm turned to the user, the thumb on the middle, ring
+		# or little fingertip opens it instead of a click (by finger, that finger picks
+		# the category); keep touching, move to an item, let go to run it.
 		var facing_user := pointer.palm_normal.dot((_camera.global_position - palm).normalized()) > MENU_PALM_FACING
-		if not pointer.menu_open and not is_nan(gesture.anchor_time) and gesture.button == HandGestures.Click.RIGHT and facing_user:
-			pointer.menu_open = true
-			pointer.menu.open(pointer.pinch_point, _camera.global_position)
-			pointer.menu_mode = "рука"
-			print("[gesture] %s: круговое меню" % SIDE_LABELS[index])
+		var menu_touches := [frame.thumb_middle, frame.thumb_ring, frame.thumb_pinky]
+		if not pointer.menu_open and facing_user and not resting:
+			for finger in 3:
+				if menu_touches[finger] < _gesture_settings.pinch_press:
+					pointer.menu_open = true
+					pointer.menu_finger = finger
+					pointer.menu_mode = "рука"
+					pointer.menu.menus = _menus
+					pointer.menu.mode = _menu_mode
+					pointer.menu.open(pointer.pinch_point, _camera.global_position, finger if _menu_mode == MenuSet.MODE_FINGER else -1)
+					pointer.gestures.reset()
+					print("[gesture] %s: круговое меню%s" % [SIDE_LABELS[index],
+							(" «%s»" % _menus[finger]["name"]) if _menu_mode == MenuSet.MODE_FINGER and finger < _menus.size() else ""])
+					break
 		if pointer.menu_open and pointer.menu_mode == pointer.mode:
-			if gesture.button == HandGestures.Click.RIGHT:
-				pointer.menu_selected = pointer.menu.selection(pointer.pinch_point)
+			if float(menu_touches[pointer.menu_finger]) < _gesture_settings.pinch_release:
+				pointer.menu_selected = pointer.menu.update(pointer.pinch_point)
 			else:
 				pointer.menu_open = false
-				if pointer.menu_selected >= 0:
-					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
-					_run_menu_item(item)
-					print("[gesture] %s: меню — %s" % [SIDE_LABELS[index], item[0]])
-				pointer.menu_selected = -1
+				_finish_menu(index, "")
+			pointer.gestures.reset()
 			pointer.button = HandGestures.Click.NONE
 			pointer.pending = pointer.menu_open
 
@@ -3428,21 +3894,24 @@ func _update_pointer(index: int, delta: float) -> void:
 		if not pointer.menu_open and menu_held and not was_pressed:
 			pointer.menu_open = true
 			pointer.menu_mode = pointer.mode
+			# A controller has no fingers to pick by: always two levels.
+			pointer.menu.menus = _menus
+			pointer.menu.mode = MenuSet.MODE_TWO_LEVEL
 			pointer.menu.open(controller.global_position, _camera.global_position)
 			print("[gesture] %s: круговое меню (контроллер)" % SIDE_LABELS[index])
 		if pointer.menu_open and pointer.menu_mode == pointer.mode:
 			if menu_held:
+				var point := controller.global_position
 				if stick_vector.length() > CONTROLLER_MENU_STICK:
-					pointer.menu_selected = ExtraGestures.Radial.item_at(stick_vector, 0.0, ExtraGestures.Radial.ITEMS.size())
-				else:
-					pointer.menu_selected = pointer.menu.selection(controller.global_position)
+					# The stick points from the ring shown now: categories or items.
+					var nav := pointer.menu
+					var ring_centre := nav.item_centre if nav.level == 1 else nav.centre
+					var reach := nav.item_radius if nav.level == 1 else nav.radius
+					point = ring_centre + (nav.right * stick_vector.x + nav.up * stick_vector.y).normalized() * reach
+				pointer.menu_selected = pointer.menu.update(point)
 			else:
 				pointer.menu_open = false
-				if pointer.menu_selected >= 0:
-					var item: Array = ExtraGestures.Radial.ITEMS[pointer.menu_selected]
-					_run_menu_item(item)
-					print("[gesture] %s: меню — %s (контроллер)" % [SIDE_LABELS[index], item[0]])
-				pointer.menu_selected = -1
+				_finish_menu(index, " (контроллер)")
 			pointer.button = HandGestures.Click.NONE
 			pointer.pending = pointer.menu_open
 			pointer.scrolling = false
@@ -3464,7 +3933,7 @@ func _update_pointer(index: int, delta: float) -> void:
 	if pointer.menu_open and pointer.menu_mode != pointer.mode:
 		# Switched between hand and controller (or lost tracking): close without running.
 		pointer.menu_open = false
-		pointer.menu_selected = -1
+		pointer.menu_selected = ""
 	pointer.pressed = pointer.button != HandGestures.Click.NONE
 	pointer.just_pressed = pointer.pressed and not was_pressed
 	if pointer.pressed != was_pressed:
@@ -3505,14 +3974,33 @@ func _update_rays() -> void:
 			# labels so that they float clearly in front of it.
 			_menu_backgrounds[i].global_transform = Transform3D(Basis(pointer.menu.right, toward_viewer, -pointer.menu.up),
 					pointer.menu.centre - toward_viewer * 0.035)
-		for item in ExtraGestures.Radial.ITEMS.size():
-			var label: Label3D = _menu_labels[i][item]
-			label.visible = pointer.menu_open
-			if pointer.menu_open:
-				label.global_position = pointer.menu.item_position(item)
-				var selected := item == pointer.menu_selected
-				label.modulate = Color(1.0, 0.85, 0.3) if selected else Color(0.85, 0.9, 1.0)
-				label.font_size = 34 if selected else 26
+		# What the ring shows: the categories, or the chosen one's items with its name
+		# in the middle.
+		var nav := pointer.menu
+		var shown: Array = []  # [text, position, highlighted]
+		if pointer.menu_open:
+			if nav.level == 0:
+				for c in nav.menus.size():
+					shown.append([nav.menus[c]["name"], nav.category_position(c), false])
+			else:
+				var items := MenuSet.items_of(nav.menus[nav.category])
+				for k in items.size():
+					shown.append([_menu_label(items[k]), nav.item_position(k, items.size()), items[k] == pointer.menu_selected])
+				shown.append([nav.menus[nav.category]["name"], nav.item_centre, false])
+			_menu_backgrounds[i].global_position = (nav.item_centre if nav.level == 1 else nav.centre) \
+					- nav.right.cross(nav.up) * 0.035
+			# The dark disc as wide as the ring shown (a ring of many items is wider).
+			var across := ((nav.item_radius if nav.level == 1 else nav.radius) + 0.07) / 0.18
+			_menu_backgrounds[i].scale = Vector3(across, 1.0, across)
+		for k in _menu_labels[i].size():
+			var label: Label3D = _menu_labels[i][k]
+			label.visible = k < shown.size()
+			if label.visible:
+				label.text = shown[k][0]
+				label.global_position = shown[k][1]
+				var category_title: bool = nav.level == 1 and k == shown.size() - 1
+				label.modulate = Color(1.0, 0.85, 0.3) if shown[k][2] else (Color(0.6, 0.7, 0.85) if category_title else Color(0.85, 0.9, 1.0))
+				label.font_size = 34 if shown[k][2] else (22 if category_title else 26)
 
 	# The scroll disc and the marker of where the fingertips are on it.
 	for i in 2:
@@ -3651,10 +4139,9 @@ func _build_rig() -> void:
 		add_child(marker)
 		_disc_markers.append(marker)
 
-		# Radial menu labels, placed around the menu centre while it is open.
-		for item: Array in ExtraGestures.Radial.ITEMS:
+		# Radial menu labels (a pool: categories, or a category's items and its name).
+		for item in MenuSet.MAX_ITEMS + 4:
 			var label := Label3D.new()
-			label.text = item[0]
 			label.pixel_size = 0.0007
 			label.font_size = 28
 			label.outline_size = 8
@@ -3768,12 +4255,24 @@ func _build_settings_panel() -> void:
 		var column := rows[t] / per_column
 		var y := 0.52 - (rows[t] % per_column) * 0.062
 		rows[t] += 1
-		var x: float = [-0.4, 0.55][column] if totals[t] > SETTINGS_ROWS_PER_COLUMN else 0.15
+		var x: float = [-0.5, 0.62][column] if totals[t] > SETTINGS_ROWS_PER_COLUMN else 0.15
 		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26, tab)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		_add_button_to(tab, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
-		_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26, tab))
-		_add_button_to(tab, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+		if _is_slider_tunable(TUNABLES[i]):
+			# A slider between − and + (20.10.2026: quicker than many presses; the
+			# buttons stay for fine steps), the value after +.
+			var slider := VrSlider.new()
+			slider.tunable = i
+			slider.position = Vector3(x + 0.165, y, 0.0)
+			slider.set_range(TUNABLES[i][6], TUNABLES[i][7], TUNABLES[i][5])
+			tab.add_child(slider)
+			_sliders.append(slider)
+			_add_button_to(tab, "+", Vector3(x + 0.33, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+			_settings_values.append(_settings_label("", Vector3(x + 0.46, y, 0.0), 24, tab))
+		else:
+			_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26, tab))
+			_add_button_to(tab, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
 
 	var gestures := _settings_tabs[0]
 	var column_rows := ceili(rows[0] / 2.0) if rows[0] > SETTINGS_ROWS_PER_COLUMN else rows[0]
@@ -3790,6 +4289,8 @@ func _build_settings_panel() -> void:
 	_build_driver_section(_settings_tabs[SETTINGS_TABS.find("Драйвер")])
 	_build_bindings_section(_settings_tabs[SETTINGS_TABS.find("Назначения")])
 	_build_world_section(_settings_tabs[SETTINGS_TABS.find("Мир")])
+	_build_fixture_section(_settings_tabs[SETTINGS_TABS.find("Заготовки")])
+	_build_menu_section(_settings_tabs[SETTINGS_TABS.find("Меню")])
 
 	# Kept apart from the tabs so that it is not hit by accident.
 	_add_button_to(_settings_root, "Выход", Vector3(1.1, 0.62, 0.0), Vector2(0.18, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
@@ -4089,8 +4590,21 @@ func _tunable_target(section: String) -> Object:
 
 func _on_tunable_button(index: int, direction: float) -> void:
 	var tunable: Array = TUNABLES[index]
+	_set_tunable(index, float(_tunable_target(tunable[0]).get(tunable[1])) + direction * float(tunable[5]), true)
+
+
+## Whether a setting gets a slider: a number with at least a few steps between
+## its ends (a choice of two or three stays on − / +).
+func _is_slider_tunable(tunable: Array) -> bool:
+	return (float(tunable[7]) - float(tunable[6])) / float(tunable[5]) >= 5.0
+
+
+## Sets setting `index` to `raw` (clamped and stepped as its row says); `save`
+## writes the settings and logs it (a slider saves only on letting go).
+func _set_tunable(index: int, raw: float, save: bool) -> void:
+	var tunable: Array = TUNABLES[index]
 	var target := _tunable_target(tunable[0])
-	var value := snappedf(clampf(float(target.get(tunable[1])) + direction * float(tunable[5]), tunable[6], tunable[7]), tunable[5])
+	var value := snappedf(clampf(raw, tunable[6], tunable[7]), tunable[5])
 	# Keep each hysteresis pair ordered: a finger has to let go further out than it touches.
 	match tunable[1]:
 		"pinch_press":
@@ -4108,9 +4622,43 @@ func _on_tunable_button(index: int, direction: float) -> void:
 	if switching:
 		_apply_arrangement(_arrangements.get(_mode_key(), {}))
 		_place_panels([], true)
-	_save_settings()
 	_refresh_settings_panel()
-	print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
+	if save:
+		_save_settings()
+		print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
+
+
+## The settings sliders: a pinch (or trigger) that starts on one takes it; while
+## held, the ray sets the value; letting go saves it.
+func _update_sliders() -> void:
+	for slider in _sliders:
+		var hovered := false
+		var visible := slider.is_visible_in_tree()
+		for pointer in _pointers:
+			if visible and pointer.active and pointer.slider == null and pointer.grab_panel == null:
+				var distance := slider.hit_distance(pointer.origin, pointer.direction)
+				if distance >= 0.0:
+					hovered = true
+					pointer.hit_distance = minf(pointer.hit_distance, distance)
+					if pointer.just_pressed:
+						pointer.slider = slider
+		var held := false
+		for pointer in _pointers:
+			held = held or pointer.slider == slider
+		slider.set_active(held, hovered)
+	for pointer in _pointers:
+		var slider := pointer.slider
+		if slider == null:
+			continue
+		if pointer.active and pointer.pressed and slider.is_visible_in_tree():
+			var value := slider.value_from_ray(pointer.origin, pointer.direction)
+			if not is_nan(value):
+				_set_tunable(slider.tunable, value, false)
+			continue
+		pointer.slider = null
+		slider.set_active(false, false)
+		_save_settings()
+		print("[settings] %s: %s" % [TUNABLES[slider.tunable][2], _settings_values[slider.tunable].text])
 
 
 func _on_tunables_default() -> void:
@@ -4129,6 +4677,9 @@ func _on_tunables_default() -> void:
 
 
 func _refresh_settings_panel() -> void:
+	for slider in _sliders:
+		var tunable: Array = TUNABLES[slider.tunable]
+		slider.set_value(float(_tunable_target(tunable[0]).get(tunable[1])))
 	for i in mini(TUNABLES.size(), _settings_values.size()):
 		var tunable: Array = TUNABLES[i]
 		var value := float(_tunable_target(tunable[0]).get(tunable[1]))

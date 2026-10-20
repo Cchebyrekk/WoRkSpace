@@ -82,6 +82,12 @@ public:
 	static bool is_agent_connected();
 	// True while the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del). Poll each frame.
 	static bool is_secure_desktop_active();
+	// Records one shortcut from the physical keyboard (keys are swallowed meanwhile).
+	static bool start_key_recording();
+	static void stop_key_recording();
+	// The recorded shortcut (modifiers first, then the key), empty until pressed.
+	static PackedInt32Array get_recorded_keys();
+	static int get_key_recording_seen();
 };
 
 // System-wide keyboard shortcut that works while another window has focus.

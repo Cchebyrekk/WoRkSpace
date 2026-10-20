@@ -12,18 +12,26 @@ extends RefCounted
 ##          knuckle: 1 = in line, 0 = across, below 0 = curled back)
 ##   15-17  gaps between neighbouring fingertips: index-middle, middle-ring, ring-little (m)
 ##   18     thumb tip to the index knuckle (m): how far the thumb is out
+##   19     palm towards the head (cosine: 1 = facing the user, -1 = away)
+##   20     hand pointing up (cosine of wrist -> middle knuckle with up)
+## The last two are how the hand is turned (the user asked for a pose with the
+## palm towards them to differ from the same one turned away, 20.10.2026); they
+## need the head and the hand's side, and are 0 without them.
 ## A template keeps, per feature, the middle and how far from it still counts
 ## (`tolerance`); INF there means "any value".
 ##
 ## Added 20.10.2026 for gestures the user picks or records in the settings.
 
-const FEATURE_COUNT := 19
+const FEATURE_COUNT := 21
+## Features of the hand's shape only (the rest are its turn).
+const SHAPE_FEATURES := 19
 const FEATURE_NAMES := [
 	"прямота большого", "прямота указательного", "прямота среднего", "прямота безымянного", "прямота мизинца",
 	"большой к ладони", "указательный к ладони", "средний к ладони", "безымянный к ладони", "мизинец к ладони",
 	"большой вдоль кисти", "указательный вдоль кисти", "средний вдоль кисти", "безымянный вдоль кисти", "мизинец вдоль кисти",
 	"промежуток указательный-средний", "промежуток средний-безымянный", "промежуток безымянный-мизинец",
 	"большой отведён",
+	"ладонь к голове", "кисть вверх",
 ]
 ## The narrowest tolerance a recording may get, per kind of feature: tracking
 ## wobbles about this much even when the hand holds still.
@@ -35,6 +43,7 @@ const MIN_TOLERANCE := [
 	0.4, 0.4, 0.4, 0.4, 0.4,
 	0.012, 0.012, 0.012,
 	0.015,
+	0.35, 0.35,
 ]
 ## One feature may be out by up to this many tolerances and still count: tracking
 ## misreads one finger now and then while the rest of the hand holds the pose.
@@ -70,6 +79,12 @@ class Template:
 		template.middle = PackedFloat32Array(data.get("middle", PackedFloat32Array()))
 		template.tolerance = PackedFloat32Array(data.get("tolerance", PackedFloat32Array()))
 		template.joints = PackedVector3Array(data.get("joints", PackedVector3Array()))
+		# Recorded before the hand's turn was a feature: the turn is "any".
+		if template.middle.size() >= SHAPE_FEATURES and template.middle.size() < FEATURE_COUNT \
+				and template.tolerance.size() == template.middle.size():
+			while template.middle.size() < FEATURE_COUNT:
+				template.middle.append(0.0)
+				template.tolerance.append(INF)
 		return template
 
 	func is_valid() -> bool:
@@ -123,8 +138,10 @@ class Matcher:
 
 
 ## The features of a hand from its joints (JOINT_COUNT positions, any one frame of
-## reference: only distances and angles between joints are used).
-static func features(joints: PackedVector3Array) -> PackedFloat32Array:
+## reference: only distances and angles between joints are used). For the hand's
+## turn: `side_sign` (-1 left, +1 right) and the head in the joints' frame, whose
+## up is taken as up; without them those two features are 0.
+static func features(joints: PackedVector3Array, side_sign := 0.0, head := Vector3(NAN, NAN, NAN)) -> PackedFloat32Array:
 	var result := PackedFloat32Array()
 	if joints.size() < JOINT_COUNT:
 		return result
@@ -141,6 +158,10 @@ static func features(joints: PackedVector3Array) -> PackedFloat32Array:
 	for g in 3:
 		result[15 + g] = joints[FINGERS[g + 1][3]].distance_to(joints[FINGERS[g + 2][3]])
 	result[18] = joints[FINGERS[0][3]].distance_to(joints[INDEX_KNUCKLE])
+	if side_sign != 0.0 and not is_nan(head.x):
+		var normal := ExtraGestures.palm_normal(joints[WRIST], joints[INDEX_KNUCKLE], joints[FINGERS[4][0]], side_sign)
+		result[19] = normal.dot((head - palm).normalized())
+		result[20] = axis.dot(Vector3.UP)
 	return result
 
 
