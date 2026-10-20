@@ -65,6 +65,10 @@ class Settings:
 	var invert_horizontal := 0
 	## ScrollStick: wheel units per second at full offset (120 = one notch).
 	var stick_speed := 2400.0
+	## The plane the hand works in for scrolling (ScrollStick) and moving
+	## (Locomotion), tipped forward from upright: 0 = hand up/down, 90 = hand
+	## towards/away (the user wanted to choose, 20.10.2026).
+	var ring_tilt_degrees := 0.0
 	## Open-hand swipe: 0 = back / forward (Alt+Left / Alt+Right), 1 = undo / redo (Ctrl+Z / Ctrl+Shift+Z).
 	var swipe_mode := 0
 	## How far the open hand has to travel sideways within 0.3 s.

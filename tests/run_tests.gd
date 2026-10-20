@@ -22,6 +22,7 @@ func _init() -> void:
 	_test_hand_gestures()
 	_test_hand_pose()
 	_test_gesture_catalog()
+	_test_locomotion()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -588,6 +589,29 @@ func _test_hand_pose() -> void:
 	var far_off := shown.duplicate()
 	far_off[13] = 0.95 - 0.2 * 3.0
 	_check(HandPose.distance(sign, far_off) > 1.35, "один, но далеко за допуском — не поза")
+	_check(HandPose.distance(sign, one_off, false) > 1.0, "строго (для входа) сбойный палец не прощается")
+	# Entering is strict, holding forgives one finger.
+	var strict := HandPose.Matcher.new()
+	_check(not strict.update(sign, one_off, 0.0) and not strict.update(sign, one_off, 0.3), "с одним пальцем за допуском поза не включается")
+	strict.update(sign, shown, 1.0)
+	_check(strict.update(sign, shown, 1.2) and strict.update(sign, one_off, 1.3), "включённая — держится и с одним сбойным пальцем")
+
+	# The built-in scroll pose as a template of its thresholds.
+	var scroll_box := GestureCatalog.scroll_template(HandGestures.Settings.new())
+	var scroll_hand := open_features.duplicate()
+	scroll_hand[1] = 0.97
+	scroll_hand[2] = 0.97
+	scroll_hand[11] = 0.95
+	scroll_hand[12] = 0.95
+	scroll_hand[15] = 0.015
+	scroll_hand[18] = 0.09
+	scroll_hand[8] = 0.05
+	_check(HandPose.distance(scroll_box, scroll_hand, false) <= 1.0, "поза прокрутки укладывается в свои пороги (%.2f)" % HandPose.distance(scroll_box, scroll_hand, false))
+	var thumb_in := scroll_hand.duplicate()
+	thumb_in[18] = 0.04
+	_check(HandPose.distance(scroll_box, thumb_in, false) > 1.0, "большой прижат — уже не прокрутка")
+	_check(HandPose.distance(scroll_box, open_features, false) > 1.0 and HandPose.distance(scroll_box, fist_features, false) > 1.0,
+			"раскрытая рука и кулак — не прокрутка")
 	var old := HandPose.Template.from_dictionary(template.to_dictionary())
 	old.tolerance[12] = 0.05
 	old.widen_to_minimum()
@@ -611,6 +635,62 @@ func _test_hand_pose() -> void:
 	# A touch preview really touches.
 	var touch := GestureCatalog.preview_joints("touch:ring", [])
 	_check(touch[HandPose.FINGERS[0][3]].distance_to(touch[HandPose.FINGERS[3][3]]) < 0.001, "превью касания: большой у безымянного")
+
+
+func _test_locomotion() -> void:
+	# The hand as a stick: dead zone, full speed at the reach, direction kept.
+	_check(Locomotion.stick_velocity(Vector3(0.01, 0.0, 0.0), 0.15, 2.0, false) == Vector3.ZERO, "в мёртвой зоне — стоим")
+	var full := Locomotion.stick_velocity(Vector3(0.0, 0.0, -0.3), 0.15, 2.0, false)
+	_check(full.is_equal_approx(Vector3(0.0, 0.0, -2.0)), "дальше хода руки — полная скорость вперёд (%s)" % full)
+	var half := Locomotion.stick_velocity(Vector3(0.085, 0.0, 0.0), 0.15, 2.0, false)
+	_check(half.x > 0.0 and half.x < 0.6, "на середине хода — медленнее половины (%.2f)" % half.x)
+	var up := Locomotion.stick_velocity(Vector3(0.0, 0.2, 0.0), 0.15, 2.0, true)
+	_check(up == Vector3.ZERO, "с гравитацией рука вверх никуда не ведёт")
+	var flat := Locomotion.stick_velocity(Vector3(0.1, 0.1, 0.1), 0.15, 2.0, true)
+	_check(is_zero_approx(flat.y) and flat.x > 0.0, "с гравитацией — только по горизонтали")
+	_check(Locomotion.stick_velocity(Vector3(0.0, 0.2, 0.0), 0.15, 2.0, false).y > 1.9, "в космосе — и вверх")
+
+	_check(Locomotion.plane_up(Vector3.FORWARD, 0.0).is_equal_approx(Vector3.UP), "кольцо стоя: «вверх» — вверх")
+	_check(Locomotion.plane_up(Vector3(0.0, 0.3, -1.0), 90.0).is_equal_approx(Vector3.FORWARD), "кольцо лёжа: «вверх» — вперёд, по горизонтали")
+	var tipped := Locomotion.plane_up(Vector3.FORWARD, 45.0)
+	_check(is_equal_approx(tipped.y, -tipped.z) and tipped.y > 0.0, "наклон 45° — между ними")
+	_check(Locomotion.turn_rate(0.01, 0.15, 90.0) == 0.0, "поворот: мёртвая зона")
+	_check(is_equal_approx(Locomotion.turn_rate(-0.2, 0.15, 90.0), -deg_to_rad(90.0)), "поворот влево на полной скорости")
+
+	var snap := Locomotion.SnapTurn.new()
+	_check(snap.update(0.03, 0.0) == 0 and snap.update(0.08, 0.1) == 1, "рывок вправо, когда рука ушла за порог")
+	_check(snap.update(0.1, 0.3) == 0, "держишь руку — до паузы второго рывка нет")
+	_check(snap.update(0.1, 0.6) == 1 and snap.update(0.1, 0.7) == 0 and snap.update(0.1, 1.06) == 1, "держишь дальше — рывки повторяются через паузу")
+	_check(snap.update(0.02, 1.1) == 0 and snap.update(-0.09, 1.15) == -1, "вернул руку — следующий рывок сразу, влево")
+
+	# Turning on the spot: the head stays where it is.
+	var rig := Transform3D(Basis.IDENTITY, Vector3(1.0, 0.0, 2.0))
+	var head := Vector3(1.3, 1.6, 1.7)
+	var turned := Locomotion.turn_about(rig, head, deg_to_rad(90.0))
+	var head_local := rig.affine_inverse() * head
+	var head_after := turned * head_local
+	_check(Vector2(head_after.x, head_after.z).is_equal_approx(Vector2(head.x, head.z)), "поворот вокруг головы: голова на месте")
+	var forward_after := turned.basis * Vector3.FORWARD
+	_check(forward_after.is_equal_approx(Vector3.RIGHT), "поворот вправо: «вперёд» смотрит вправо (%s)" % forward_after)
+
+	_check(Locomotion.settle(2.0, 0.0, 0.1) < 2.0 and Locomotion.settle(2.0, 0.0, 0.1) > 1.5, "гравитация опускает плавно")
+	_check(Locomotion.settle(0.05, 0.0, 0.1) == 0.0, "у пола — ровно на пол")
+
+	var floor_dots := Locomotion.grid_points(Vector3(0.4, 1.6, -0.2), 1.0, 3.0, true, 0.5)
+	var all_on_floor := true
+	for point in floor_dots:
+		all_on_floor = all_on_floor and is_equal_approx(point.y, 0.5) and is_equal_approx(point.x, roundf(point.x))
+	_check(floor_dots.size() > 20 and all_on_floor, "сетка пола: точки на полу и по шагу (%d)" % floor_dots.size())
+	var space_dots := Locomotion.grid_points(Vector3(10.2, 3.0, 0.0), 1.0, 2.0, false)
+	var heights := {}
+	for point in space_dots:
+		heights[point.y] = true
+	_check(heights.size() >= 3 and space_dots.has(Vector3(10.0, 3.0, 0.0)), "сетка в космосе — объёмная, вокруг пользователя (%d высот)" % heights.size())
+	_check(Locomotion.grid_points(Vector3.ZERO, 0.0, 3.0, true).is_empty(), "без шага — без точек")
+
+	_check(Locomotion.vignette_strength(0.0, 2.0, 2.0, 0.0, 1.0) == 0.0, "затемнение выключено")
+	_check(is_equal_approx(Locomotion.vignette_strength(0.6, 2.0, 2.0, 0.0, 1.0), 0.6), "на полной скорости — сколько задано")
+	_check(Locomotion.vignette_strength(0.6, 0.2, 2.0, 0.0, 1.0) < 0.1, "медленно — почти без затемнения")
 
 
 func _test_gesture_catalog() -> void:

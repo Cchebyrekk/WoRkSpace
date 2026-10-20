@@ -156,6 +156,21 @@ static func move_template() -> HandPose.Template:
 	return template
 
 
+## The built-in scroll pose as a template, from the same thresholds HandGestures
+## uses, so that it can compete with recorded poses: when a hand fits both, the
+## nearer one wins (20.10.2026).
+static func scroll_template(s: HandGestures.Settings) -> HandPose.Template:
+	var ranges := {
+		1: [s.disc_straightness, 1.05], 2: [s.disc_straightness, 1.05],
+		11: [s.disc_align, 1.05], 12: [s.disc_align, 1.05],
+		15: [0.0, s.disc_together],
+		18: [s.disc_thumb_spread, s.disc_thumb_spread + 0.08],
+	}
+	if s.disc_ring_curl > 0.0:
+		ranges[8] = [0.0, s.disc_ring_curl]
+	return HandPose.box_template("pose:scroll", POSES["pose:scroll"], ranges)
+
+
 ## Joints of the preview hand (HandPose.local_joints frame) for any gesture.
 static func preview_joints(id: String, customs: Array[HandPose.Template]) -> PackedVector3Array:
 	var curls: Array[float] = []

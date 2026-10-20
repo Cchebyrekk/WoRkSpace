@@ -20,12 +20,14 @@ var right := Vector3.RIGHT
 var up := Vector3.UP
 
 
-## Centres the stick on `fingertip`, in a vertical plane turned towards `viewer`.
-func start(fingertip: Vector3, viewer: Vector3) -> void:
+## Centres the stick on `fingertip`, in a plane turned towards `viewer`: upright,
+## or tipped away from the viewer by `tilt_degrees` (90 = lying flat, so moving
+## the hand away scrolls "up"; the same setting as the moving ring, 20.10.2026).
+func start(fingertip: Vector3, viewer: Vector3, tilt_degrees := 0.0) -> void:
 	var toward_viewer := Vector3(viewer.x - fingertip.x, 0.0, viewer.z - fingertip.z)
 	toward_viewer = toward_viewer.normalized() if toward_viewer.length_squared() > 0.0001 else Vector3.BACK
-	up = Vector3.UP
-	right = (-toward_viewer).cross(up).normalized()
+	right = (-toward_viewer).cross(Vector3.UP).normalized()
+	up = Locomotion.plane_up(-toward_viewer, tilt_degrees)
 	origin = fingertip
 
 

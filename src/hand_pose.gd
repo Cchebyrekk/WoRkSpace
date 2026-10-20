@@ -83,10 +83,13 @@ class Template:
 				tolerance[f] = maxf(tolerance[f], MIN_TOLERANCE[f])
 
 
-## Recognises one template on one hand: it has to match for `dwell` seconds to
-## come on, then holds while within `stay` times its tolerance, and survives a
+## Recognises one template on one hand: it has to match strictly (every feature
+## within its tolerance) for `dwell` seconds to come on, then holds while within
+## `stay` times its tolerance with one misread feature forgiven, and survives a
 ## loss of match or tracking shorter than `grace` (tracking drops a finger now
-## and then, worst when the hand hides it from the cameras).
+## and then, worst when the hand hides it from the cameras). Forgiving a feature
+## only while held keeps poses that differ in one finger apart (20.10.2026: a
+## recorded pose came on over the scroll pose, which differs in the thumb).
 class Matcher:
 	var dwell := 0.12
 	var grace := 0.4
@@ -96,10 +99,11 @@ class Matcher:
 	var _since := NAN
 	var _last_match := -INF
 
-	## `features` empty = the hand is not tracked this frame. True while the pose is on.
+	## `features` empty = the hand is not tracked this frame (or the pose is not
+	## allowed now). True while the pose is on.
 	func update(template: Template, features: PackedFloat32Array, time: float) -> bool:
-		var limit := stay if on else 1.0
-		var matches := not features.is_empty() and HandPose.distance(template, features) <= limit
+		var matches := not features.is_empty() and (HandPose.distance(template, features) <= stay if on
+				else HandPose.distance(template, features, false) <= 1.0)
 		if matches:
 			_last_match = time
 			if is_nan(_since):
@@ -144,7 +148,7 @@ static func features(joints: PackedVector3Array) -> PackedFloat32Array:
 ## tolerance; 1 or less = the pose. The single worst feature is forgiven if it is
 ## within ONE_OUTLIER_LIMIT (then the second worst counts), so one misread finger
 ## does not drop a pose the rest of the hand clearly holds.
-static func distance(template: Template, values: PackedFloat32Array) -> float:
+static func distance(template: Template, values: PackedFloat32Array, forgive_one := true) -> float:
 	if not template.is_valid() or values.size() != FEATURE_COUNT:
 		return INF
 	var worst := 0.0
@@ -159,7 +163,27 @@ static func distance(template: Template, values: PackedFloat32Array) -> float:
 			worst = off
 		elif off > second:
 			second = off
-	return second if worst <= ONE_OUTLIER_LIMIT else worst
+	return second if forgive_one and worst <= ONE_OUTLIER_LIMIT else worst
+
+
+## A template from ranges of features ({feature: [low, high]}, the rest "any"), for
+## built-in poses that are recognised by thresholds, so they can be compared with
+## recorded ones (GestureCatalog.scroll_template).
+static func box_template(id: String, name: String, ranges: Dictionary) -> Template:
+	var template := Template.new()
+	template.id = id
+	template.name = name
+	template.middle.resize(FEATURE_COUNT)
+	template.tolerance.resize(FEATURE_COUNT)
+	for f in FEATURE_COUNT:
+		template.middle[f] = 0.0
+		template.tolerance[f] = INF
+	for f: int in ranges:
+		var low: float = ranges[f][0]
+		var high: float = ranges[f][1]
+		template.middle[f] = (low + high) * 0.5
+		template.tolerance[f] = maxf((high - low) * 0.5, 0.0001)
+	return template
 
 
 ## Which features are out of the template's range, worst first, as text for the

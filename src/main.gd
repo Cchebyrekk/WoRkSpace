@@ -150,6 +150,19 @@ const TUNABLES := [
 	["panels", "magnet", "Магнит в VR", 1.0, "", 1.0, 0.0, 1.0],
 	["panels", "tilt_mode", "Наклон меняет", 1.0, "", 1.0, 0.0, 1.0],
 	["panels", "monitor_menu", "Меню экранов", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "travel_mode", "Режим движения", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "move_speed", "Скорость движения", 1.0, "м/с", 0.5, 0.5, 10.0],
+	["world", "hand_reach", "Ход руки до полной скорости", 100.0, "см", 0.01, 0.05, 0.4],
+	["gestures", "ring_tilt_degrees", "Наклон кольца (движение и прокрутка)", 1.0, "°", 15.0, 0.0, 90.0],
+	["world", "turn_mode", "Поворот", 1.0, "", 1.0, 0.0, 2.0],
+	["world", "snap_degrees", "Поворот рывком на", 1.0, "°", 5.0, 10.0, 90.0],
+	["world", "turn_speed_degrees", "Плавный поворот: скорость", 1.0, "°/с", 15.0, 15.0, 360.0],
+	["world", "vignette", "Затемнение краёв при движении", 100.0, "%", 0.1, 0.0, 1.0],
+	["world", "grid", "Сетка точками", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
+	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
+	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
+	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 ]
 
 const BUTTON_SIZE := Vector2(0.28, 0.12)
@@ -180,14 +193,23 @@ const FIST_THUMB_UP_DISTANCE := 0.082
 const MONITOR_MENU_FORWARD := 0.25
 ## Driver section of the settings panel: where it is, the instance limit (as in
 ## tools/vdd_helper.ps1) and how long "Применить" has to be held.
-## Settings panel tabs, and which tab each tunable is on (the rest are on the first).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения"]
+## Settings panel tabs, and which tab each tunable is on (the rest are on the first,
+## "Жесты": everything about recognising the hands — touches, pause, swipe, zoom,
+## rest, fist, the ring's tilt and the moving hand's reach; 20.10.2026 the user
+## asked for every setting to sit on the tab it belongs to).
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения", "Мир"]
 const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
-	"grab_mode": 4, "fist_curl": 4, "move_mode": 4, "magnet": 4, "tilt_mode": 4, "monitor_menu": 4,
+	"grab_mode": 4, "move_mode": 4, "magnet": 4, "tilt_mode": 4, "monitor_menu": 4,
+	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8,
+	"vignette": 8, "grid": 8, "grid_step": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8,
 }
+## A tab with more rows than this lays them out in two columns.
+const SETTINGS_ROWS_PER_COLUMN := 11
+## Where the column of tab buttons stands, left of the content.
+const SETTINGS_TAB_COLUMN_X := -1.25
 ## Saved arrangements on the "Раскладки" tab.
 const LAYOUT_SLOTS := 4
 const DRIVER_MAX_INSTANCES := 8
@@ -370,8 +392,20 @@ class Pointer:
 	## The hand is within range of one of the user's own bound poses (before its
 	## dwell too): the built-in fist then stays off, the recorded pose wins.
 	var near_own_pose := false
+	## The built-in scroll pose gives way: a recorded pose fits this hand better.
+	var scroll_yields := false
 	## When the built-in fist started forming (NAN when it is not), for its dwell.
 	var fist_since := NAN
+	## The palm in the rig's own space (tracker space): moving the rig does not move
+	## it, so the moving hand's offset stays the hand's own.
+	var palm_local := Vector3.ZERO
+	## Moving / turning: where the hand was when its pose formed (rig space), by action.
+	var travel_anchors := {}
+	var snap_turn := Locomotion.SnapTurn.new()
+	## The ring shown for moving or turning: which action ("" = none) and the hand's
+	## offset in the plane facing the user (sideways, up), metres.
+	var travel_ring := ""
+	var travel_offset := Vector2.ZERO
 	var menu := ExtraGestures.Radial.new()
 	var menu_open := false
 	var menu_selected := -1
@@ -570,6 +604,26 @@ var _next_custom_pose := 1
 var _move_template := GestureCatalog.move_template()
 ## Which hand moves with the movement pose (0 left, 1 right); the other one turns.
 var _move_hand := 0
+## The world (slice i): its settings, the floor's height (gravity walks on it), the
+## orientation dots, the floor, the comfort vignette and what moved last frame.
+var _world := Locomotion.Options.new()
+var _floor_height := 0.0
+var _grid: MultiMeshInstance3D
+var _grid_key := ""
+var _floor: MeshInstance3D
+var _vignette: MeshInstance3D
+var _vignette_material: ShaderMaterial
+var _floor_label: Label3D
+## Per hand: [outer ring, dead-zone ring, marker] shown while moving or turning.
+var _travel_rings: Array = []
+## Controller sticks turning in steps: a separate step logic per controller.
+var _stick_snap: Array[Locomotion.SnapTurn] = []
+## Stick values treated like a hand's offset (metres): full tilt = this far.
+const STICK_AS_REACH := 0.15
+## How far ahead of the fingertips (away from the user) the moving/turning ring floats.
+const TRAVEL_RING_AHEAD := 0.04
+const GRID_RADIUS_FLOOR := 12.0
+const GRID_RADIUS_SPACE := 5.0
 ## The "Назначения" tab: a choice button and a preview per action, the open list
 ## of choices (one action at a time) and the user's own poses.
 var _binding_buttons := {}
@@ -653,12 +707,16 @@ var _hand_trackers_missing_sec := 0.0
 func _ready() -> void:
 	_build_world()
 	_build_rig()
+	_build_world_visuals()
+	# The status line goes with the user through the world (slice i).
+	_status.reparent(_origin, false)
 	for pointer in _pointers:
 		pointer.gestures.settings = _gesture_settings
 		pointer.engagement.settings = _engagement_settings
 	_build_buttons()
 	_build_settings_panel()
 	_load_settings()
+	_refresh_floor_label()
 	_update_ray_info()
 	_refresh_layout_section()
 	_refresh_settings_panel()
@@ -733,6 +791,9 @@ func _process(delta: float) -> void:
 	_update_first_recenter(delta)
 	_update_shader_warm_up()
 	_probe_mark(-1)
+	# The rig moves first, so this frame's rays and panels start from where the user is.
+	_update_locomotion(delta)
+	_update_world_visuals()
 	_update_panels(delta)
 	_probe_mark(0)
 	_calibration_boost_sec = maxf(_calibration_boost_sec - delta, 0.0)
@@ -954,6 +1015,272 @@ func _probe_pipelines() -> String:
 	return ("собрано шейдеров: " + ", ".join(described)) if not described.is_empty() else "шейдеры не собирались"
 
 
+## Moving and turning the user (slice i). The hand holding the movement pose is
+## a stick: its offset from where the pose formed sets the velocity (any way in
+## space, level with gravity); the hand holding the turning pose turns by its
+## sideways offset (in steps or smoothly) and in space also lifts and lowers.
+## Controller sticks do the same when they move rather than scroll
+## (stick_mode). The rig moves; then everything kept in the world by global
+## placement under the rig (panel layers, the UAC quad) is put back in place.
+func _update_locomotion(delta: float) -> void:
+	var space := _world.travel_mode == 0
+	var to_world := _origin.global_transform.basis
+	var head := _camera.transform
+	var head_right := Vector3(head.basis.x.x, 0.0, head.basis.x.z).normalized()
+	# Ahead: level with gravity, wherever the head looks in space.
+	var ahead := -head.basis.z if space else Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
+	# The hand's plane: upright, or tipped forward as far as the user set (ring_tilt_degrees).
+	var hand_up := Locomotion.plane_up(-head.basis.z, _gesture_settings.ring_tilt_degrees)
+	var now := Time.get_ticks_msec() / 1000.0
+	var velocity := Vector3.ZERO
+	var turn_rate := 0.0
+	var turn_steps := 0
+	for i in 2:
+		var pointer := _pointers[i]
+		pointer.travel_ring = ""
+		for action: String in ["move", "turn"]:
+			var held: bool = pointer.poses.get(action, false) and pointer.tracked_hand
+			if not held:
+				pointer.travel_anchors.erase(action)
+				if action == "turn":
+					pointer.snap_turn.reset()
+				continue
+			# The fingertips, as for scrolling: the ring and its dot sit where the
+			# user looks at the hand, not at the palm (20.10.2026).
+			var tip := pointer.hand_joints[HandPose.FINGERS[2][3]] if pointer.hand_joints.size() == HandPose.JOINT_COUNT else pointer.palm_local
+			if not pointer.travel_anchors.has(action):
+				pointer.travel_anchors[action] = tip
+			# Only the hand's move in the plane facing the user counts: towards or
+			# away from the body the tracking loses the sign (20.10.2026).
+			var offset: Vector3 = tip - pointer.travel_anchors[action]
+			var flat := Vector2(offset.dot(head_right), offset.dot(hand_up))
+			pointer.travel_ring = action
+			pointer.travel_offset = flat
+			if action == "move":
+				# Up = ahead, down = back, sideways = a step aside.
+				var push := Locomotion.stick_velocity(Vector3(flat.x, flat.y, 0.0), _world.hand_reach, _world.move_speed, false)
+				velocity += to_world * (head_right * push.x + ahead * push.y)
+			else:
+				turn_rate += _turn_from(flat.x)
+				turn_steps += _snap_from(flat.x, pointer.snap_turn, now)
+				if space:
+					velocity += to_world * Locomotion.stick_velocity(Vector3(0.0, flat.y, 0.0), _world.hand_reach, _world.move_speed, false)
+		# Controllers: the left stick moves (forward where the head looks), the right turns.
+		if _stick_moves(i) and not pointer.menu_open:
+			var stick := _controllers[i].get_vector2(&"primary")
+			if i == 0:
+				var push := Locomotion.stick_velocity(Vector3(stick.x, stick.y, 0.0) * STICK_AS_REACH, STICK_AS_REACH, _world.move_speed, false)
+				velocity += to_world * (head_right * push.x + ahead * push.y)
+			else:
+				turn_rate += _turn_from(stick.x * STICK_AS_REACH)
+				turn_steps += _snap_from(stick.x * STICK_AS_REACH, _stick_snap[i], now)
+				if space:
+					velocity += to_world * Locomotion.stick_velocity(Vector3(0.0, stick.y * STICK_AS_REACH, 0.0), STICK_AS_REACH, _world.move_speed, false)
+
+	var rig := _origin.global_transform
+	var before := rig
+	rig.origin += velocity * delta
+	var angle := turn_rate * delta + turn_steps * deg_to_rad(_world.snap_degrees)
+	if angle != 0.0:
+		rig = Locomotion.turn_about(rig, _camera.global_position, angle)
+	if not space:
+		rig.origin.y = Locomotion.settle(rig.origin.y, _floor_height, delta)
+	if rig != before:
+		_origin.global_transform = rig
+		_keep_world_in_place()
+		if turn_steps != 0:
+			print("[world] поворот рывком %+d°" % roundi(turn_steps * _world.snap_degrees))
+	var speed := velocity.length()
+	_set_vignette(Locomotion.vignette_strength(_world.vignette, speed, _world.move_speed,
+			turn_rate if turn_steps == 0 else deg_to_rad(_world.turn_speed_degrees), deg_to_rad(_world.turn_speed_degrees)))
+
+
+func _turn_from(sideways: float) -> float:
+	return Locomotion.turn_rate(sideways, _world.hand_reach, _world.turn_speed_degrees) if _world.turn_mode == 1 else 0.0
+
+
+func _snap_from(sideways: float, snap: Locomotion.SnapTurn, now: float) -> int:
+	return snap.update(sideways, now) if _world.turn_mode == 0 else 0
+
+
+## Whether controller `index`'s thumbstick moves the user (else it scrolls).
+func _stick_moves(index: int) -> bool:
+	if not _is_real_controller(index):
+		return false
+	match _world.stick_mode:
+		1:
+			return false
+		2:
+			return true
+	return not _pointers[index].on_panel
+
+
+## The rig moved: panel layers (they must hang under the rig, but stand in the
+## world) and the UAC quad go back to their places in the world.
+func _keep_world_in_place() -> void:
+	for panel in _panels:
+		panel.place(panel.placement)
+	if _secure_shown:
+		_secure_layer.global_transform = _secure_quad_xf
+
+
+## The orientation dots and the floor follow the user: rebuilt when the user has
+## moved half a step, the mode or the floor changed. The floor shows with gravity.
+func _update_world_visuals() -> void:
+	_update_travel_rings()
+	var head := _camera.global_position
+	var planar := _world.travel_mode == 1
+	_floor.visible = planar
+	_floor.global_position = Vector3(head.x, _floor_height - 0.002, head.z)
+	_grid.visible = _world.grid == 1
+	if not _grid.visible:
+		return
+	var step := _world.grid_step
+	var cell := (head / step).round()
+	var key := "%s|%s|%s|%s" % [planar, step, _floor_height, cell]
+	if key == _grid_key:
+		return
+	_grid_key = key
+	var points := Locomotion.grid_points(head, step, GRID_RADIUS_FLOOR if planar else GRID_RADIUS_SPACE, planar, _floor_height)
+	var multimesh := _grid.multimesh
+	multimesh.instance_count = points.size()
+	for i in points.size():
+		multimesh.set_instance_transform(i, Transform3D(Basis.IDENTITY, points[i]))
+
+
+## The ring of a hand moving or turning: centred where the pose formed, in the
+## plane facing the user (the only plane the hand's offset counts in).
+func _update_travel_rings() -> void:
+	var rig := _origin.global_transform
+	var right := rig.basis * Vector3(_camera.transform.basis.x.x, 0.0, _camera.transform.basis.x.z).normalized()
+	var up := rig.basis * Locomotion.plane_up(-_camera.transform.basis.z, _gesture_settings.ring_tilt_degrees)
+	var ahead := rig.basis * Vector3(-_camera.transform.basis.z.x, 0.0, -_camera.transform.basis.z.z).normalized()
+	for i in 2:
+		var pointer := _pointers[i]
+		var parts: Array = _travel_rings[i]
+		var shown := pointer.travel_ring != "" and pointer.travel_anchors.has(pointer.travel_ring)
+		for part: MeshInstance3D in parts:
+			part.visible = shown
+		if not shown:
+			continue
+		var outer := (parts[0] as MeshInstance3D).mesh as TorusMesh
+		if not is_equal_approx(outer.outer_radius, _world.hand_reach + 0.003):
+			outer.inner_radius = _world.hand_reach - 0.003
+			outer.outer_radius = _world.hand_reach + 0.003
+		# A little ahead of the fingertips, so the ring does not cut through the fingers.
+		var centre: Vector3 = rig * (pointer.travel_anchors[pointer.travel_ring] as Vector3) + ahead * TRAVEL_RING_AHEAD
+		var facing := Transform3D(Basis(right, right.cross(up), -up), centre)
+		(parts[0] as MeshInstance3D).global_transform = facing
+		(parts[1] as MeshInstance3D).global_transform = facing
+		var shown_offset := pointer.travel_offset.limit_length(_world.hand_reach * 1.15)
+		if pointer.travel_ring == "turn" and _world.travel_mode == 1:
+			shown_offset.y = 0.0  # with gravity the turning hand only turns
+		(parts[2] as MeshInstance3D).global_position = centre + right * shown_offset.x + up * shown_offset.y
+
+
+func _set_vignette(strength: float) -> void:
+	_vignette.visible = strength > 0.005
+	_vignette_material.set_shader_parameter(&"strength", strength)
+
+
+## Builds the dots, the floor (replacing the old fixed square) and the vignette.
+func _build_world_visuals() -> void:
+	var dot := SphereMesh.new()
+	dot.radius = 0.012
+	dot.height = 0.024
+	dot.radial_segments = 6
+	dot.rings = 3
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = dot
+	_grid = MultiMeshInstance3D.new()
+	_grid.multimesh = multimesh
+	_grid.material_override = _flat_material(Color(0.45, 0.52, 0.62))
+	add_child(_grid)
+
+	var vignette_shader := Shader.new()
+	vignette_shader.code = """
+shader_type spatial;
+render_mode unshaded, depth_test_disabled, cull_disabled, blend_mix;
+uniform float strength = 0.0;
+void fragment() {
+	// The angle off the middle of this eye's view: dark towards the edges.
+	float off = acos(clamp(-normalize(VERTEX).z, -1.0, 1.0));
+	ALBEDO = vec3(0.0);
+	ALPHA = strength * smoothstep(0.3, 0.8, off);
+}
+"""
+	_vignette_material = ShaderMaterial.new()
+	_vignette_material.shader = vignette_shader
+	_vignette_material.render_priority = 120
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.9, 0.9)
+	_vignette = MeshInstance3D.new()
+	_vignette.mesh = quad
+	_vignette.material_override = _vignette_material
+	_vignette.position = Vector3(0.0, 0.0, -0.12)
+	_vignette.visible = false
+	_camera.add_child(_vignette)
+	# Rings for moving and turning, as for scrolling: the outer one is full speed,
+	# the small inner one the dead zone, the dot where the hand is now.
+	var side_colors: Array[Color] = [Color(0.3, 0.7, 1.0), Color(1.0, 0.6, 0.3)]
+	for i in 2:
+		var parts: Array[MeshInstance3D] = []
+		for radius: float in [_world.hand_reach, Locomotion.DEADZONE]:
+			var torus := TorusMesh.new()
+			torus.inner_radius = radius - 0.003
+			torus.outer_radius = radius + 0.003
+			torus.rings = 48
+			torus.ring_segments = 8
+			var ring := MeshInstance3D.new()
+			ring.mesh = torus
+			ring.material_override = _flat_material(Color(0.85, 0.9, 1.0))
+			ring.visible = false
+			add_child(ring)
+			parts.append(ring)
+		var marker_mesh := SphereMesh.new()
+		marker_mesh.radius = 0.01
+		marker_mesh.height = 0.02
+		var marker := MeshInstance3D.new()
+		marker.mesh = marker_mesh
+		marker.material_override = _flat_material(side_colors[i])
+		marker.visible = false
+		add_child(marker)
+		parts.append(marker)
+		_travel_rings.append(parts)
+	_stick_snap = [Locomotion.SnapTurn.new(), Locomotion.SnapTurn.new()]
+	for snap in _stick_snap:
+		snap.trigger = 0.7 * STICK_AS_REACH
+		snap.rearm = 0.35 * STICK_AS_REACH
+
+
+## The "Мир" tab, below its tunables: the floor where the user stands now. (A
+## "Домой" button did what "Центр" in the radial menu does; dropped 20.10.2026.)
+func _build_world_section(tab: Node3D) -> void:
+	var rows := 0
+	for tunable: Array in TUNABLES:
+		if TUNABLE_TABS.get(tunable[1], 0) == SETTINGS_TABS.find("Мир"):
+			rows += 1
+	var bottom := 0.52 - rows * 0.062 - 0.04
+	_add_button_to(tab, "Пол здесь", Vector3(-0.1, bottom, 0.0), Vector2(0.3, 0.07), 0.6).activated.connect(_on_floor_here)
+	_floor_label = _settings_label("", Vector3(0.0, bottom - 0.08, 0.0), 22, tab)
+	_settings_label("Движение: рука со знаком в плоскости кольца — от центра туда, куда ехать; вбок — шаг в сторону.\nПоворот — вторая рука вбок. Наклон кольца и ход руки — на вкладке «Жесты». К экранам — «Центр» в круговом меню.",
+			Vector3(0.0, bottom - 0.15, 0.0), 20, tab)
+	_refresh_floor_label()
+
+
+func _on_floor_here() -> void:
+	_floor_height = _origin.global_position.y
+	_save_settings()
+	_refresh_floor_label()
+	print("[world] пол на высоте %.2f м" % _floor_height)
+
+
+func _refresh_floor_label() -> void:
+	if _floor_label != null:
+		_floor_label.text = "Пол: %.2f м (с гравитацией ходите по нему)" % _floor_height
+
+
 ## Pose actions: which bound poses this hand holds now; a hand at rest holds
 ## nothing. Moving and turning split the hands (`_move_hand` moves, the other
 ## turns) only when both have the same gesture; with different gestures either
@@ -963,20 +1290,49 @@ func _probe_pipelines() -> String:
 func _update_bound_poses(index: int, pointer: Pointer, time: float, resting: bool) -> void:
 	var held := {}
 	var split: bool = _bindings.get("move") == _bindings.get("turn")
-	pointer.near_own_pose = false
+	var actions: Array[String] = []
 	for action: String in ["scroll", "grab", "move", "turn"]:
 		if split and ((action == "move" and index != _move_hand) or (action == "turn" and index == _move_hand)):
 			continue
-		var id: String = _bindings.get(action, GestureCatalog.OFF)
+		if _pose_template(_bindings.get(action, GestureCatalog.OFF)) != null:
+			actions.append(action)
+	# The poses compete: each bound pose this hand may hold, and the built-in
+	# scroll pose (as a template of its thresholds), by strict distance. Only the
+	# nearest of those that fit may come on (20.10.2026: a recorded pose differing
+	# from the scroll pose in the thumb came on with it, both ways round).
+	var fits := {}
+	var features := pointer.hand_features
+	if not resting and features.size() == HandPose.FEATURE_COUNT:
+		for action in actions:
+			var id: String = _bindings[action]
+			fits[id] = HandPose.distance(_pose_template(id), features, false)
+		if _bindings.get("scroll") == "pose:scroll":
+			fits["pose:scroll"] = HandPose.distance(GestureCatalog.scroll_template(_gesture_settings), features, false)
+	var best := ""
+	for id: String in fits:
+		if fits[id] <= 1.0 and (best == "" or fits[id] < fits[best]):
+			best = id
+	pointer.near_own_pose = false
+	pointer.scroll_yields = best != "" and best != "pose:scroll" and _bindings.get("scroll") == "pose:scroll"
+	for action in actions:
+		var id: String = _bindings[action]
 		var template := _pose_template(id)
-		if template == null:
-			continue
-		if id.begins_with("custom:") and not resting and HandPose.distance(template, pointer.hand_features) <= 1.0:
+		if id.begins_with("custom:") and best == id:
 			pointer.near_own_pose = true
 		if not pointer.pose_matchers.has(action):
 			pointer.pose_matchers[action] = HandPose.Matcher.new()
 		var matcher: HandPose.Matcher = pointer.pose_matchers[action]
-		held[action] = matcher.update(template, PackedFloat32Array() if resting else pointer.hand_features, time)
+		# A pinch with the other fingers straight looks like the locomotion sign
+		# (20.10.2026: a left click turned the user). The sign has the thumb out, so
+		# it does not count while the thumb closes on the index or a click is on.
+		var pinching := id == "pose:move" and (pointer.contact_distances.x < _gesture_settings.approach
+				or pointer.pressed or pointer.pending)
+		var allowed := not resting and not pinching
+		if allowed and best != "" and best != id:
+			# Another pose fits better: this one may not come on; one already on gives
+			# way only to a clearly better fit.
+			allowed = matcher.on and fits[best] >= 0.5 * float(fits.get(id, INF))
+		held[action] = matcher.update(template, features if allowed else PackedFloat32Array(), time)
 		if id.begins_with("custom:") and held[action]:
 			pointer.near_own_pose = true
 	_set_poses(index, pointer, held)
@@ -1393,7 +1749,12 @@ func _update_cursor() -> void:
 			continue
 		var nearest := INF
 		for panel in _panels:
+			# Hidden (beyond the render radius) or beyond the interaction radius: no clicks.
+			if not panel.layer.visible:
+				continue
 			var distance := panel.hit_distance(pointer.origin, pointer.direction)
+			if _world.interact_radius > 0.0 and distance > _world.interact_radius:
+				continue
 			if distance >= 0.0 and distance < nearest:
 				nearest = distance
 				pointer.panel = panel
@@ -1618,8 +1979,15 @@ func _update_panels(delta: float) -> void:
 
 	var copy_frames := not _diag.has("nocopy")
 	var now := Time.get_ticks_msec() / 1000.0
+	var head := _camera.global_position
 	for panel in _panels:
-		panel.refresh(_session_visible, copy_frames, now)
+		# Beyond the render radius a panel is neither drawn nor fed new pictures;
+		# the monitor stays in Windows as it is.
+		var in_range := _world.render_radius <= 0.0 or panel.placement.transform.origin.distance_to(head) <= _world.render_radius
+		if panel.layer.visible != in_range:
+			panel.layer.visible = in_range
+			print("[world] %s: %s радиуса отрисовки" % [panel.monitor_name, "в пределах" if in_range else "за пределами"])
+		panel.refresh(_session_visible and in_range, copy_frames and in_range, now)
 
 
 ## The same monitors, only moved around (or another one made primary): the
@@ -2072,6 +2440,11 @@ func _recenter() -> void:
 	var turn := Basis(Vector3.UP, yaw)
 	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
 	_place_panels([], true)
+	# The settings behind the user and the status line ahead, where they always
+	# stood after aligning; they hang under the rig and go along from here.
+	if _settings_root != null:
+		_settings_root.global_transform = Transform3D(Basis(Vector3.UP, PI), Vector3(0.0, 1.25, 0.9))
+	_status.global_position = Vector3(0.0, 2.05, -1.2)
 	# A prompt on show follows too ("Центр" or the Meta button), in front of the new view.
 	if _secure_shown:
 		_release_secure_button()
@@ -2195,6 +2568,7 @@ func _load_settings() -> void:
 	if bindings is Dictionary:
 		_bindings.merge(bindings, true)
 	_move_hand = clampi(int(config.get_value("bindings", "move_hand", _move_hand)), 0, 1)
+	_floor_height = float(config.get_value("world", "floor_height", _floor_height))
 	_apply_bindings()
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
@@ -2217,6 +2591,7 @@ func _save_settings() -> void:
 	config.set_value("poses", "next", _next_custom_pose)
 	config.set_value("bindings", "actions", _bindings)
 	config.set_value("bindings", "move_hand", _move_hand)
+	config.set_value("world", "floor_height", _floor_height)
 	if not _slot_loading.is_empty():
 		config.set_value("layouts", "pending", _slot_loading)
 	if _driver_restore_pending:
@@ -2886,6 +3261,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		var little_knuckle := tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PINKY_FINGER_PHALANX_PROXIMAL).origin
 		pointer.tracked_hand = true
 		pointer.palm_world = palm
+		pointer.palm_local = tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_PALM).origin
 		pointer.palm_normal = (to_world.basis * ExtraGestures.palm_normal(wrist, index_knuckle, little_knuckle, SIDE_SIGNS[index])).normalized()
 		pointer.pinch_point = to_world * thumb_tip
 		pointer.contact_distances = Vector3(frame.thumb_index, frame.thumb_middle, frame.thumb_side)
@@ -2951,7 +3327,8 @@ func _update_pointer(index: int, delta: float) -> void:
 					GestureCatalog.name_of(_bindings["grab"], _custom_poses).to_lower(), curl * 1000.0])
 		match _bindings["scroll"]:
 			"pose:scroll":
-				frame.scroll_pose = -1
+				# Built-in, unless a recorded pose fits the hand better (it wins).
+				frame.scroll_pose = 0 if pointer.scroll_yields else -1
 			GestureCatalog.OFF:
 				frame.scroll_pose = 0
 			_:
@@ -2975,7 +3352,7 @@ func _update_pointer(index: int, delta: float) -> void:
 				pointer.stick.max_speed = _gesture_settings.stick_speed
 				pointer.stick.invert_vertical = _gesture_settings.invert_vertical != 0
 				pointer.stick.invert_horizontal = _gesture_settings.invert_horizontal != 0
-				pointer.stick.start(fingertips, _camera.global_position)
+				pointer.stick.start(fingertips, _camera.global_position, _gesture_settings.ring_tilt_degrees)
 			else:
 				pointer.disc.radius = _gesture_settings.disc_radius
 				pointer.disc.turn_units = _gesture_settings.disc_turn_units
@@ -3040,7 +3417,8 @@ func _update_pointer(index: int, delta: float) -> void:
 			pointer.button = HandGestures.Click.NONE
 		pointer.anchor_time = NAN
 		var stick_vector := controller.get_vector2(&"primary")
-		var stick := stick_vector.y
+		# A stick that moves the user (Locomotion.Options.stick_mode) does not scroll.
+		var stick := 0.0 if _stick_moves(index) else stick_vector.y
 		pointer.scrolling = absf(stick) > CONTROLLER_STICK_DEADZONE
 		pointer.scroll = stick * CONTROLLER_SCROLL_SPEED * delta if pointer.scrolling else 0.0
 
@@ -3191,12 +3569,13 @@ func _build_world() -> void:
 	light.rotation_degrees = Vector3(-50.0, 30.0, 0.0)
 	add_child(light)
 
+	# The floor of gravity mode: it follows the user (see _update_world_visuals).
 	var floor_mesh := PlaneMesh.new()
-	floor_mesh.size = Vector2(6.0, 6.0)
-	var floor_instance := MeshInstance3D.new()
-	floor_instance.mesh = floor_mesh
-	floor_instance.material_override = _flat_material(Color(0.15, 0.17, 0.2))
-	add_child(floor_instance)
+	floor_mesh.size = Vector2(40.0, 40.0)
+	_floor = MeshInstance3D.new()
+	_floor.mesh = floor_mesh
+	_floor.material_override = _flat_material(Color(0.12, 0.14, 0.17))
+	add_child(_floor)
 
 	_status = Label3D.new()
 	_status.position = Vector3(0.0, 2.05, -1.2)
@@ -3357,16 +3736,19 @@ func _build_settings_panel() -> void:
 	_settings_root.position = Vector3(0.0, 1.25, 0.9)
 	# Turned to face the user when they turn round.
 	_settings_root.rotation = Vector3(0.0, PI, 0.0)
-	# Always there behind the user (18.10.2026: nothing stays in front of the screens).
-	add_child(_settings_root)
+	# Always there behind the user (18.10.2026: nothing stays in front of the screens);
+	# under the rig, so it goes along when the user moves through the world (slice i).
+	_origin.add_child(_settings_root)
 
 	for t in SETTINGS_TABS.size():
 		var tab := Node3D.new()
 		tab.visible = t == 0
 		_settings_root.add_child(tab)
 		_settings_tabs.append(tab)
-		var button := _add_button_to(_settings_root, SETTINGS_TABS[t], Vector3((t - (SETTINGS_TABS.size() - 1) * 0.5) * 0.215, 0.62, 0.0),
-				Vector2(0.2, 0.06), 0.2)
+		# The tabs in a column on the left (the user's choice, 20.10.2026), clear of
+		# every tab's content, which stays right of x = -1.
+		var button := _add_button_to(_settings_root, SETTINGS_TABS[t], Vector3(SETTINGS_TAB_COLUMN_X, 0.56 - t * 0.075, 0.0),
+				Vector2(0.24, 0.065), 0.2)
 		button.activated.connect(_show_settings_tab.bind(t))
 		_settings_tab_buttons.append(button)
 	_show_settings_tab(0)
@@ -3374,12 +3756,19 @@ func _build_settings_panel() -> void:
 	var small := Vector2(0.07, 0.052)
 	var rows: Array[int] = []
 	rows.resize(SETTINGS_TABS.size())
+	# How many rows each tab has: a long one gets two columns.
+	var totals: Array[int] = []
+	totals.resize(SETTINGS_TABS.size())
+	for tunable: Array in TUNABLES:
+		totals[TUNABLE_TABS.get(tunable[1], 0)] += 1
 	for i in TUNABLES.size():
 		var t: int = TUNABLE_TABS.get(TUNABLES[i][1], 0)
 		var tab := _settings_tabs[t]
-		var y := 0.52 - rows[t] * 0.062
+		var per_column := ceili(totals[t] / 2.0) if totals[t] > SETTINGS_ROWS_PER_COLUMN else totals[t]
+		var column := rows[t] / per_column
+		var y := 0.52 - (rows[t] % per_column) * 0.062
 		rows[t] += 1
-		var x := 0.15
+		var x: float = [-0.4, 0.55][column] if totals[t] > SETTINGS_ROWS_PER_COLUMN else 0.15
 		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26, tab)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		_add_button_to(tab, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
@@ -3387,7 +3776,8 @@ func _build_settings_panel() -> void:
 		_add_button_to(tab, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
 
 	var gestures := _settings_tabs[0]
-	var bottom := 0.52 - rows[0] * 0.062 - 0.03
+	var column_rows := ceili(rows[0] / 2.0) if rows[0] > SETTINGS_ROWS_PER_COLUMN else rows[0]
+	var bottom := 0.52 - column_rows * 0.062 - 0.03
 	_add_button_to(gestures, "По умолчанию", Vector3(-0.55, bottom, 0.0), Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
 	# Self-tuning: record a few touches and derive the thresholds from them.
 	_add_button_to(gestures, "Настроить щипок", Vector3(-0.2, bottom, 0.0), Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
@@ -3399,9 +3789,10 @@ func _build_settings_panel() -> void:
 	_build_layout_section(_settings_tabs[SETTINGS_TABS.find("Раскладки")])
 	_build_driver_section(_settings_tabs[SETTINGS_TABS.find("Драйвер")])
 	_build_bindings_section(_settings_tabs[SETTINGS_TABS.find("Назначения")])
+	_build_world_section(_settings_tabs[SETTINGS_TABS.find("Мир")])
 
 	# Kept apart from the tabs so that it is not hit by accident.
-	_add_button_to(_settings_root, "Выход", Vector3(1.0, 0.62, 0.0), Vector2(0.2, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
+	_add_button_to(_settings_root, "Выход", Vector3(1.1, 0.62, 0.0), Vector2(0.18, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
 
 
 func _settings_label(text: String, at: Vector3, font_size: int, parent: Node3D = null) -> Label3D:
@@ -3691,6 +4082,8 @@ func _tunable_target(section: String) -> Object:
 			return _panel_options
 		"pause":
 			return _pause
+		"world":
+			return _world
 	return _cursor_filter
 
 
@@ -3722,7 +4115,7 @@ func _on_tunable_button(index: int, direction: float) -> void:
 
 func _on_tunables_default() -> void:
 	var defaults := {"gestures": HandGestures.Settings.new(), "cursor": CursorFilter.new(), "engagement": HandEngagement.Settings.new(),
-			"pause": ExtraGestures.Pause.new(), "panels": PanelOptions.new()}
+			"pause": ExtraGestures.Pause.new(), "panels": PanelOptions.new(), "world": Locomotion.Options.new()}
 	var mode_before := _mode_key()
 	_arrangements[mode_before] = _own_arrangement()
 	for tunable: Array in TUNABLES:
@@ -3757,6 +4150,20 @@ func _refresh_settings_panel() -> void:
 			_settings_values[i].text = "да" if value >= 0.5 else "нет"
 		elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
 			_settings_values[i].text = "да" if value >= 0.5 else "нет"
+		elif tunable[1] == "travel_mode":
+			_settings_values[i].text = "гравитация" if value >= 0.5 else "космос"
+		elif tunable[1] == "turn_mode":
+			_settings_values[i].text = ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
+		elif tunable[1] == "stick_mode":
+			_settings_values[i].text = ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
+		elif tunable[1] == "grid":
+			_settings_values[i].text = "да" if value >= 0.5 else "нет"
+		elif tunable[1] == "vignette" and value <= 0.0:
+			_settings_values[i].text = "выключено"
+		elif tunable[1] in ["render_radius", "interact_radius"] and value <= 0.0:
+			_settings_values[i].text = "без ограничения"
+		elif tunable[1] in ["move_speed", "grid_step"]:
+			_settings_values[i].text = "%.2f %s" % [value, tunable[4]] if tunable[1] == "grid_step" else "%.1f %s" % [value, tunable[4]]
 		else:
 			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
 
