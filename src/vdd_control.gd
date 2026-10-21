@@ -7,7 +7,7 @@ signal finished(ok: bool, message: String)
 
 const TASK_NAME := "WoRkPlaceVddHelper"
 ## The helper version this app needs (tools/vdd_helper.ps1, $HelperVersion).
-const HELPER_VERSION := 5
+const HELPER_VERSION := 6
 const TIMEOUT_SEC := 120.0
 const POLL_INTERVAL_SEC := 0.25
 
