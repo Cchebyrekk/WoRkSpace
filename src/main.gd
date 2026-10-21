@@ -5,6 +5,8 @@ extends Node3D
 const HAND_TRACKER_NAMES: Array[StringName] = [&"/user/hand_tracker/left", &"/user/hand_tracker/right"]
 const CONTROLLER_TRACKER_NAMES: Array[StringName] = [&"left_hand", &"right_hand"]
 const SIDE_LABELS: Array[String] = ["Левая", "Правая"]
+## Colour of each hand's things (joints, ray, controller, ring markers).
+const SIDE_COLORS: Array[Color] = [Color(0.3, 0.7, 1.0), Color(1.0, 0.6, 0.3)]
 const SIDE_SIGNS: Array[float] = [-1.0, 1.0]
 const HAND_SOURCE_LABELS: Array[String] = ["неизвестен", "камеры шлема", "контроллер", "нет"]
 const JOINT_RADIUS := 0.008
@@ -1553,30 +1555,11 @@ void fragment() {
 	_camera.add_child(_vignette)
 	# Rings for moving and turning, as for scrolling: the outer one is full speed,
 	# the small inner one the dead zone, the dot where the hand is now.
-	var side_colors: Array[Color] = [Color(0.3, 0.7, 1.0), Color(1.0, 0.6, 0.3)]
 	for i in 2:
 		var parts: Array[MeshInstance3D] = []
 		for radius: float in [_world.hand_reach, Locomotion.DEADZONE]:
-			var torus := TorusMesh.new()
-			torus.inner_radius = radius - 0.003
-			torus.outer_radius = radius + 0.003
-			torus.rings = 48
-			torus.ring_segments = 8
-			var ring := MeshInstance3D.new()
-			ring.mesh = torus
-			ring.material_override = _flat_material(Color(0.85, 0.9, 1.0))
-			ring.visible = false
-			add_child(ring)
-			parts.append(ring)
-		var marker_mesh := SphereMesh.new()
-		marker_mesh.radius = 0.01
-		marker_mesh.height = 0.02
-		var marker := MeshInstance3D.new()
-		marker.mesh = marker_mesh
-		marker.material_override = _flat_material(side_colors[i])
-		marker.visible = false
-		add_child(marker)
-		parts.append(marker)
+			parts.append(_add_ring(radius))
+		parts.append(_add_dot(0.01, SIDE_COLORS[i]))
 		_travel_rings.append(parts)
 	_stick_snap = [Locomotion.SnapTurn.new(), Locomotion.SnapTurn.new()]
 	for snap in _stick_snap:
@@ -2364,10 +2347,7 @@ func _move_panels(monitors: Array[Dictionary]) -> bool:
 	# What was sent has arrived, unless more is still on its way.
 	if not _topology.busy and _queued_positions.is_empty():
 		_layout_pending.clear()
-	var carrying := false
-	for pointer in _pointers:
-		carrying = carrying or pointer.grab_panel != null
-	if not carrying:
+	if not _any_panel_carried():
 		_place_panels([], true)
 	return true
 
@@ -2548,9 +2528,7 @@ func _allowed_grips(panel: ScreenPanel) -> Array:
 ## changes the Windows layout (the others make room the way Windows will, see
 ## LayoutEdit) or, if so set, only the place in VR.
 func _update_grabs(delta: float) -> void:
-	var carrying := false
-	for pointer in _pointers:
-		carrying = carrying or pointer.grab_panel != null
+	var carrying := _any_panel_carried()
 	for pointer in _pointers:
 		if pointer.grab_panel != null:
 			if not is_instance_valid(pointer.grab_panel):
@@ -2646,6 +2624,13 @@ func _fixture_angles(pointer: Pointer, fixture: WorldLayout.Fixture) -> Vector2:
 ## Whether carrying a panel rearranges the Windows layout: the setting says so and
 ## all monitors hang on one fixture (with several, panels move in VR only until
 ## the Windows layout follows the seat the user is on).
+func _any_panel_carried() -> bool:
+	for pointer in _pointers:
+		if pointer.grab_panel != null:
+			return true
+	return false
+
+
 func _windows_moves() -> bool:
 	return _panel_options.move_mode == 0 and _fixtures.size() == 1
 
@@ -4123,7 +4108,6 @@ func _build_rig() -> void:
 	joint_mesh.height = JOINT_RADIUS * 2.0
 	joint_mesh.radial_segments = 12
 	joint_mesh.rings = 6
-	var side_colors: Array[Color] = [Color(0.3, 0.7, 1.0), Color(1.0, 0.6, 0.3)]
 
 	for i in 2:
 		var controller := XRController3D.new()
@@ -4137,7 +4121,7 @@ func _build_rig() -> void:
 		body_mesh.size = Vector3(0.04, 0.04, 0.1)
 		var body := MeshInstance3D.new()
 		body.mesh = body_mesh
-		body.material_override = _flat_material(side_colors[i])
+		body.material_override = _flat_material(SIDE_COLORS[i])
 		body.visible = false
 		controller.add_child(body)
 		_controller_visuals.append(body)
@@ -4148,7 +4132,7 @@ func _build_rig() -> void:
 		var ray_body := MeshInstance3D.new()
 		ray_body.mesh = ray_mesh
 		ray_body.position = Vector3(0.0, 0.0, -0.5)
-		ray_body.material_override = _flat_material(side_colors[i])
+		ray_body.material_override = _flat_material(SIDE_COLORS[i])
 		var ray := Node3D.new()
 		ray.visible = false
 		ray.add_child(ray_body)
@@ -4156,26 +4140,8 @@ func _build_rig() -> void:
 		_rays.append(ray)
 
 		# Scroll disc: a thin ring and a marker, placed in world space each frame.
-		var torus := TorusMesh.new()
-		torus.inner_radius = 0.057
-		torus.outer_radius = 0.063
-		torus.rings = 48
-		torus.ring_segments = 8
-		var ring := MeshInstance3D.new()
-		ring.mesh = torus
-		ring.material_override = _flat_material(Color(0.85, 0.9, 1.0))
-		ring.visible = false
-		add_child(ring)
-		_disc_rings.append(ring)
-		var marker_mesh := SphereMesh.new()
-		marker_mesh.radius = 0.008
-		marker_mesh.height = 0.016
-		var marker := MeshInstance3D.new()
-		marker.mesh = marker_mesh
-		marker.material_override = _flat_material(side_colors[i])
-		marker.visible = false
-		add_child(marker)
-		_disc_markers.append(marker)
+		_disc_rings.append(_add_ring(0.06))
+		_disc_markers.append(_add_dot(0.008, SIDE_COLORS[i]))
 
 		# Radial menu labels (a pool: categories, or a category's items and its name).
 		for item in MenuSet.MAX_ITEMS + 4:
@@ -4214,7 +4180,7 @@ func _build_rig() -> void:
 		multimesh.visible_instance_count = 0
 		var joints := MultiMeshInstance3D.new()
 		joints.multimesh = multimesh
-		joints.material_override = _flat_material(side_colors[i])
+		joints.material_override = _flat_material(SIDE_COLORS[i])
 		joints.visible = false
 		_origin.add_child(joints)
 		_joint_meshes.append(joints)
@@ -4748,6 +4714,35 @@ func _refresh_settings_panel() -> void:
 			_settings_values[i].text = "%.2f %s" % [value, tunable[4]] if tunable[1] == "grid_step" else "%.1f %s" % [value, tunable[4]]
 		else:
 			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
+
+
+## A thin hidden ring of `radius` (scroll disc, moving and turning rings), placed
+## in world space each frame.
+func _add_ring(radius: float) -> MeshInstance3D:
+	var torus := TorusMesh.new()
+	torus.inner_radius = radius - 0.003
+	torus.outer_radius = radius + 0.003
+	torus.rings = 48
+	torus.ring_segments = 8
+	var ring := MeshInstance3D.new()
+	ring.mesh = torus
+	ring.material_override = _flat_material(Color(0.85, 0.9, 1.0))
+	ring.visible = false
+	add_child(ring)
+	return ring
+
+
+## A small hidden ball (where the fingertips are on a ring).
+func _add_dot(radius: float, color: Color) -> MeshInstance3D:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	var dot := MeshInstance3D.new()
+	dot.mesh = mesh
+	dot.material_override = _flat_material(color)
+	dot.visible = false
+	add_child(dot)
+	return dot
 
 
 func _flat_material(color: Color) -> StandardMaterial3D:
