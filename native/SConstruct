@@ -9,7 +9,7 @@ env = SConscript("godot-cpp/SConstruct", {"api_version": "4.7"})
 
 env.Append(CPPPATH=["src/"])
 env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN"])
-env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32"])
+env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32", "advapi32"])
 
 # The Windows-only file is built as C++20: in C++17 mode C++/WinRT pulls in
 # <experimental/coroutine>, which current MSVC rejects.

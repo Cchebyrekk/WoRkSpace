@@ -6,6 +6,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "win_backend.h"
 #include "workplace_classes.h"
 
 using namespace godot;
@@ -25,6 +26,7 @@ void uninitialize_workplace_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	workplace::shutdown_backend();
 }
 
 extern "C" {

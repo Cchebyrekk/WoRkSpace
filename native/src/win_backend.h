@@ -74,6 +74,10 @@ bool key_recording_result(std::vector<uint16_t> &keys);
 // How many keyboard events the recording hook has seen (for the log).
 int key_recording_seen();
 
+// Stops what the module runs in the background (keyboard recording, the agent
+// connection); called when the module is unloaded.
+void shutdown_backend();
+
 // System-wide hotkey that fires even when the Godot window is not focused.
 class HotkeyBackend {
 public:

@@ -1,7 +1,8 @@
 extends SceneTree
 ## Checks the input path through workplace_agent.exe without VR: moves the cursor
 ## to a few points through MouseInput and reads it back, then puts it where it was.
-## Start the agent first (bin/workplace_agent.exe --agent --allow <this Godot>).
+## Start the agent first (bin/workplace_agent.exe --agent --allow <this Godot>) and set
+## WORKPLACE_AGENT_ANY_OWNER=1: a pipe the user created is otherwise refused.
 ##   & "<godot>" --headless --xr-mode off --path . -s tests/agent_probe.gd
 
 

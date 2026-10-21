@@ -324,6 +324,7 @@ void run_secure_capture() {
 		if (!duplication.grab(header)) {
 			duplication.stop();
 			capturing = false; // access lost (a desktop switch, a mode change); rebuild next round
+			Sleep(50); // not a tight loop of new devices while the switch lasts
 		}
 	}
 }

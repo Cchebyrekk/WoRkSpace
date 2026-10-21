@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+#include <aclapi.h>
+
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -18,6 +20,7 @@
 #include <atomic>
 #include <cstdio>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -78,25 +81,19 @@ static std::string describe(const winrt::hresult_error &error, const char *step)
 	return std::string(step) + ": " + code + " " + winrt::to_string(error.message());
 }
 
-class WgcCapture : public CaptureBackend {
-	winrt::com_ptr<ID3D11Device> device;
-	winrt::com_ptr<ID3D11DeviceContext> context;
-	winrt::com_ptr<ID3D11Texture2D> shared_texture;
-	winrt::com_ptr<ID3D12Resource> d3d12_texture;
-
-	directx::Direct3D11::IDirect3DDevice winrt_device{ nullptr };
-	capture::GraphicsCaptureItem item{ nullptr };
-	capture::Direct3D11CaptureFramePool frame_pool{ nullptr };
-	capture::GraphicsCaptureSession session{ nullptr };
-	winrt::event_token frame_arrived_token{};
-
+// What the frame callback touches. The callback owns a reference to it, so a
+// callback already running when the capture is stopped and deleted (panels are
+// rebuilt often) still finds it alive; unregistering does not wait for such a call.
+struct FrameSink {
 	// Guards the D3D11 objects against stop() racing with the frame callback.
 	std::mutex mutex;
-	std::atomic<uint64_t> frames{ 0 };
+	winrt::com_ptr<ID3D11DeviceContext> context;
+	winrt::com_ptr<ID3D11Texture2D> shared_texture;
 	int32_t texture_width = 0;
 	int32_t texture_height = 0;
+	std::atomic<uint64_t> frames{ 0 };
 
-	void on_frame_arrived(const capture::Direct3D11CaptureFramePool &sender, const winrt::Windows::Foundation::IInspectable &) {
+	void on_frame_arrived(const capture::Direct3D11CaptureFramePool &sender) {
 		try {
 			capture::Direct3D11CaptureFrame frame = sender.TryGetNextFrame();
 			if (!frame) {
@@ -121,6 +118,23 @@ class WgcCapture : public CaptureBackend {
 			// A lost frame is not worth taking the capture thread down for.
 		}
 	}
+};
+
+class WgcCapture : public CaptureBackend {
+	winrt::com_ptr<ID3D11Device> device;
+	winrt::com_ptr<ID3D11DeviceContext> context;
+	winrt::com_ptr<ID3D11Texture2D> shared_texture;
+	winrt::com_ptr<ID3D12Resource> d3d12_texture;
+
+	directx::Direct3D11::IDirect3DDevice winrt_device{ nullptr };
+	capture::GraphicsCaptureItem item{ nullptr };
+	capture::Direct3D11CaptureFramePool frame_pool{ nullptr };
+	capture::GraphicsCaptureSession session{ nullptr };
+	winrt::event_token frame_arrived_token{};
+
+	std::shared_ptr<FrameSink> sink = std::make_shared<FrameSink>();
+	int32_t texture_width = 0;
+	int32_t texture_height = 0;
 
 public:
 	~WgcCapture() override { stop(); }
@@ -182,7 +196,17 @@ public:
 			step = "start capture session";
 			frame_pool = capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
 					winrt_device, directx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-			frame_arrived_token = frame_pool.FrameArrived({ this, &WgcCapture::on_frame_arrived });
+			{
+				std::lock_guard<std::mutex> lock(sink->mutex);
+				sink->context = context;
+				sink->shared_texture = shared_texture;
+				sink->texture_width = texture_width;
+				sink->texture_height = texture_height;
+			}
+			frame_arrived_token = frame_pool.FrameArrived(
+					[sink = sink](const capture::Direct3D11CaptureFramePool &sender, const winrt::Windows::Foundation::IInspectable &) {
+						sink->on_frame_arrived(sender);
+					});
 			session = frame_pool.CreateCaptureSession(item);
 			try {
 				session.IsBorderRequired(false);
@@ -218,7 +242,11 @@ public:
 		frame_pool = nullptr;
 		item = nullptr;
 
-		std::lock_guard<std::mutex> lock(mutex);
+		{
+			std::lock_guard<std::mutex> lock(sink->mutex);
+			sink->shared_texture = nullptr;
+			sink->context = nullptr;
+		}
 		d3d12_texture = nullptr;
 		shared_texture = nullptr;
 		winrt_device = nullptr;
@@ -229,7 +257,7 @@ public:
 	void *d3d12_resource() const override { return d3d12_texture.get(); }
 	int32_t width() const override { return texture_width; }
 	int32_t height() const override { return texture_height; }
-	uint64_t frame_count() const override { return frames.load(); }
+	uint64_t frame_count() const override { return sink->frames.load(); }
 };
 
 CaptureBackend *CaptureBackend::create() {
@@ -290,6 +318,25 @@ void drain_status_locked() {
 	}
 }
 
+// The agent's pipe is created by the SYSTEM service; any program could create a
+// pipe of that name first and receive every key the app types. So the pipe must
+// be owned by SYSTEM or the administrators. WORKPLACE_AGENT_ANY_OWNER=1 lifts this
+// for tests/agent_probe.gd, which runs the agent as the user.
+bool agent_pipe_trusted(HANDLE pipe) {
+	wchar_t any_owner[4] = {};
+	if (GetEnvironmentVariableW(L"WORKPLACE_AGENT_ANY_OWNER", any_owner, 4) > 0 && any_owner[0] == L'1') {
+		return true;
+	}
+	PSID owner = nullptr;
+	PSECURITY_DESCRIPTOR descriptor = nullptr;
+	if (GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &descriptor) != ERROR_SUCCESS) {
+		return false;
+	}
+	bool trusted = owner != nullptr && (IsWellKnownSid(owner, WinLocalSystemSid) || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+	LocalFree(descriptor);
+	return trusted;
+}
+
 // Caller holds agent_mutex.
 bool open_agent_pipe() {
 	if (agent_pipe != INVALID_HANDLE_VALUE) {
@@ -303,6 +350,10 @@ bool open_agent_pipe() {
 			SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
 	if (agent_pipe == INVALID_HANDLE_VALUE) {
 		agent_retry_at = GetTickCount64() + AGENT_RETRY_MS;
+		return false;
+	}
+	if (!agent_pipe_trusted(agent_pipe)) {
+		close_agent_pipe();
 		return false;
 	}
 	// Wait (briefly, without blocking for good) for the agent to accept us: a
@@ -502,6 +553,10 @@ public:
 				registered.set_value(false);
 				return;
 			}
+			// The queue must exist before the id is published, or a WM_QUIT posted
+			// right away would be lost and stop() would wait for ever.
+			MSG queue;
+			PeekMessageW(&queue, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 			thread_id = GetCurrentThreadId();
 			registered.set_value(true);
 			MSG message;
@@ -654,6 +709,10 @@ bool key_recording_start() {
 			hooked.set_value(false);
 			return;
 		}
+		// The queue must exist before the id is published, or a WM_QUIT posted
+		// right away would be lost and stop() would wait for ever.
+		MSG queue;
+		PeekMessageW(&queue, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 		record_thread_id = GetCurrentThreadId();
 		hooked.set_value(true);
 		// The hook is called through this thread's message queue; between
@@ -692,6 +751,14 @@ bool key_recording_result(std::vector<uint16_t> &keys) {
 	}
 	keys = record_keys;
 	return true;
+}
+
+void shutdown_backend() {
+	// A recording left running would keep its hook thread (and a joinable static
+	// std::thread, which terminates the process at exit).
+	key_recording_stop();
+	std::lock_guard<std::mutex> lock(agent_mutex);
+	close_agent_pipe();
 }
 
 } // namespace workplace
