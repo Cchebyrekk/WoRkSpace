@@ -27,6 +27,8 @@ const ACTIONS := {
 	"explorer": ["Проводник", [0x5B, 0x45]],
 	"task_manager": ["Диспетчер задач", [0x11, 0x10, 0x1B]],
 	"center": ["Центр", []],
+	"stand_up": ["Встать", []],
+	"quit": ["Выход", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.
@@ -75,7 +77,7 @@ static func default_menus() -> Array:
 	return [
 		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all"]},
 		{"name": "Окна", "items": ["alt_tab", "desktop", "minimize", "maximize", "close", "snap_left", "snap_right"]},
-		{"name": "Мир и система", "items": ["center", "start", "save", "explorer", "task_manager"]},
+		{"name": "Мир и система", "items": ["center", "stand_up", "start", "save", "explorer", "task_manager", "quit"]},
 	]
 
 

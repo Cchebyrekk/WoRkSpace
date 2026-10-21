@@ -28,6 +28,7 @@ func _init() -> void:
 	_test_panel_back()
 	_test_menu_set()
 	_test_lookups_and_helpers()
+	_test_wall_layout()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -1316,3 +1317,127 @@ func _test_lookups_and_helpers() -> void:
 	_check(is_equal_approx(PanelLayout.snap_scale(0.0, Vector2(1.0, 0.6), [Vector2(1.0, 0.6)] as Array[Vector2], 0.04), 0.0)
 			and is_equal_approx(PanelLayout.snap_scale(1.0, Vector2.ZERO, [Vector2(1.0, 0.6)] as Array[Vector2], 0.04), 1.0),
 			"магнит размера: нулевой масштаб или размер — без деления на ноль")
+
+
+func _test_wall_layout() -> void:
+	var one := Rect2i(0, 0, 1, 1)
+	var pitch := WallLayout.pitch()
+	_check(WallLayout.cell_centre(one).is_zero_approx() and WallLayout.cell_centre(Rect2i(1, 0, 1, 1)).is_equal_approx(Vector2(pitch.x, 0.0))
+			and WallLayout.cell_centre(Rect2i(0, 0, 2, 2)).is_equal_approx(Vector2(pitch.x * 0.5, -pitch.y * 0.5)),
+			"стена: середины клеток (столбцы вправо, ряды вниз)")
+	_check(WallLayout.cell_size(Rect2i(0, 0, 2, 2)).is_equal_approx(WallLayout.CELL * 2.0 + Vector2.ONE * WallLayout.DEFAULT_GAP), "стена: 2×2 клетки с зазором")
+	_check(WallLayout.panel_size(one, Vector2i(1920, 1080)).is_equal_approx(WallLayout.CELL), "стена: экран 16:9 заполняет клетку")
+	var wide := WallLayout.panel_size(Rect2i(0, 0, 2, 1), Vector2i(3440, 1440))
+	_check(is_equal_approx(wide.y, WallLayout.CELL.y) and is_equal_approx(wide.x / wide.y, 3440.0 / 1440.0), "стена: широкий экран вписан по высоте")
+	_check(WallLayout.span_for(Vector2i(3840, 2160)) == Vector2i(2, 2) and WallLayout.span_for(Vector2i(2560, 1440)) == Vector2i(1, 1)
+			and WallLayout.span_for(Vector2i(3440, 1440)) == Vector2i(2, 1), "стена: сколько клеток занимает экран")
+	var far := Rect2i(-2, 1, 2, 2)
+	var far_centre := WallLayout.cell_centre(far)
+	_check(WallLayout.cell_at(0.1, -0.05, Vector2i.ONE) == one and WallLayout.cell_at(far_centre.x, far_centre.y, far.size) == far,
+			"стена: клетка по точке — обратное к середине")
+
+	var taken: Array[Rect2i] = [one]
+	var free := WallLayout.nearest_free(one, taken)
+	_check(not free.intersects(one) and absi(free.position.x) + absi(free.position.y) == 1, "стена: занято — ближайшая свободная рядом")
+
+	var row: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080), Rect2i(-1920, 0, 1920, 1080), Rect2i(-1920, 1080, 3840, 2160)]
+	var cells := WallLayout.from_desktop(row, 0)
+	_check(cells[0] == one and cells[1] == Rect2i(1, 0, 1, 1) and cells[2] == Rect2i(-1, 0, 1, 1) and cells[3] == Rect2i(-1, 1, 2, 2),
+			"стена: из раскладки Windows — основной в (0, 0), 4K на 2×2 снизу: %s" % [cells])
+	var clash: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(900, 0, 1920, 1080)]
+	var apart := WallLayout.from_desktop(clash, 0)
+	_check(apart[0] == one and not apart[1].intersects(apart[0]), "стена: два экрана на одну клетку — второй рядом")
+
+	var placed := {"a": one}
+	var settled := WallLayout.settle(placed, PackedStringArray(["a", "b"]), [Rect2i(5000, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080)] as Array[Rect2i], 1)
+	_check(settled["a"] == one and not (settled["b"] as Rect2i).intersects(one) and placed.size() == 1,
+			"стена: свои клетки остаются, новый — в свободную, исходник не тронут")
+	var swapped := WallLayout.moved({"a": one, "b": Rect2i(1, 0, 1, 1)}, "a", Rect2i(1, 0, 1, 1))
+	_check(swapped["a"] == Rect2i(1, 0, 1, 1) and not (swapped["b"] as Rect2i).intersects(swapped["a"]), "стена: перенос на соседа — сосед отходит")
+	var grown := WallLayout.moved({"a": one, "b": Rect2i(1, 0, 1, 1), "c": Rect2i(0, 1, 1, 1)}, "a", Rect2i(0, 0, 2, 2))
+	_check(not (grown["b"] as Rect2i).intersects(grown["a"]) and not (grown["c"] as Rect2i).intersects(grown["a"])
+			and not (grown["b"] as Rect2i).intersects(grown["c"]), "стена: увеличенный экран раздвигает соседей")
+
+	var flat_shape := WallLayout.shape_of(one, 0.06, 1.5, 0.0)
+	var flat := WallLayout.surface(0.4, 0.2, 0.0, flat_shape)
+	_check(flat.origin.is_equal_approx(Vector3(0.4, 0.2, -1.5)) and flat.basis.z.is_equal_approx(Vector3.BACK), "стена плоская: точка и лицо к месту")
+	_check(WallLayout.hit(Vector3.ZERO, Vector3(0.3, 0.2, -1.0).normalized(), flat_shape).is_equal_approx(Vector2(0.45, 0.3)), "стена плоская: попадание луча")
+	_check(is_nan(WallLayout.hit(Vector3.ZERO, Vector3.BACK, flat_shape).x), "стена плоская: луч назад — мимо")
+	_check(WallLayout.eye(Vector2(1.0, 0.5), flat_shape).origin.is_equal_approx(Vector3(1.0, 0.5, 0.0)), "стена: место скользит вдоль")
+	# Bent round its middle; 1 = a closed cylinder (the user's wish, 21.10.2026).
+	var row_of_five := Rect2i(-2, 0, 5, 1)
+	var cylinder := WallLayout.shape_of(row_of_five, 0.06, 1.5, 1.0)
+	_check(is_equal_approx(cylinder.middle, 0.0) and is_equal_approx(cylinder.radius() * TAU, cylinder.length), "стена-цилиндр: длина стены — окружность")
+	_check(WallLayout.surface(0.0, 0.0, 0.0, cylinder).origin.is_equal_approx(Vector3(0.0, 0.0, -1.5))
+			and WallLayout.surface(-cylinder.length * 0.5, 0.0, 0.0, cylinder).origin.is_equal_approx(WallLayout.surface(cylinder.length * 0.5, 0.0, 0.0, cylinder).origin),
+			"стена-цилиндр: середина на месте, концы сходятся")
+	var inside := WallLayout.shape_of(row_of_five, 0.06, 0.6, 1.0)
+	var seat_a := WallLayout.eye(Vector2.ZERO, inside)
+	var seat_b := WallLayout.eye(Vector2(1.0, 0.0), inside)
+	var faced := WallLayout.surface(1.0, 0.0, 0.0, inside).origin
+	_check(seat_a.origin.distance_to(seat_b.origin) > 0.2 and is_equal_approx(seat_b.origin.distance_to(faced), 0.6)
+			and (faced - seat_b.origin).normalized().is_equal_approx(-seat_b.basis.z), "изогнутая стена: место едет по дуге, смотрит ровно на экран перед собой")
+	var target := WallLayout.surface(1.3, 0.1, 0.0, inside).origin
+	_check(WallLayout.hit(seat_b.origin, (target - seat_b.origin).normalized(), inside).is_equal_approx(Vector2(1.3, 0.1)), "стена-цилиндр: луч изнутри попадает в свою точку")
+	var quarter := WallLayout.shape_of(row_of_five, 0.06, 1.5, 0.25)
+	var bent := WallLayout.surface(0.8, 0.1, 0.0, quarter)
+	_check(WallLayout.hit(Vector3.ZERO, bent.origin.normalized(), quarter).is_equal_approx(Vector2(0.8, 0.1)), "стена в четверть круга: луч в точку стены даёт ту же точку")
+	_check(bent.basis.z.dot(-bent.origin) > 0.0, "стена изогнутая: экран смотрит к месту")
+	var corner := WallLayout.size_handle_point(one)
+	_check(corner.x > WallLayout.CELL.x * 0.5 and corner.y < -WallLayout.CELL.y * 0.5, "стена: ручка размера за правым нижним углом")
+
+	var wall := WorldLayout.new_fixture(WorldLayout.default_fixtures(PackedStringArray()), "wall", Vector3(1.0, 1.5, 2.0), 0.5)
+	wall.bend = 0.3
+	wall.cells = {"m": Rect2i(-1, 2, 2, 2)}
+	var restored := WorldLayout.Fixture.from_dictionary(wall.to_dictionary())
+	_check(wall.name == "Стена 1" and is_equal_approx(wall.radius, WallLayout.DEFAULT_DISTANCE) and is_equal_approx(restored.bend, 0.3)
+			and restored.cells.get("m") == Rect2i(-1, 2, 2, 2), "стена: имя, расстояние, сохранение изгиба и клеток")
+	var head := Transform3D(Basis(Vector3.UP, 0.7), Vector3(0.2, 1.6, -0.1))
+	var eyes := Transform3D(Basis.looking_at(Vector3.RIGHT, Vector3.UP), Vector3(3.0, 1.5, 2.0))
+	var rig := WorldLayout.rig_for(eyes, head)
+	_check((rig * head).origin.is_equal_approx(eyes.origin) and (rig.basis * -head.basis.z).is_equal_approx(Vector3.RIGHT), "место: голова в точку, взгляд вдоль")
+	var left := WallLayout.bend_handle_point(one)
+	_check(left.x < -WallLayout.CELL.x * 0.5 and is_equal_approx(left.y, corner.y), "стена: ручка изгиба за левым нижним углом")
+	_check(is_equal_approx(WallLayout.bend_from_degrees(36.0, 3.0), 0.1) and is_equal_approx(WallLayout.bend_from_degrees(46.8, 3.0), 45.0 / 360.0)
+			and WallLayout.bend_from_degrees(1.4, 3.0) == 0.0 and WallLayout.bend_from_degrees(500.0, 3.0) == 1.0,
+			"стена: изгиб ручкой — магнит каждые 15° дуги, от плоской до цилиндра")
+
+	# The wall's own size and gap (21.10.2026).
+	var screens: Array[Rect2i] = [one, Rect2i(1, 0, 2, 2)]
+	_check(WallLayout.settle_grid(Rect2i(), screens) == Rect2i(0, 0, 3, 2) and WallLayout.settle_grid(Rect2i(), [] as Array[Rect2i]) == one
+			and WallLayout.settle_grid(Rect2i(-1, -1, 2, 2), screens) == Rect2i(-1, -1, 4, 3), "стена: размер — не меньше экранов")
+	var step := WallLayout.pitch(0.1)
+	var grown_grid := WallLayout.dragged_grid(Rect2i(0, 0, 3, 2), screens, 4.6 * step.x, -3.6 * step.y, 0.1)
+	_check(grown_grid == Rect2i(0, 0, 5, 4), "стена: угол тянут — шире и выше: %s" % grown_grid)
+	_check(WallLayout.dragged_grid(Rect2i(0, 0, 5, 4), screens, -9.0, 9.0, 0.1) == Rect2i(0, 0, 3, 2), "стена: меньше экранов не сжимается")
+	_check(is_equal_approx(WallLayout.cell_centre(Rect2i(1, 0, 1, 1), 0.2).x, WallLayout.CELL.x + 0.2)
+			and is_equal_approx(WallLayout.cell_size(Rect2i(0, 0, 2, 1), 0.0).x, WallLayout.CELL.x * 2.0), "стена: зазор между клетками настраивается")
+	var lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0))
+	_check(lines.size() == (4 + 3) * 2 and is_equal_approx(lines[0].z, -1.5 + WallLayout.OUTLINE_DEPTH), "стена: контур — края и линии между клетками, за стеной")
+	var bent_lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.5))
+	_check(bent_lines.size() == 4 * 2 + 3 * WallLayout.OUTLINE_ARC_STEPS * 2, "стена изогнутая: линии поперёк по дуге")
+	var ball := WallLayout.sphere_outline(1.1, 16)
+	_check(ball.size() == 3 * 16 * 2 and is_equal_approx(ball[5].length(), 1.1 - WallLayout.OUTLINE_DEPTH), "шар: контур — три окружности за экранами")
+	var slab := WallLayout.backing(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0))
+	var behind := true
+	for point in slab:
+		behind = behind and point.z <= -1.5 + WallLayout.BACKING_FRONT + 0.0001 and point.z >= -1.5 + WallLayout.BACKING_BACK - 0.0001
+	_check(slab.size() == 36 and behind, "стена: подложка — плита за экранами")
+	# A bent wall: the seat goes back at most to the axis (21.10.2026).
+	var far_seat := WallLayout.shape_of(row_of_five, 0.06, 5.0, 1.0)
+	_check(is_equal_approx(WallLayout.seat_depth(far_seat), far_seat.radius()) and WallLayout.eye(Vector2(1.0, 0.0), far_seat).origin.is_equal_approx(far_seat.axis())
+			and is_equal_approx(WallLayout.max_distance(far_seat, 6.0), far_seat.radius()) and WallLayout.max_distance(flat_shape, 6.0) == 6.0,
+			"изогнутая стена: дальше оси место не уходит")
+	var near_seat := WallLayout.shape_of(row_of_five, 0.06, 0.6, 1.0)
+	var slid := WallLayout.eye(Vector2(0.5, 0.0), near_seat).origin.x - WallLayout.eye(Vector2.ZERO, near_seat).origin.x
+	_check(slid > 0.0, "изогнутая стена: вправо — значит вправо")
+	# Seat offer and sitting at a wall (21.10.2026).
+	_check(WallLayout.project(Vector3(0.4, 0.2, -0.5), flat_shape).is_equal_approx(Vector3(0.4, 0.2, 1.0))
+			and WallLayout.project(Vector3(0.0, 0.0, -2.0), flat_shape).z < 0.0, "стена плоская: проекция точки и сколько до стены")
+	var standing := WallLayout.eye(Vector2(0.9, 0.3), quarter).origin
+	var seen := WallLayout.project(standing, quarter)
+	_check(is_equal_approx(seen.x, 0.9) and is_equal_approx(seen.y, 0.3) and is_equal_approx(seen.z, WallLayout.seat_depth(quarter)),
+			"стена изогнутая: проекция места — точка скольжения и расстояние")
+	var screens_at: Array[Rect2i] = [one, Rect2i(0, 2, 1, 1)]
+	_check(WallLayout.nearest_screen(screens_at, 0.1, -2.4).is_equal_approx(WallLayout.cell_centre(Rect2i(0, 2, 1, 1)))
+			and WallLayout.nearest_screen([] as Array[Rect2i], 0.3, 0.4) == Vector2(0.3, 0.4), "стена: сесть — к ближайшему экрану")

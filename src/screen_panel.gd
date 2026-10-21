@@ -210,15 +210,23 @@ func place(new_placement: PanelLayout.Placement) -> void:
 	var curved := placement.curvature > 0.0
 	if curved != (layer is OpenXRCompositionLayerCylinder):
 		_make_layer(curved)
+	# The shape only when it changed: each change may rebuild the layer's mesh (its
+	# hole punch), and a wall being bent changes it every frame (21.10.2026: the
+	# bend handle dropped the frame rate to ~20).
 	if curved:
 		var cylinder := layer as OpenXRCompositionLayerCylinder
 		var radius := PanelLayout.curve_radius(placement.curvature, distance)
-		cylinder.radius = radius
-		cylinder.central_angle = placement.size.x / radius
-		cylinder.aspect_ratio = placement.size.x / placement.size.y
+		if not is_equal_approx(cylinder.radius, radius):
+			cylinder.radius = radius
+		if not is_equal_approx(cylinder.central_angle, placement.size.x / radius):
+			cylinder.central_angle = placement.size.x / radius
+		if not is_equal_approx(cylinder.aspect_ratio, placement.size.x / placement.size.y):
+			cylinder.aspect_ratio = placement.size.x / placement.size.y
 		layer.global_transform = placement.transform * Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, radius))
 	else:
-		(layer as OpenXRCompositionLayerQuad).quad_size = placement.size
+		var quad := layer as OpenXRCompositionLayerQuad
+		if not quad.quad_size.is_equal_approx(placement.size):
+			quad.quad_size = placement.size
 		layer.global_transform = placement.transform
 	if _back != null:
 		var shape := "%s|%s|%s" % [placement.size, placement.curvature, distance]

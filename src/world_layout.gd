@@ -1,7 +1,7 @@
 class_name WorldLayout
 extends RefCounted
-## The world's fixtures: things that hold screen panels (slice j: spheres; walls
-## and pillars follow). Each has its place in the world, its own monitors (a
+## The world's fixtures: things that hold screen panels (slice j: spheres; slice
+## k: walls, see WallLayout; pillars follow). Each has its place in the world, its own monitors (a
 ## monitor hangs on exactly one fixture) and its seat. Pure logic, covered by
 ## tests/run_tests.gd. Decided with the user on 20.10.2026.
 
@@ -18,20 +18,34 @@ class Fixture:
 	var id := 0
 	var kind := "sphere"
 	var name := ""
-	## The centre: for a sphere, where the eyes are when seated (world space).
+	## The centre: where the eyes are when seated (world space); for a wall, the
+	## seat's middle, before any sliding along it.
 	var centre := Vector3(0.0, 1.45, 0.0)
 	## Which way its middle is, as seen from the centre (radians about up; 0 = -Z).
 	var yaw := 0.0
+	## A sphere's radius; a wall's distance from the seat.
 	var radius := DEFAULT_RADIUS
 	## Keys of the monitors on it (ScreenPanel.monitor_key).
 	var monitors := PackedStringArray()
+	## A wall's bend: a share of a full circle, 0 = flat .. 1 = a closed cylinder (WallLayout.Shape).
+	var bend := 0.0
+	## A wall's screens: monitor key -> Rect2i of cells (WallLayout).
+	var cells := {}
+	## A wall's size in cells (empty = as big as its screens) and the gap between cells (m).
+	var grid := Rect2i()
+	var gap := WallLayout.DEFAULT_GAP
 
 	## From the fixture's own space (centre at the origin, its middle along -Z) to the world.
 	func frame() -> Transform3D:
 		return Transform3D(Basis(Vector3.UP, yaw), centre)
 
 	func to_dictionary() -> Dictionary:
-		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors}
+		var stored := {}
+		for key: String in cells:
+			var cell: Rect2i = cells[key]
+			stored[key] = [cell.position.x, cell.position.y, cell.size.x, cell.size.y]
+		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors,
+				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y]}
 
 	static func from_dictionary(data: Dictionary) -> Fixture:
 		var fixture := Fixture.new()
@@ -42,6 +56,17 @@ class Fixture:
 		fixture.yaw = float(data.get("yaw", 0.0))
 		fixture.radius = clampf(float(data.get("radius", DEFAULT_RADIUS)), MIN_RADIUS, MAX_RADIUS)
 		fixture.monitors = PackedStringArray(data.get("monitors", PackedStringArray()))
+		fixture.bend = clampf(float(data.get("bend", 0.0)), 0.0, 1.0)
+		var stored: Variant = data.get("cells", {})
+		if stored is Dictionary:
+			for key: Variant in stored:
+				var cell: Variant = stored[key]
+				if cell is Array and cell.size() == 4:
+					fixture.cells[str(key)] = Rect2i(int(cell[0]), int(cell[1]), maxi(int(cell[2]), 1), maxi(int(cell[3]), 1))
+		fixture.gap = clampf(float(data.get("gap", WallLayout.DEFAULT_GAP)), 0.0, WallLayout.MAX_GAP)
+		var grid: Variant = data.get("grid", [])
+		if grid is Array and grid.size() == 4:
+			fixture.grid = Rect2i(int(grid[0]), int(grid[1]), maxi(int(grid[2]), 0), maxi(int(grid[3]), 0))
 		return fixture
 
 
@@ -118,9 +143,11 @@ static func new_fixture(fixtures: Array[Fixture], kind: String, centre: Vector3,
 	for other in fixtures:
 		if other.kind == kind:
 			count += 1
-	fixture.name = "Шар %d" % count if kind == "sphere" else "%s %d" % [kind, count]
+	fixture.name = "%s %d" % [{"sphere": "Шар", "wall": "Стена"}.get(kind, kind), count]
 	fixture.centre = centre
 	fixture.yaw = yaw
+	if kind == "wall":
+		fixture.radius = WallLayout.DEFAULT_DISTANCE
 	return fixture
 
 
@@ -153,10 +180,22 @@ static func nearby(fixtures: Array[Fixture], head: Vector3, reach: float) -> Fix
 ## The rig placed so that the head (at `head_local` in the rig's space) is at the
 ## fixture's centre looking at its middle: the seat of a sphere.
 static func seat_rig(fixture: Fixture, head_local: Transform3D) -> Transform3D:
+	return rig_for(Transform3D(Basis(Vector3.UP, fixture.yaw), fixture.centre), head_local)
+
+
+## The rig placed so that the head is at `eyes` (world space) looking along its -Z,
+## level: turned about up only, whatever way the head looks in the rig.
+static func rig_for(eyes: Transform3D, head_local: Transform3D) -> Transform3D:
 	var forward := -head_local.basis.z
 	var head_yaw := atan2(-forward.x, -forward.z)
-	var turn := Basis(Vector3.UP, fixture.yaw - head_yaw)
-	return Transform3D(turn, fixture.centre - turn * head_local.origin)
+	var look := -eyes.basis.z
+	var turn := Basis(Vector3.UP, atan2(-look.x, -look.z) - head_yaw)
+	return Transform3D(turn, eyes.origin - turn * head_local.origin)
+
+
+## A wall's seat at `slide` (u, v along it) in world space: the eyes there, looking at it.
+static func wall_eyes(fixture: Fixture, slide: Vector2, shape: WallLayout.Shape) -> Transform3D:
+	return fixture.frame() * WallLayout.eye(slide, shape)
 
 
 ## Where a sphere's one radius handle is: on the sphere, low in front of the
