@@ -20,6 +20,9 @@ const TRASH := Rect2(-0.97, -0.56, 0.5, 0.11)
 const BIN_SIZE := Vector2(0.44, 0.44)
 const BIN_ORIGIN := Vector2(-0.45, 0.42)
 const RECORD_TIMEOUT_SEC := 6.0
+## Where the first chip of a bin sits below its top edge, and the gap between chips.
+const CHIP_TOP := 0.075
+const CHIP_STEP := 0.045
 
 var menus: Array = []
 ## 0 = by finger, 1 = two levels (MenuSet.MODE_*).
@@ -50,7 +53,7 @@ func build(add_button: Callable) -> void:
 	_label("Удалить", Vector3(TRASH.get_center().x, TRASH.get_center().y, 0.0), 22)
 	for k in LIBRARY_COLUMNS * LIBRARY_ROWS:
 		var chip := _chip()
-		chip.position = Vector3(LIBRARY.position.x + 0.13 + (k % LIBRARY_COLUMNS) * 0.245, LIBRARY.end.y - 0.075 - (k / LIBRARY_COLUMNS) * 0.05, 0.004)
+		chip.position = Vector3(LIBRARY.position.x + 0.13 + (k % LIBRARY_COLUMNS) * 0.245, LIBRARY.end.y - CHIP_TOP - (k / LIBRARY_COLUMNS) * 0.05, 0.004)
 		_library_chips.append(chip)
 	for c in MenuSet.MAX_CATEGORIES:
 		var bin := _bin_rect(c)
@@ -62,7 +65,7 @@ func build(add_button: Callable) -> void:
 		var chips: Array[Node3D] = []
 		for k in MenuSet.MAX_ITEMS:
 			var chip := _chip()
-			chip.position = Vector3(bin.get_center().x, bin.end.y - 0.075 - k * 0.045, 0.004)
+			chip.position = Vector3(bin.get_center().x, bin.end.y - CHIP_TOP - k * CHIP_STEP, 0.004)
 			chips.append(chip)
 		_category_chips.append(chips)
 	_ghost = _chip()
@@ -112,7 +115,7 @@ func update(pointers: Array) -> void:
 			var picked := _pick(at)
 			if picked.is_empty():
 				continue
-			pointer.hit_distance = minf(pointer.hit_distance, pointer.origin.distance_to(global_transform * Vector3(at.x, at.y, 0.0)))
+			_shorten_ray(pointer, at)
 			if pointer.just_pressed:
 				_drag = [pointer, picked[0], picked[1]]
 				_show_chip(_ghost, picked[1])
@@ -123,7 +126,7 @@ func update(pointers: Array) -> void:
 	if not is_nan(point.x):
 		_ghost.visible = true
 		_ghost.position = Vector3(point.x, point.y, 0.012)
-		carrier.hit_distance = minf(carrier.hit_distance, carrier.origin.distance_to(global_transform * Vector3(point.x, point.y, 0.0)))
+		_shorten_ray(carrier, point)
 	if carrier.active and carrier.pressed:
 		return
 	var from: Variant = _drag[1]
@@ -140,7 +143,7 @@ func _drop(from: Variant, id: String, point: Vector2) -> void:
 		if MenuSet.custom.has(id):
 			MenuSet.custom.erase(id)
 			for menu: Dictionary in menus:
-				menu["items"] = (menu["items"] as Array).filter(func(item: String) -> bool: return item != id)
+				_remove_from(menu, id)
 			_status.text = "Функция «%s» удалена" % label
 		elif from is int:
 			_remove(from, id)
@@ -161,7 +164,7 @@ func _drop(from: Variant, id: String, point: Vector2) -> void:
 			continue
 		var items: Array = (menus[c]["items"] as Array).filter(func(item: String) -> bool: return MenuSet.has_action(item))
 		# The place it was dropped on: the order in the bin is the order on the ring.
-		var place := clampi(int(round((_bin_rect(c).end.y - 0.075 - point.y) / 0.045)), 0, MenuSet.MAX_ITEMS - 1)
+		var place := clampi(int(round((_bin_rect(c).end.y - CHIP_TOP - point.y) / CHIP_STEP)), 0, MenuSet.MAX_ITEMS - 1)
 		if from is int and from == c:
 			var reordered := MenuSet.moved(items, id, place)
 			if reordered != items:
@@ -184,7 +187,16 @@ func _drop(from: Variant, id: String, point: Vector2) -> void:
 
 
 func _remove(category: int, id: String) -> void:
-	menus[category]["items"] = (menus[category]["items"] as Array).filter(func(item: String) -> bool: return item != id)
+	_remove_from(menus[category], id)
+
+
+func _remove_from(menu: Dictionary, id: String) -> void:
+	menu["items"] = (menu["items"] as Array).filter(func(item: String) -> bool: return item != id)
+
+
+## Stops the pointer's ray at the tab's plane point `at` (the tab's own coordinates).
+func _shorten_ray(pointer: Variant, at: Vector2) -> void:
+	pointer.hit_distance = minf(pointer.hit_distance, pointer.origin.distance_to(global_transform * Vector3(at.x, at.y, 0.0)))
 
 
 ## What is under `point`: [from, id] ("library" or a category index), or empty.
@@ -289,17 +301,21 @@ func _plane_point(origin: Vector3, direction: Vector3) -> Vector2:
 	return Vector2(hit.x, hit.y)
 
 
-func _chip() -> Node3D:
-	var chip := Node3D.new()
+func _quad(size: Vector2, color: Color) -> MeshInstance3D:
 	var mesh := QuadMesh.new()
-	mesh.size = CHIP
+	mesh.size = size
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.albedo_color = VrButton.COLOR_HOVER
-	var body := MeshInstance3D.new()
-	body.mesh = mesh
-	body.material_override = material
-	chip.add_child(body)
+	material.albedo_color = color
+	var instance := MeshInstance3D.new()
+	instance.mesh = mesh
+	instance.material_override = material
+	return instance
+
+
+func _chip() -> Node3D:
+	var chip := Node3D.new()
+	chip.add_child(_quad(CHIP, VrButton.COLOR_HOVER))
 	var text := Label3D.new()
 	text.pixel_size = 0.001
 	text.font_size = 22
@@ -320,14 +336,7 @@ func _show_chip(chip: Node3D, id: String) -> void:
 
 
 func _frame(rect: Rect2, color: Color) -> MeshInstance3D:
-	var mesh := QuadMesh.new()
-	mesh.size = rect.size
-	var material := StandardMaterial3D.new()
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	material.albedo_color = color
-	var frame := MeshInstance3D.new()
-	frame.mesh = mesh
-	frame.material_override = material
+	var frame := _quad(rect.size, color)
 	frame.position = Vector3(rect.get_center().x, rect.get_center().y, 0.0)
 	add_child(frame)
 	return frame

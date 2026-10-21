@@ -37,8 +37,7 @@ class Radial:
 	var dead_zone := 0.03
 
 	func open(at: Vector3, viewer: Vector3) -> void:
-		var toward_viewer := Vector3(viewer.x - at.x, 0.0, viewer.z - at.z)
-		toward_viewer = toward_viewer.normalized() if toward_viewer.length_squared() > 0.0001 else Vector3.BACK
+		var toward_viewer := PointerMath.horizontal_toward(at, viewer)
 		up = Vector3.UP
 		right = (-toward_viewer).cross(up).normalized()
 		centre = at

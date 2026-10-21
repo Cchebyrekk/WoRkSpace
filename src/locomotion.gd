@@ -51,8 +51,13 @@ static func stick_velocity(offset: Vector3, reach: float, max_speed: float, plan
 	var length := offset.length()
 	if length <= DEADZONE or reach <= DEADZONE:
 		return Vector3.ZERO
-	var share := clampf((length - DEADZONE) / (reach - DEADZONE), 0.0, 1.0)
+	var share := _share(length, reach)
 	return offset / length * max_speed * share * share
+
+
+## How far an offset has got from the dead zone to full reach (0..1).
+static func _share(length: float, reach: float) -> float:
+	return clampf((length - DEADZONE) / (reach - DEADZONE), 0.0, 1.0)
 
 
 ## The "up" of the moving hand's plane: straight up tipped `tilt_degrees` towards
@@ -70,7 +75,7 @@ static func turn_rate(sideways: float, reach: float, degrees_per_second: float) 
 	var length := absf(sideways)
 	if length <= DEADZONE or reach <= DEADZONE:
 		return 0.0
-	var share := clampf((length - DEADZONE) / (reach - DEADZONE), 0.0, 1.0)
+	var share := _share(length, reach)
 	return signf(sideways) * deg_to_rad(degrees_per_second) * share
 
 

@@ -194,13 +194,11 @@ static func _make_room(rects: Array[Rect2i], row: PackedInt32Array, fixed: int) 
 ## (bottom-aligned), the primary's row and those below hang from the row above (top-aligned).
 static func _stack_rows(rects: Array[Rect2i], row_list: Array[PackedInt32Array], primary_index: int) -> void:
 	var heights: Array[int] = []
-	var primary_row := 0
+	var primary_row := _row_of(row_list, primary_index)
 	for r in row_list.size():
 		var height := 0
 		for i in row_list[r]:
 			height = maxi(height, rects[i].size.y)
-			if i == primary_index:
-				primary_row = r
 		heights.append(height)
 	var tops: Array[int] = []
 	tops.resize(row_list.size())
@@ -244,10 +242,7 @@ static func _connect(rects: Array[Rect2i], row_list: Array[PackedInt32Array], pr
 			rects[best_index] = Rect2i(rects[best_index].position + best_move, rects[best_index].size)
 			continue
 		# A whole row floats: slide it towards the row on the primary's side.
-		var primary_row := 0
-		for r in row_list.size():
-			if row_list[r].has(primary_index):
-				primary_row = r
+		var primary_row := _row_of(row_list, primary_index)
 		for r in row_list.size():
 			var floating := true
 			for i in row_list[r]:
@@ -255,6 +250,15 @@ static func _connect(rects: Array[Rect2i], row_list: Array[PackedInt32Array], pr
 			if floating and r != primary_row:
 				_overlap_row(rects, row_list[r], row_list[r + 1 if r < primary_row else r - 1])
 				break
+
+
+## Position in `row_list` of the row holding monitor `index` (0 if none does).
+static func _row_of(row_list: Array[PackedInt32Array], index: int) -> int:
+	var found := 0
+	for r in row_list.size():
+		if row_list[r].has(index):
+			found = r
+	return found
 
 
 ## Indices reachable from `start` through monitors sharing an edge segment.

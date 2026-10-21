@@ -144,8 +144,7 @@ class Navigator:
 	## Opens at `at`, facing `viewer`. `pick` >= 0 opens that category's items at
 	## once (by finger); otherwise the categories (two levels).
 	func open(at: Vector3, viewer: Vector3, pick := -1) -> void:
-		var toward := Vector3(viewer.x - at.x, 0.0, viewer.z - at.z)
-		toward = toward.normalized() if toward.length_squared() > 0.0001 else Vector3.BACK
+		var toward := PointerMath.horizontal_toward(at, viewer)
 		up = Vector3.UP
 		right = (-toward).cross(up).normalized()
 		centre = at

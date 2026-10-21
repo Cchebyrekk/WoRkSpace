@@ -21,8 +21,7 @@ var _angle := NAN
 ## Places the disc so that `fingertip` is on its top point, in a vertical plane
 ## turned towards `viewer`.
 func start(fingertip: Vector3, viewer: Vector3) -> void:
-	var toward_viewer := Vector3(viewer.x - fingertip.x, 0.0, viewer.z - fingertip.z)
-	toward_viewer = toward_viewer.normalized() if toward_viewer.length_squared() > 0.0001 else Vector3.BACK
+	var toward_viewer := PointerMath.horizontal_toward(fingertip, viewer)
 	up = Vector3.UP
 	right = (-toward_viewer).cross(up).normalized()
 	center = fingertip - up * radius

@@ -120,3 +120,10 @@ static func hand_ray_direction(head: Transform3D, palm: Vector3, side_sign: floa
 	var shoulder := head.origin + Vector3.DOWN * shoulder_drop + right * (side_sign * shoulder_half_width)
 	var direction := palm - shoulder
 	return direction.normalized() if direction.length_squared() > 0.0001 else -head.basis.z
+
+
+## Unit direction from `from` to `viewer` in the horizontal plane (BACK when they are
+## one above the other); the facing of the rings, discs and menus drawn for the hand.
+static func horizontal_toward(from: Vector3, viewer: Vector3) -> Vector3:
+	var flat := Vector3(viewer.x - from.x, 0.0, viewer.z - from.z)
+	return flat.normalized() if flat.length_squared() > 0.0001 else Vector3.BACK
