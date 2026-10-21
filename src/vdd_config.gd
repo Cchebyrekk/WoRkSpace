@@ -61,12 +61,20 @@ static func write(resolutions: Array[Vector2i]) -> String:
 	var backup := PATH.get_basename() + ".workplace.bak"
 	if not FileAccess.file_exists(backup):
 		var copy := FileAccess.open(backup, FileAccess.WRITE)
-		if copy != null:
-			copy.store_string(text)
-			copy.close()
-	var file := FileAccess.open(PATH, FileAccess.WRITE)
+		if copy == null:
+			return "не удалось сохранить копию %s: %s" % [backup, error_string(FileAccess.get_open_error())]
+		copy.store_string(text)
+		copy.close()
+	# Through a new file renamed over the old one: an interrupted write must not
+	# leave the driver an empty or half-written settings file.
+	var fresh := PATH + ".new"
+	var file := FileAccess.open(fresh, FileAccess.WRITE)
 	if file == null:
-		return "не удалось записать %s: %s" % [PATH, error_string(FileAccess.get_open_error())]
+		return "не удалось записать %s: %s" % [fresh, error_string(FileAccess.get_open_error())]
 	file.store_string(with_resolutions(text, resolutions))
 	file.close()
+	var moved := DirAccess.rename_absolute(fresh, PATH)
+	if moved != OK:
+		DirAccess.remove_absolute(fresh)
+		return "не удалось заменить %s: %s" % [PATH, error_string(moved)]
 	return ""

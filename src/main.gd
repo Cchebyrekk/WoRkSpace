@@ -68,6 +68,8 @@ const RAY_YAW_STEP_DEG := 2.5
 const XR_RESTART_DELAY_SEC := 5.0
 const XR_RESTART_MAX_ATTEMPTS := 60
 const XR_LOST_TRACKERS_SEC := 3.0
+## How many times the restarting PowerShell starts the app again if it crashes.
+const XR_CRASH_RELAUNCHES := 10
 const XR_RETRY_ENV := "WORKPLACE_XR_RETRY"
 ## How long the layout from before "Apply" waits for the helper's answer.
 const RESTORE_WAIT_MAX_SEC := 180.0
@@ -75,13 +77,6 @@ const RESTORE_WAIT_MAX_SEC := 180.0
 ## first; then the app restarts once more after this long.
 const XR_HANDS_RETRY_DELAY_SEC := 8.0
 
-## Screen panel: a 1920-px-wide monitor spans this horizontal angle at this distance.
-## Larger and closer than a real monitor, because the Quest 3S has few pixels per degree.
-const PANEL_DISTANCE := 1.1
-const PANEL_WIDTH_DEG := 60.0
-const PANEL_CENTER_HEIGHT := 1.45
-## Centre of the sphere the panels stand on (world space, after recentring).
-const PANEL_EYE := Vector3(0.0, PANEL_CENTER_HEIGHT, 0.0)
 ## A row of monitors wider than this arc is shrunk to fit, so that panels never
 ## wrap around behind the user.
 const PANEL_MAX_ARC_DEG := 300.0
@@ -165,7 +160,6 @@ const TUNABLES := [
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 ]
 
-const BUTTON_SIZE := Vector2(0.28, 0.12)
 const EXIT_BUTTON_HOLD_SEC := 1.0
 const TOPOLOGY_MESSAGES := {
 	"detached": "экран отсоединён",
@@ -334,6 +328,25 @@ class AimStudy:
 		return _angle_sum / maxi(frames, 1)
 
 
+## Quest Link can drop the session without a word (20.10.2026, after «Применить»:
+## no session_stopping or instance_exiting, the state stayed "focused", the hand
+## trackers stayed registered, and only xrWaitFrame answered XR_ERROR_SESSION_LOST,
+## which Godot prints every frame). This logger watches the engine's output for it.
+## A headset resting on the table does not lose the session, so it does not count.
+## Called from any thread; it only sets a flag.
+class SessionLossLogger extends Logger:
+	var lost := false
+
+	func _log_message(message: String, _error: bool) -> void:
+		if not lost and message.contains("XR_ERROR_SESSION_LOST"):
+			lost = true
+
+	func _log_error(_function: String, _file: String, _line: int, code: String, rationale: String, _editor_notify: bool,
+			_error_type: int, _script_backtraces: Array[ScriptBacktrace]) -> void:
+		if not lost and (code.contains("XR_ERROR_SESSION_LOST") or rationale.contains("XR_ERROR_SESSION_LOST")):
+			lost = true
+
+
 class Pointer:
 	var study := AimStudy.new()
 	## Before smoothing, for the tremor measurement.
@@ -372,6 +385,9 @@ class Pointer:
 	var fingertips := Vector3.ZERO
 	## Horizontal wheel units produced this frame; positive scrolls right.
 	var hscroll := 0.0
+	## Took part in a two-hand zoom: its pinch presses nothing until it opens (the
+	## hand still pinching when the other let go clicked where the cursor was).
+	var zoom_held := false
 	var disc_shown := false
 	var engagement := HandEngagement.new()
 	## Hand data for the two-hand gestures, the menu and calibration (world space).
@@ -741,9 +757,11 @@ var _reconnect_timer := -1.0
 var _last_session_state := -1
 var _hand_trackers_seen := false
 var _hand_trackers_missing_sec := 0.0
+var _session_loss := SessionLossLogger.new()
 
 
 func _ready() -> void:
+	OS.add_logger(_session_loss)
 	_build_world()
 	_build_rig()
 	_build_world_visuals()
@@ -752,7 +770,7 @@ func _ready() -> void:
 	for pointer in _pointers:
 		pointer.gestures.settings = _gesture_settings
 		pointer.engagement.settings = _engagement_settings
-	_build_buttons()
+	_build_helpers()
 	_build_seat_button()
 	_build_radius_handles()
 	_build_settings_panel()
@@ -2003,6 +2021,7 @@ func _on_session_begun(openxr: OpenXRInterface) -> void:
 
 
 func _exit_tree() -> void:
+	OS.remove_logger(_session_loss)
 	# Never leave Windows with a mouse button or Ctrl stuck down.
 	_release_cursor_button()
 	if _zoom_active:
@@ -2201,6 +2220,7 @@ func _update_two_hand_gestures() -> void:
 			pointer.pressed = false
 			pointer.just_pressed = false
 			pointer.pending = true
+			pointer.zoom_held = true
 	elif _zoom_active:
 		MouseInput.set_key(VK_CONTROL, false)
 		_zoom_active = false
@@ -2875,8 +2895,15 @@ func _restart_app(attempt: int) -> void:
 	# Launched through a delayed PowerShell so the new process starts after this one
 	# is gone. OS.set_restart_on_exit() is not used: after a lost OpenXR instance
 	# the engine never got as far as restarting.
-	var command := "Start-Sleep -Seconds 2; Start-Process -FilePath '%s' -ArgumentList '--path','%s'" % [
-		OS.get_executable_path(), ProjectSettings.globalize_path("res://").trim_suffix("/"),
+	# The PowerShell also waits for the new process: one that ends with a non-zero
+	# code crashed (20.10.2026: while Link restarted, D3D12 ran out of video memory,
+	# Godot fell back to Vulkan and crashed in the driver), so it is started again.
+	# The app itself always quits with 0, so a normal exit or restart ends the loop.
+	var command := ("Start-Sleep -Seconds 2; for ($i = 0; $i -le %d; $i++) { " +
+			"$p = Start-Process -FilePath '%s' -ArgumentList '--path','%s' -PassThru; $null = $p.Handle; $p.WaitForExit(); " +
+			"if ($p.ExitCode -eq 0) { break }; Start-Sleep -Seconds %d }") % [
+		XR_CRASH_RELAUNCHES, OS.get_executable_path(), ProjectSettings.globalize_path("res://").trim_suffix("/"),
+		int(XR_RESTART_DELAY_SEC),
 	]
 	var pid := OS.create_process("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", command])
 	print("[xr] запуск нового процесса через PowerShell, pid ", pid)
@@ -2904,6 +2931,10 @@ func _update_xr_session(delta: float) -> void:
 			print("[xr] трекеры рук пропали — считаю сессию потерянной")
 			_hand_trackers_seen = false
 			_schedule_reconnect()
+
+	if _session_loss.lost and _reconnect_timer < 0.0:
+		print("[xr] среда ответила XR_ERROR_SESSION_LOST — сессия потеряна")
+		_schedule_reconnect()
 
 	if _reconnect_timer < 0.0:
 		return
@@ -3301,7 +3332,7 @@ func _refresh_driver_section(reload := false) -> void:
 	else:
 		_driver_count_label.text = str(_driver_count)
 	var changed := _driver_count >= 0 and (_driver_target != _driver_count or _driver_selected != _driver_resolutions)
-	_driver_apply.enabled = changed and not _vdd.busy
+	_driver_apply.enabled = changed and not _vdd.busy and not _driver_saving_layout
 	if _vdd.busy:
 		_driver_status.text = "применяю: драйвер перезапускается, Link переподключится"
 	elif changed:
@@ -3342,7 +3373,9 @@ func _on_driver_chip(size: Vector2i) -> void:
 
 
 func _on_driver_apply() -> void:
-	if _vdd.busy or _driver_count < 0:
+	# Also while the layout is being saved for an apply already started (a second
+	# press then restarted the driver twice).
+	if _vdd.busy or _driver_saving_layout or _driver_count < 0:
 		return
 	if _driver_selected != _driver_resolutions:
 		var problem := VddConfig.write(_driver_selected)
@@ -3887,6 +3920,7 @@ func _update_pointer(index: int, delta: float) -> void:
 		var stick := 0.0 if _stick_moves(index) else stick_vector.y
 		pointer.scrolling = absf(stick) > CONTROLLER_STICK_DEADZONE
 		pointer.scroll = stick * CONTROLLER_SCROLL_SPEED * delta if pointer.scrolling else 0.0
+		pointer.hscroll = 0.0
 
 		# Radial menu: hold B/Y, pick an item with the stick or by moving the
 		# controller, let go to run it.
@@ -3923,6 +3957,8 @@ func _update_pointer(index: int, delta: float) -> void:
 		pointer.pending = false
 		pointer.scrolling = false
 		pointer.scroll = 0.0
+		pointer.hscroll = 0.0
+		pointer.zoom_held = false
 	if not pointer.tracked_hand:
 		# No hand, no pose: a hand coming back starts from scratch.
 		pointer.hand_joints = PackedVector3Array()
@@ -3934,7 +3970,9 @@ func _update_pointer(index: int, delta: float) -> void:
 		# Switched between hand and controller (or lost tracking): close without running.
 		pointer.menu_open = false
 		pointer.menu_selected = ""
-	pointer.pressed = pointer.button != HandGestures.Click.NONE
+	if pointer.zoom_held and pointer.button == HandGestures.Click.NONE:
+		pointer.zoom_held = false
+	pointer.pressed = pointer.button != HandGestures.Click.NONE and not pointer.zoom_held
 	pointer.just_pressed = pointer.pressed and not was_pressed
 	if pointer.pressed != was_pressed:
 		print("[gesture] %s (%s): %s" % [SIDE_LABELS[index], pointer.mode,
@@ -4182,7 +4220,7 @@ func _build_rig() -> void:
 		_joint_meshes.append(joints)
 
 
-func _build_buttons() -> void:
+func _build_helpers() -> void:
 	_vdd = VddControl.new()
 	_vdd.finished.connect(_on_vdd_finished)
 	add_child(_vdd)
@@ -4197,13 +4235,6 @@ func _build_buttons() -> void:
 	_monitor_menu.close_requested.connect(_close_monitor_menu)
 	add_child(_monitor_menu)
 	_buttons.append_array(_monitor_menu.buttons)
-
-
-	# Kept apart from the others so that it is not hit by accident.
-
-
-func _add_button(text: String, at: Vector3, hold_time: float) -> VrButton:
-	return _add_button_to(self, text, at, BUTTON_SIZE, hold_time)
 
 
 func _add_button_to(parent: Node3D, text: String, at: Vector3, size: Vector2, hold_time: float) -> VrButton:

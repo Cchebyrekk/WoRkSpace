@@ -228,6 +228,8 @@ static func snap_angles(heading: float, elevation: float, half: Vector2, others:
 ## 0.04 = 4 %). `unscaled` is the panel's size in metres at scale 1, `others` the
 ## other panels' sizes; real sizes, so a curved panel counts as big as it is.
 static func snap_scale(scale: float, unscaled: Vector2, others: Array[Vector2], reach: float) -> float:
+	if scale <= 0.0 or unscaled.x <= 0.0 or unscaled.y <= 0.0:
+		return scale
 	var candidates: Array[float] = [1.0]
 	for other in others:
 		candidates.append(other.x / unscaled.x)
@@ -266,21 +268,25 @@ static func to_desktop(monitors: Array[Rect2i], primary_index: int, distance: fl
 	return Vector2(reference.x + heading * scale.x, reference.y - elevation * scale.y)
 
 
-## The desktop point that ends up straight ahead at eye level: the middle of the
-## group sideways, the middle of the primary vertically.
-static func _reference(monitors: Array[Rect2i], primary_index: int) -> Vector2:
+## The rectangle that contains every monitor.
+static func _bounds(monitors: Array[Rect2i]) -> Rect2i:
 	var bounds := monitors[0]
 	for monitor in monitors:
 		bounds = bounds.merge(monitor)
+	return bounds
+
+
+## The desktop point that ends up straight ahead at eye level: the middle of the
+## group sideways, the middle of the primary vertically.
+static func _reference(monitors: Array[Rect2i], primary_index: int) -> Vector2:
+	var bounds := _bounds(monitors)
 	var primary := monitors[clampi(primary_index, 0, monitors.size() - 1)]
 	return Vector2(bounds.position.x + bounds.size.x * 0.5, primary.position.y + primary.size.y * 0.5)
 
 
 ## Desktop pixels per radian: (horizontal, vertical).
 static func _scale(monitors: Array[Rect2i], distance: float, degrees_per_1920_px: float, max_arc_degrees: float) -> Vector2:
-	var bounds := monitors[0]
-	for monitor in monitors:
-		bounds = bounds.merge(monitor)
+	var bounds := _bounds(monitors)
 	var max_arc := deg_to_rad(max_arc_degrees)
 	var pixels_per_radian := 1920.0 / deg_to_rad(degrees_per_1920_px)
 	if bounds.size.x / pixels_per_radian > max_arc:

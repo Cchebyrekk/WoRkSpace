@@ -235,7 +235,11 @@ static func describe_miss(template: Template, values: PackedFloat32Array) -> Str
 ## MIN_TOLERANCE. Null if fewer than `min_frames` frames.
 static func record(samples: Array[PackedFloat32Array], id: String, name: String, joints := PackedVector3Array(),
 		min_frames := 40) -> Template:
-	if samples.size() < min_frames:
+	var valid: Array[PackedFloat32Array] = []
+	for sample in samples:
+		if sample.size() == FEATURE_COUNT:
+			valid.append(sample)
+	if valid.size() < maxi(min_frames, 1):
 		return null
 	var template := Template.new()
 	template.id = id
@@ -245,9 +249,8 @@ static func record(samples: Array[PackedFloat32Array], id: String, name: String,
 	template.tolerance.resize(FEATURE_COUNT)
 	for f in FEATURE_COUNT:
 		var column := PackedFloat32Array()
-		for sample in samples:
-			if sample.size() == FEATURE_COUNT:
-				column.append(sample[f])
+		for sample in valid:
+			column.append(sample[f])
 		column.sort()
 		var low := column[int(column.size() * 0.1)]
 		var high := column[int(column.size() * 0.9)]

@@ -27,6 +27,7 @@ func _init() -> void:
 	_test_slider()
 	_test_panel_back()
 	_test_menu_set()
+	_test_lookups_and_helpers()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -1244,3 +1245,74 @@ func _test_hand_ray() -> void:
 	for i in 60:
 		settled = PointerMath.smooth_direction(settled, Vector3.UP, 0.011, 0.05)
 	_check(settled.distance_to(Vector3.UP) < 0.001, "за 60 кадров сходится к цели")
+
+
+## Small lookups and helpers the bigger tests use only indirectly.
+func _test_lookups_and_helpers() -> void:
+	# GestureCatalog: names and kinds of actions, recorded poses by id.
+	_check(GestureCatalog.kind_of("left") == "touch" and GestureCatalog.kind_of("move") == "pose" and GestureCatalog.kind_of("nope") == "",
+			"вид действия: касание, поза, неизвестное — пусто")
+	_check(GestureCatalog.label_of("turn") == "Поворот" and GestureCatalog.label_of("nope") == "nope", "название действия, неизвестное — как есть")
+	var pose := HandPose.Template.new()
+	pose.id = "custom:3"
+	var customs: Array[HandPose.Template] = [pose]
+	_check(GestureCatalog.find("custom:3", customs) == pose and GestureCatalog.find("custom:9", customs) == null, "своя поза по id")
+
+	# MenuSet: built-in and own functions, ring size.
+	MenuSet.custom = {"custom:1": ["Ctrl+K", [0x11, 0x4B]]}
+	_check(MenuSet.has_action("copy") and MenuSet.has_action("custom:1") and not MenuSet.has_action("nope"), "есть ли функция")
+	_check(MenuSet.all_ids().has("paste") and MenuSet.all_ids().has("custom:1") and MenuSet.all_ids().size() == MenuSet.ACTIONS.size() + 1,
+			"все функции — готовые и свои")
+	MenuSet.custom = {}
+	_check(is_equal_approx(MenuSet.ring_radius_for(2), 0.1) and MenuSet.ring_radius_for(8) > MenuSet.ring_radius_for(5),
+			"кольцо: не меньше 10 см и растёт с числом пунктов")
+	var navigator := MenuSet.Navigator.new()
+	navigator.open(Vector3(0.0, 1.4, -0.4), Vector3(0.0, 1.6, 0.0))
+	_check(navigator.offset(navigator.centre, navigator.centre + Vector3(0.05, 0.02, 0.0)).is_equal_approx(Vector2(0.05, 0.02)),
+			"меню: смещение руки в плоскости кольца")
+
+	# ScrollStick: offset in the ring's plane; towards the viewer does not count.
+	var stick := ScrollStick.new()
+	stick.start(Vector3(0.0, 1.3, -0.4), Vector3(0.0, 1.6, 0.0))
+	_check(stick.offset(Vector3(0.03, 1.32, -0.4)).is_equal_approx(Vector2(0.03, 0.02)), "прокрутка: смещение вправо и вверх")
+	_check(stick.offset(Vector3(0.0, 1.3, -0.3)).is_zero_approx(), "прокрутка: к себе — не смещение")
+
+	# PanelLayout: half-angle a panel takes, and a placement by angles.
+	var size := Vector2(1.0, 0.6)
+	var flat := PanelLayout.half_azimuth(size, 0.0, 0.0, 0.0, 2.0)
+	_check(is_equal_approx(flat, atan(0.5 / 2.0)), "половина угла плоской панели перед глазом")
+	_check(PanelLayout.half_azimuth(size, deg_to_rad(30.0), deg_to_rad(30.0), 0.0, 2.0) > flat, "наклонённая выше глаз ближе и шире на вид")
+	_check(PanelLayout.half_azimuth(size, 0.0, 0.0, 1.0, 2.0) > flat, "изогнутая на вид шире: края загибаются к глазу")
+	var eye := Vector3(0.0, 1.6, 0.0)
+	var placed := PanelLayout.placement_at(deg_to_rad(30.0), deg_to_rad(10.0), size, eye, 2.0)
+	_check(placed.transform.origin.is_equal_approx(eye + PanelLayout.direction_of(deg_to_rad(30.0), deg_to_rad(10.0)) * 2.0),
+			"панель стоит на сфере по курсу и возвышению")
+	_check(is_equal_approx(placed.pitch, deg_to_rad(10.0)) and placed.transform.basis.z.normalized().dot((eye - placed.transform.origin).normalized()) > 0.999,
+			"без наклона — смотрит на глаз")
+	_check(is_equal_approx(PanelLayout.placement_at(0.0, deg_to_rad(10.0), size, eye, 2.0, 0.0).pitch, 0.0), "наклон «прямо» задаётся явно")
+
+	# HandPose.box_template: a range is the pose, out of it is not; the rest is "any".
+	var box := HandPose.box_template("pose:test", "Проба", {0: [0.2, 0.4]})
+	var values := PackedFloat32Array()
+	values.resize(HandPose.FEATURE_COUNT)
+	values.fill(5.0)
+	values[0] = 0.3
+	_check(HandPose.distance(box, values, false) <= 1.0, "коробка: внутри диапазона — поза, остальные признаки любые")
+	values[0] = 0.9
+	_check(HandPose.distance(box, values, false) > 1.0 and is_inf(box.tolerance[1]), "коробка: вне диапазона — не поза")
+
+	# WorldLayout.find
+	var spheres := WorldLayout.default_fixtures(PackedStringArray(["a"]))
+	_check(WorldLayout.find(spheres, spheres[0].id) == spheres[0] and WorldLayout.find(spheres, 999) == null, "заготовка по id")
+
+	# VddConfig.write refuses an empty list before touching the driver's file.
+	_check(VddConfig.write([] as Array[Vector2i]) != "", "драйвер: пустой список разрешений не пишется")
+
+	# Edge cases found in the review (21.10.2026).
+	var broken: Array[PackedFloat32Array] = []
+	for k in 50:
+		broken.append(PackedFloat32Array([1.0, 2.0]))
+	_check(HandPose.record(broken, "custom:x", "x") == null, "запись позы из кадров не того размера — не поза, без падения")
+	_check(is_equal_approx(PanelLayout.snap_scale(0.0, Vector2(1.0, 0.6), [Vector2(1.0, 0.6)] as Array[Vector2], 0.04), 0.0)
+			and is_equal_approx(PanelLayout.snap_scale(1.0, Vector2.ZERO, [Vector2(1.0, 0.6)] as Array[Vector2], 0.04), 1.0),
+			"магнит размера: нулевой масштаб или размер — без деления на ноль")
