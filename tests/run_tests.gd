@@ -29,6 +29,7 @@ func _init() -> void:
 	_test_menu_set()
 	_test_lookups_and_helpers()
 	_test_wall_layout()
+	_test_wall_split()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -76,6 +77,22 @@ func _test_vdd_config() -> void:
 	var wanted: Array[Vector2i] = [Vector2i(3440, 1440), Vector2i(1920, 1080)]
 	var changed := VddConfig.with_resolutions(text, wanted)
 	_check(VddConfig.parse_resolutions(changed) == wanted, "настройки VDD: новый список записан")
+	# The layer's picture: Link refused a 5120×2160 one (22.10.2026), 3840×2160 always worked.
+	_check(ScreenPanel.layer_size(Vector2i(3840, 2160)) == Vector2i(3840, 2160) and ScreenPanel.layer_size(Vector2i(5120, 2160)) == Vector2i(4096, 1728)
+			and ScreenPanel.layer_size(Vector2i(1920, 8640)) == Vector2i(910, 4096), "картинка слоя — не больше 4096 по большей стороне, форма та же")
+	# Too big or too thin: the most the limits allow, the shape kept (22.10.2026).
+	var big_fit := VddConfig.fitted(Vector2i(5944, 4600))
+	_check(VddConfig.supported(big_fit) and big_fit.x % 8 == 0 and absf(float(big_fit.x) / big_fit.y - 5944.0 / 4600.0) < 0.01
+			and big_fit.x * big_fit.y > 15360 * 1080 * 0.95, "разрешение: место за пределами — наибольшее допустимое той же формы: %s" % big_fit)
+	_check(VddConfig.fitted(Vector2i(1920, 1080)) == Vector2i(1920, 1080) and VddConfig.fitted(Vector2i(1920, 304)).y >= 360
+			and VddConfig.fitted(Vector2i(20000, 100)) == Vector2i.ZERO, "разрешение: допустимое не меняется, тонкое поднимается, невозможное — нет")
+	# Limits found on 22.10.2026 (tests/vdd_limit_probe.ps1; a taller mode crashed Windows).
+	_check(VddConfig.supported(Vector2i(15360, 1080)) and VddConfig.supported(Vector2i(3840, 2160)) and VddConfig.supported(Vector2i(912, 1080))
+			and VddConfig.supported(Vector2i(1920, 4320)) and VddConfig.supported(Vector2i(1920, 8640)),
+			"настройки VDD: ширина до 15360, высота до 8640, 4K и полклетки допустимы")
+	_check(not VddConfig.supported(Vector2i(1920, 8648)) and not VddConfig.supported(Vector2i(15992, 8104))
+			and not VddConfig.supported(Vector2i(1920, 200)) and not VddConfig.supported(Vector2i(9600, 2160)),
+			"настройки VDD: выше 8640, больше 15360×1080 пикселей и уже 360 — нет")
 	_check(changed.contains("<count>1</count>") and changed.contains("<logging>false</logging>"), "настройки VDD: остальное не тронуто")
 	_check(VddConfig.parse_resolutions("<vdd_settings/>").is_empty(), "настройки VDD: без списка — пусто")
 
@@ -756,6 +773,18 @@ func _test_world_layout() -> void:
 	WorldLayout.settle(fixtures, PackedStringArray(["A", "B", "C", "D"]))
 	_check(fixtures[0].monitors.count("B") == 1 and fixtures[0].monitors.has("D"), "монитор на двух шарах остаётся на одном, новый — на первом")
 	_check(not second.monitors.has("B"), "второй раз монитор не числится")
+	# Driver screens made anew come back under new names (22.10.2026).
+	var anew := WorldLayout.Fixture.new()
+	anew.kind = "wall"
+	anew.monitors = PackedStringArray(["MTT1337#a", "MTT1337#b", "PHL"])
+	anew.cells = {"MTT1337#a": Rect2i(0, 0, 1, 1), "PHL": Rect2i(1, 0, 1, 1)}
+	anew.parts = {"MTT1337#b": "2,0:1"}
+	var renamed := WorldLayout.adopt([anew] as Array[WorldLayout.Fixture], PackedStringArray(["MTT1337#x", "MTT1337#y", "PHL"]))
+	_check(renamed == {"MTT1337#a": "MTT1337#x", "MTT1337#b": "MTT1337#y"} and anew.cells.get("MTT1337#x") == Rect2i(0, 0, 1, 1)
+			and anew.parts.get("MTT1337#y") == "2,0:1" and anew.monitors.has("MTT1337#x") and not anew.cells.has("MTT1337#a"),
+			"экраны драйвера с новыми именами занимают места пропавших")
+	_check(WorldLayout.adopt([anew] as Array[WorldLayout.Fixture], PackedStringArray(["MTT1337#x", "MTT1337#y", "PHL"])).is_empty(),
+			"без новых экранов ничего не переименовывается")
 
 	var near := WorldLayout.nearby(fixtures, Vector3(5.5, 1.6, 0.4), 1.0)
 	_check(near == second and WorldLayout.nearby(fixtures, Vector3(20.0, 1.6, 0.0), 1.0) == null, "рядом с шаром — его место, вдали — ничего")
@@ -1397,7 +1426,12 @@ func _test_wall_layout() -> void:
 	var rig := WorldLayout.rig_for(eyes, head)
 	_check((rig * head).origin.is_equal_approx(eyes.origin) and (rig.basis * -head.basis.z).is_equal_approx(Vector3.RIGHT), "место: голова в точку, взгляд вдоль")
 	var left := WallLayout.bend_handle_point(one)
-	_check(left.x < -WallLayout.CELL.x * 0.5 and is_equal_approx(left.y, corner.y), "стена: ручка изгиба за левым нижним углом")
+	_check(is_equal_approx(left.x, WallLayout.area(one).get_center().x) and left.y < corner.y, "стена: ручка изгиба под серединой")
+	var step_one := WallLayout.pitch(0.06)
+	_check(WallLayout.dragged_grid(Rect2i(0, 0, 3, 2), [], -1.6 * step_one.x, 1.4 * step_one.y, 0.06, Vector2i(-1, -1)) == Rect2i(-1, -1, 4, 3),
+			"стена: размер с левого верхнего угла")
+	_check(WallLayout.size_handle_point(one, 0.06, Vector2i(-1, -1)).x < 0.0 and WallLayout.size_handle_point(one, 0.06, Vector2i(-1, -1)).y > 0.0,
+			"стена: ручка размера у левого верхнего угла")
 	_check(is_equal_approx(WallLayout.bend_from_degrees(36.0, 3.0), 0.1) and is_equal_approx(WallLayout.bend_from_degrees(46.8, 3.0), 45.0 / 360.0)
 			and WallLayout.bend_from_degrees(1.4, 3.0) == 0.0 and WallLayout.bend_from_degrees(500.0, 3.0) == 1.0,
 			"стена: изгиб ручкой — магнит каждые 15° дуги, от плоской до цилиндра")
@@ -1413,9 +1447,13 @@ func _test_wall_layout() -> void:
 	_check(is_equal_approx(WallLayout.cell_centre(Rect2i(1, 0, 1, 1), 0.2).x, WallLayout.CELL.x + 0.2)
 			and is_equal_approx(WallLayout.cell_size(Rect2i(0, 0, 2, 1), 0.0).x, WallLayout.CELL.x * 2.0), "стена: зазор между клетками настраивается")
 	var lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0))
-	_check(lines.size() == (4 + 3) * 2 and is_equal_approx(lines[0].z, -1.5 + WallLayout.OUTLINE_DEPTH), "стена: контур — края и линии между клетками, за стеной")
+	_check(lines.size() == 6 * 4 * 2 and is_equal_approx(lines[0].z, -1.5 + WallLayout.OUTLINE_DEPTH), "стена: контур — вокруг каждой клетки, за стеной")
 	var bent_lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.5))
-	_check(bent_lines.size() == 4 * 2 + 3 * WallLayout.OUTLINE_ARC_STEPS * 2, "стена изогнутая: линии поперёк по дуге")
+	_check(bent_lines.size() > lines.size() * 2, "стена изогнутая: линии поперёк по дуге")
+	var joined_wall := WallLayout.Wall.new()
+	joined_wall.blocks = {"B1": "0,0+1,0"}
+	var joined_lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0), joined_wall)
+	_check(joined_lines.size() == lines.size() - 4 * 2, "стена: соединённые клетки — одна клетка в контуре")
 	var ball := WallLayout.sphere_outline(1.1, 16)
 	_check(ball.size() == 3 * 16 * 2 and is_equal_approx(ball[5].length(), 1.1 - WallLayout.OUTLINE_DEPTH), "шар: контур — три окружности за экранами")
 	var slab := WallLayout.backing(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0))
@@ -1441,3 +1479,275 @@ func _test_wall_layout() -> void:
 	var screens_at: Array[Rect2i] = [one, Rect2i(0, 2, 1, 1)]
 	_check(WallLayout.nearest_screen(screens_at, 0.1, -2.4).is_equal_approx(WallLayout.cell_centre(Rect2i(0, 2, 1, 1)))
 			and WallLayout.nearest_screen([] as Array[Rect2i], 0.3, 0.4) == Vector2(0.3, 0.4), "стена: сесть — к ближайшему экрану")
+
+
+static func _split_wall(splits: Dictionary) -> WallLayout.Wall:
+	var wall := WallLayout.Wall.new()
+	wall.splits = splits
+	return wall
+
+
+func _test_wall_split() -> void:
+	# Saved before joined cells were cells of their own: groups become "B<n>".
+	var old := WorldLayout.Fixture.from_dictionary({"kind": "wall", "joins": ["0,0+1,0"], "parts": {"m": "0,0+1,0", "n": "2,0:1"}, "splits": {"2,0": "c2"}})
+	_check(old.blocks == {"B1": "0,0+1,0"} and old.parts.get("m") == "B1" and old.parts.get("n") == "2,0:1",
+			"старое сохранение: соединённое место стало клеткой B1")
+	var saved := WorldLayout.Fixture.from_dictionary(old.to_dictionary())
+	_check(saved.blocks == old.blocks and saved.parts == old.parts, "соединённые клетки сохраняются")
+	# Split cells (slice k2, 22.10.2026).
+	var driver: Array[Vector2i] = [Vector2i(1920, 1080), Vector2i(2560, 1440), Vector2i(3840, 2160), Vector2i(1080, 1920)]
+	_check(WallLayout.best_resolution(WallLayout.CELL * 2.0, driver) == Vector2i(3840, 2160),
+			"разрешение по клетке: 2×2 клетки — 4K")
+	_check(WallLayout.best_resolution(WallLayout.CELL, driver) == Vector2i(1920, 1080),
+			"разрешение по клетке: одна клетка — 1920×1080")
+	_check(WallLayout.best_resolution(Vector2(WallLayout.CELL.y, WallLayout.CELL.x), driver) == Vector2i(1080, 1920),
+			"разрешение по клетке: стоячая часть — стоячее разрешение")
+	_check(WallLayout.best_resolution(Vector2(WallLayout.CELL.x / 3.0, WallLayout.CELL.y), driver) == Vector2i.ZERO,
+			"разрешение по клетке: нет подходящего по форме — ничего")
+	_check(WallLayout.wanted_resolution(WallLayout.CELL) == Vector2i(1920, 1080), "нужное разрешение: клетка — 1920×1080")
+	var half_cell := WallLayout.wanted_resolution(Vector2((WallLayout.CELL.x - 0.06) * 0.5, WallLayout.CELL.y))
+	_check(half_cell.x % 8 == 0 and half_cell.y == 1080 and absi(half_cell.x - 912) <= 8, "нужное разрешение: полклетки — около 912×1080")
+	var with_half: Array[Vector2i] = driver.duplicate()
+	with_half.append(half_cell)
+	_check(WallLayout.best_resolution(Vector2((WallLayout.CELL.x - 0.06) * 0.5, WallLayout.CELL.y), with_half) == half_cell,
+			"разрешение по клетке: добавленное в драйвер подходит")
+
+	# Staggered rows: a screen on the line between two cells (22.10.2026).
+	var row := WallLayout.Wall.new()
+	row.cells = {"a": Rect2i(0, 0, 1, 1), "b": Rect2i(1, 0, 1, 1), "c": Rect2i(0, 1, 1, 1)}
+	var step := WallLayout.pitch(0.06)
+	var stagger := WallLayout.dropped(row, "c", 0.5 * step.x, 0.0, 0.06)
+	_check(stagger.parts.get("c") == "B1" and stagger.blocks.get("B1") == "0,0:1+1,0:0" and stagger.splits.get("0,0") == "c2" and stagger.splits.get("1,0") == "c2",
+			"шахматный порядок: экран на стыке — на двух половинах, клетки поделены")
+	_check(stagger.parts.get("a") == "0,0:0" and stagger.parts.get("b") == "1,0:1", "шахматный порядок: соседи — во внешних половинах")
+	var stagger_area := WallLayout.screen_area(stagger, "c", 0.06)
+	_check(is_equal_approx(stagger_area.size.x, WallLayout.CELL.x) and is_equal_approx(stagger_area.get_center().x, 0.5 * step.x),
+			"шахматный порядок: экран шириной в клетку, посередине стыка")
+	_check(WallLayout.screen_cells(stagger, "c") == Rect2i(0, 0, 2, 1), "шахматный порядок: экран стоит на двух клетках")
+	_check(WallLayout.dropped(row, "c", 0.3 * step.x, 0.0, 0.06).parts.is_empty(), "не у стыка — обычный перенос")
+	var thirds := row.copy()
+	thirds.splits = {"1,0": "c3"}
+	_check(WallLayout.straddled(thirds, "c", Vector2i(0, 0)) == null, "на стык с клеткой на три — нельзя")
+
+
+	# The grip: split in two, delete, join four ways (22.10.2026).
+	var grid := Rect2i(0, 0, 2, 2)
+	var whole_split := WallLayout.split_step(row, "0,0", "c")
+	_check(whole_split.splits.get("0,0") == "c2" and whole_split.parts.get("a") == "0,0:0", "деление: целая — 2 столбца")
+	var nested := WallLayout.split_step(whole_split, "0,0:1", "c")
+	_check(nested.splits.get("0,0:1") == "c2" and nested.splits.get("0,0") == "c2", "деление: часть делится ещё раз пополам")
+	var many := row
+	var deepest := "0,0"
+	for k in 6:
+		many = WallLayout.split_step(many, deepest, "c")
+		deepest += ":1"
+	_check(many.splits.has("0,0:1:1") and not many.splits.has("0,0:1:1:1"), "деление: не мельче 8 см (столбцы 60, 27, 11 см — да, 2 см — нет)")
+	# Into N equal parts in one go (22.10.2026).
+	var fifths := WallLayout.split_step(row, "1,0", "c", 0.06, 5)
+	_check(fifths.splits.get("1,0") == "c5" and is_equal_approx(WallLayout.slot_area("1,0:4", fifths.splits, 0.06).size.x, (WallLayout.CELL.x - 0.24) / 5.0)
+			and WallLayout.split_step(row, "1,0", "c", 0.06, 10).splits.is_empty(), "деление на 5 равных столбцов; на 10 — уже мельче 8 см")
+	_check(WallLayout.split_step(row, "1,0", "c", 0.06, 1) == row, "деление на 1 — ничего")
+	# A joined cell is a cell of its own (22.10.2026, «соедини в настоящую»): split
+	# into N equal parts like any cell, what it covers untouched.
+	var pair := WallLayout.Wall.new()
+	pair.blocks = {"B1": "0,0+1,0"}
+	for n: int in [3, 5]:
+		var cut_n := WallLayout.split_step(pair, "B1", "c", 0.06, n)
+		var equal := cut_n.splits == {"B1": "c%d" % n} and cut_n.blocks == pair.blocks
+		for k in n:
+			equal = equal and is_equal_approx(cut_n.area_of("B1:%d" % k, 0.06).size.x, (2 * WallLayout.CELL.x + 0.06 - (n - 1) * 0.06) / n)
+		_check(equal, "соединённое из двух клеток — на %d равных частей: %s" % [n, cut_n.splits])
+	_check(WallLayout.split_step(pair, "B1", "c", 0.06, 20) == pair, "соединённое — не мельче 8 см")
+	_check(not WallLayout.is_leaf(pair, "0,0") and WallLayout.is_leaf(pair, "B1") and not WallLayout.is_leaf(pair, "B2")
+			and WallLayout.all_leaves(pair, Rect2i(0, 0, 2, 2)) == PackedStringArray(["0,1", "1,1", "B1"]),
+			"соединённое: клетки под ним спрятаны, само — место")
+	var pair_cut := WallLayout.split_step(pair, "B1", "r", 0.06)
+	_check(WallLayout.leaf_at(pair_cut, Vector2i(1, 0), WallLayout.CELL.x * 1.5, -0.3, 0.06) == "B1:1",
+			"соединённое: точка на второй клетке — его нижняя часть")
+	var uneven := {"0,0": "cw0.25,0.75"}
+	_check(is_equal_approx(WallLayout.slot_area("0,0:0", uneven, 0.06).size.x, (WallLayout.CELL.x - 0.06) * 0.25)
+			and WallLayout.leaf_at(_split_wall(uneven), Vector2i(0, 0), WallLayout.slot_area("0,0:1", uneven, 0.06).get_center().x, 0.0, 0.06) == "0,0:1",
+			"неравное деление: доли и часть под точкой")
+	var three_uneven := WallLayout.Wall.new()
+	three_uneven.splits = {"0,0": "cw1,2,1"}
+	_check(WallLayout.deleted(three_uneven, "0,0:1", Rect2i(0, 0, 1, 1), 0.06).splits.get("0,0") == "c2", "удаление из неравного деления: остальные по своим долям")
+	_check(WallLayout.slot_area("0,0:3", {"0,0": "c9"}, 0.3).size.x >= 0.0, "часть не уходит в минус при большом зазоре")
+	# Selecting several cells (22.10.2026).
+	var empty_wall := WallLayout.Wall.new()
+	var four_cells := WallLayout.selection(empty_wall, Rect2i(0, 0, 3, 3), WallLayout.cell_centre(Rect2i(0, 0, 1, 1)), WallLayout.cell_centre(Rect2i(1, 1, 1, 1)))
+	_check(four_cells.size() == 4 and four_cells.has("1,1") and not four_cells.has("2,0"), "выделение: прямоугольник из четырёх клеток")
+	var joined_pick := WallLayout.split_many(pair, PackedStringArray(["B1"]), "c", 3, 0.06)
+	_check(joined_pick.splits == {"B1": "c3"}, "выделение соединённого места: на 3 части целиком: %s" % [joined_pick.splits])
+	var grid_made := WallLayout.split_many(empty_wall, four_cells, "c", 2)
+	_check(grid_made.splits.size() == 4 and grid_made.splits.get("0,1") == "c2", "выделение: каждая клетка поделена")
+	var one_place := WallLayout.joined_many(empty_wall, four_cells, Rect2i(0, 0, 3, 3))
+	_check(one_place.blocks.size() == 1 and (one_place.blocks["B1"] as String).split("+").size() == 4, "выделение: соединено в одно место")
+	var corner_pick := PackedStringArray(["0,0", "1,1"])
+	_check((WallLayout.joined_many(empty_wall, corner_pick, Rect2i(0, 0, 3, 3)).blocks["B1"] as String).split("+").size() == 4,
+			"выделение по диагонали достраивается до прямоугольника")
+	var with_screen := WallLayout.Wall.new()
+	with_screen.cells = {"big": Rect2i(1, 0, 2, 1)}
+	_check(WallLayout.joined_many(with_screen, PackedStringArray(["0,0", "1,0"]), Rect2i(0, 0, 3, 3)) == with_screen,
+			"выделение: экран, выходящий за выделенное, не даёт соединить")
+	var four := WallLayout.split_step(nested, "0,0:0", "c")
+	_check(four.splits == {"0,0": "c4"} and four.parts.get("a") == "0,0:0", "деление: две половины пополам — четыре равных столбца")
+	var three := WallLayout.deleted(four, "0,0:3", grid, 0.06)
+	_check(three.splits == {"0,0": "c3"} and is_equal_approx(WallLayout.slot_area("0,0:2", three.splits, 0.06).size.x, (WallLayout.CELL.x - 0.12) / 3.0),
+			"удаление: оставшиеся три делят место поровну")
+	var halves_gone := WallLayout.deleted(whole_split, "0,0:1", grid, 0.06)
+	_check(halves_gone.splits.is_empty() and halves_gone.cells.get("a") == Rect2i(0, 0, 1, 1), "удаление одной из двух половин — вторая на всю клетку")
+	var gone := WallLayout.deleted(row, "0,0", grid, 0.06)
+	_check(gone.parts.get("b") == "B1" and gone.blocks.get("B1") == "0,0+1,0" and gone.cells.has("a") and not WallLayout.overlaps(gone.cells["a"], gone.taken("a")),
+			"удаление клетки: её место занимает сосед справа, экран — в свободную клетку")
+	var right_split := row.copy()
+	right_split.splits = {"1,0": "c2"}
+	right_split.cells.erase("b")
+	_check(WallLayout.deleted(right_split, "0,0", grid, 0.06).blocks.values().has("0,0+0,1"), "удаление: справа другой размер — место занимает нижний")
+	var alone := WallLayout.Wall.new()
+	_check(WallLayout.deleted(alone, "0,0", Rect2i(0, 0, 1, 1), 0.06) == alone, "единственная клетка не удаляется")
+	# 22.10.2026: the grip kept a part that a join had removed; deleting it stopped the frame.
+	_check(not WallLayout.is_leaf(whole_split, "0,0:1:0") and WallLayout.is_leaf(whole_split, "0,0:1")
+			and not WallLayout.is_leaf(whole_split, "0,0"), "часть стены: существует ли она сейчас")
+	_check(WallLayout.deleted(whole_split, "0,0:1:0", grid, 0.06) == whole_split, "удаление несуществующей части ничего не делает")
+	var triple := WallLayout.Wall.new()
+	triple.blocks = {"B1": "0,0+1,0+2,0"}
+	var cut := WallLayout.split_step(triple, "B1", "c", 0.06)
+	_check(is_equal_approx(cut.area_of("B1:0", 0.06).size.x, cut.area_of("B1:1", 0.06).size.x), "деление соединённого из трёх клеток — две равные половины")
+	var half_gone := WallLayout.deleted(cut, "B1:1", Rect2i(0, 0, 3, 1), 0.06)
+	_check(half_gone.splits.is_empty() and half_gone.blocks == triple.blocks, "удаление половины соединённого — вторая на всё место")
+	var with_tenant := triple.copy()
+	with_tenant.parts = {"t": "B1"}
+	var tenant_cut := WallLayout.split_step(with_tenant, "B1", "r", 0.06)
+	_check(tenant_cut.parts.get("t") == "B1:0", "деление соединённого: экран — в первую часть")
+	var regrown := WallLayout.joined(tenant_cut, "B1:0", Vector2i(0, 1), Rect2i(0, 0, 3, 1), 0.06)
+	_check(regrown.blocks == triple.blocks and regrown.splits.is_empty() and regrown.parts.get("t") == "B1",
+			"соединение двух частей соединённого — оно снова целое")
+	var two := WallLayout.joined(whole_split, "0,0:0", Vector2i(1, 0), grid, 0.06)
+	_check(two.blocks.is_empty() and not two.splits.has("0,0") and two.cells.get("a") == Rect2i(0, 0, 1, 1),
+			"соединение двух половин — клетка снова целая")
+	var cells_joined := WallLayout.joined(row, "0,0", Vector2i(1, 0), grid, 0.06)
+	_check(cells_joined.parts.get("a") == "B1" and cells_joined.has("b") and not cells_joined.parts.has("b")
+			and is_equal_approx(WallLayout.screen_area(cells_joined, "a", 0.06).size.x, WallLayout.CELL.x * 2.0 + 0.06),
+			"соединение двух клеток: экран на обеих, второй — в свободную клетку")
+	_check(WallLayout.join_target(row, "0,0", Vector2i(0, 1), grid, 0.06) == "0,1", "соединение вниз — с клеткой ниже")
+	_check(WallLayout.join_target(row, "0,1", Vector2i(0, -1), grid, 0.06) == "0,0", "соединение вверх — с клеткой выше")
+	_check(WallLayout.join_target(row, "1,0", Vector2i(-1, 0), grid, 0.06) == "0,0", "соединение влево — с клеткой слева")
+	var rows_split := WallLayout.split_step(row, "0,0", "r")
+	_check(WallLayout.join_target(rows_split, "0,0:0", Vector2i(1, 0), grid, 0.06) == "", "соединение: стороны разной длины — нельзя")
+	_check(WallLayout.join_target(whole_split, "0,0:1", Vector2i(1, 0), grid, 0.06) == "1,0", "соединение: половина с клеткой справа — сторона одна")
+	_check(WallLayout.join_target(WallLayout.split_step(whole_split, "0,0:1", "r"), "0,0:0", Vector2i(1, 0), grid, 0.06) == "",
+			"соединение: справа две части — нельзя")
+	var all_one := WallLayout.joined(WallLayout.joined(WallLayout.joined(WallLayout.Wall.new(), "0,0", Vector2i(1, 0), grid, 0.06),
+			"0,1", Vector2i(1, 0), grid, 0.06), "B1", Vector2i(0, 1), grid, 0.06)
+	_check(all_one.blocks.size() == 1 and (all_one.blocks["B1"] as String).split("+").size() == 4
+			and WallLayout.all_leaves(all_one, grid) == PackedStringArray(["B1"]), "всю стену можно соединить в одно место")
+	# Nothing inside a joined cell is remembered («зачем вообще помнить», 22.10.2026).
+	var chopped := WallLayout.split_many(WallLayout.Wall.new(), PackedStringArray(["0,0", "1,0"]), "c", 3, 0.06)
+	chopped = WallLayout.split_many(chopped, WallLayout.all_leaves(chopped, Rect2i(0, 0, 2, 1)), "r", 2, 0.06)
+	var merged_all := WallLayout.joined_many(chopped, WallLayout.all_leaves(chopped, Rect2i(0, 0, 2, 1)), Rect2i(0, 0, 2, 1), 0.06)
+	var kept_members := (merged_all.blocks.get("B1", "") as String).split("+")
+	kept_members.sort()
+	_check(kept_members == PackedStringArray(["0,0", "1,0"]) and merged_all.splits.is_empty(),
+			"соединение 12 частей двух клеток — помнит только две клетки: %s %s" % [merged_all.blocks, merged_all.splits])
+	var edge := WallLayout.joined_many(chopped, PackedStringArray(["0,0:2:0", "0,0:2:1", "1,0:0:0", "1,0:0:1"]), Rect2i(0, 0, 2, 1), 0.06)
+	var edge_members := (edge.blocks.get("B1", "") as String).split("+")
+	edge_members.sort()
+	_check(edge_members == PackedStringArray(["0,0:2", "1,0:0"]) and not edge.splits.has("0,0:2") and edge.splits.get("0,0") == "c3",
+			"соединение по краю клеток — помнит только два куска: %s" % [edge.blocks])
+	_check(WallLayout.joined(whole_split, "0,0:0", Vector2i(1, 0), grid, 0.06).blocks.is_empty(), "две половины одной клетки — просто клетка")
+	# A wall only read remembers its answers; the same answers, and a copy edits afresh.
+	var frozen := tenant_cut.copy()
+	frozen.frozen = true
+	var alike := WallLayout.all_leaves(frozen, Rect2i(0, 0, 3, 1)) == WallLayout.all_leaves(tenant_cut, Rect2i(0, 0, 3, 1))
+	for leaf in WallLayout.all_leaves(tenant_cut, Rect2i(0, 0, 3, 1)):
+		alike = alike and frozen.area_of(leaf, 0.06) == tenant_cut.area_of(leaf, 0.06) and frozen.area_of(leaf, 0.06) == tenant_cut.area_of(leaf, 0.06)
+	alike = alike and frozen.area_of("B1:0", 0.1) == tenant_cut.area_of("B1:0", 0.1) and WallLayout.screen_cells(frozen, "t") == WallLayout.screen_cells(tenant_cut, "t")
+	_check(alike and not frozen.copy().frozen and WallLayout.joined(frozen, "B1:0", Vector2i(0, 1), Rect2i(0, 0, 3, 1), 0.06).blocks == triple.blocks,
+			"стена только для чтения: те же ответы, правка идёт по копии")
+	var unjoined := WallLayout.split_step(stagger, "B1", "c")
+	_check(unjoined.splits.get("B1") == "c2" and unjoined.parts.get("c") == "B1:0"
+			and WallLayout.split_step(stagger, "0,0:1", "c") == stagger, "место на стыке делится как своя клетка, спрятанная половина — нет")
+
+	# Swipe is bound like the others (22.10.2026).
+	var swipe_options: Array = GestureCatalog.options("swipe", []).map(func(o: Array) -> String: return o[0])
+	_check(swipe_options.front() == GestureCatalog.PALM and swipe_options.has("pose:move") and not swipe_options.has("pose:fist"),
+			"смахивание: ладонь, знак движения и свои позы, без кулака")
+	_check(GestureCatalog.sanitize({"swipe": "pose:fist"}, [])["swipe"] == GestureCatalog.OFF
+			and GestureCatalog.sanitize({}, [])["swipe"] == GestureCatalog.PALM, "смахивание: по умолчанию ладонь, кулак недопустим")
+	var wall := WallLayout.Wall.new()
+	wall.cells = {"a": Rect2i(0, 0, 1, 1), "b": Rect2i(1, 0, 1, 1)}
+	var halves := WallLayout.cycled(wall, "0,0")
+	_check(halves.splits.get("0,0") == "c2" and halves.parts.get("a") == "0,0:0" and not halves.cells.has("a"),
+			"деление: клетка пополам, экран — в первую часть")
+	var whole := WallLayout.slot_area("0,0", halves.splits)
+	var left := WallLayout.slot_area("0,0:0", halves.splits)
+	var right := WallLayout.slot_area("0,0:1", halves.splits)
+	_check(is_equal_approx(left.position.x, whole.position.x) and is_equal_approx(right.end.x, whole.end.x)
+			and is_equal_approx(right.position.x - left.end.x, WallLayout.DEFAULT_GAP) and is_equal_approx(left.size.y, whole.size.y),
+			"деление: две части по ширине с зазором между ними")
+	var rows := WallLayout.cycled(WallLayout.cycled(halves, "0,0"), "0,0")
+	_check(rows.splits.get("0,0") == "r2" and rows.parts.get("a") == "0,0:0", "деление: перебор — столбцы, потом ряды")
+	var top := WallLayout.slot_area("0,0:0", rows.splits)
+	_check(is_equal_approx(top.end.y, whole.end.y) and top.size.y < whole.size.y * 0.5, "деление на ряды: первая часть сверху")
+	var back := WallLayout.cycled(WallLayout.cycled(rows, "0,0"), "0,0")
+	_check(not back.splits.has("0,0") and back.cells.get("a") == Rect2i(0, 0, 1, 1) and back.parts.is_empty(), "деление: по кругу — снова целая")
+	var deep := WallLayout.cycled(halves, "0,0:1")
+	_check(deep.splits.get("0,0:1") == "c2" and WallLayout.leaves("0,0", deep.splits) == PackedStringArray(["0,0:0", "0,0:1:0", "0,0:1:1"]),
+			"деление: часть делится дальше")
+	var under_point := WallLayout.leaf_at(deep, Vector2i.ZERO, right.get_center().x, right.get_center().y)
+	_check(under_point == "0,0:1:1" or under_point == "0,0:1:0", "деление: часть под точкой")
+	var into_part := WallLayout.dropped(halves, "b", right.get_center().x, right.get_center().y)
+	_check(into_part.parts.get("b") == "0,0:1" and not into_part.cells.has("b"), "перенос: экран в свободную часть")
+	var swapped := WallLayout.dropped(into_part, "b", left.get_center().x, left.get_center().y)
+	_check(swapped.parts.get("b") == "0,0:0" and swapped.parts.get("a") == "0,0:1", "перенос: на занятую часть — меняются местами")
+	var out := WallLayout.dropped(into_part, "b", WallLayout.cell_centre(Rect2i(3, 0, 1, 1)).x, 0.0)
+	_check(out.cells.get("b") == Rect2i(3, 0, 1, 1) and not out.parts.has("b"), "перенос: из части на целую клетку")
+	var big := WallLayout.Wall.new()
+	big.cells = {"k": Rect2i(0, 0, 2, 2)}
+	big.splits = {"3,0": "c2"}
+	_check(not WallLayout.cycled(big, "1,1").splits.has("1,1"), "деление: клетку под экраном на нескольких клетках не делят")
+	var pushed := WallLayout.onto_cells(big, "k", Rect2i(2, 0, 2, 2))
+	_check(not (pushed.cells["k"] as Rect2i).has_point(Vector2i(3, 0)), "перенос: широкий экран обходит разделённую клетку")
+
+	# The Windows layout from the wall (22.10.2026).
+	var four_k := Vector2i(3840, 2160)
+	var hd := Vector2i(1920, 1080)
+	var split_left := WallLayout.cycled(WallLayout.cycled(WallLayout.cycled(WallLayout.Wall.new(), "-1,0"), "-1,0"), "-1,0")
+	var big_area := WallLayout.area(Rect2i(0, 0, 2, 2))
+	var small_top := WallLayout.slot_area("-1,0:0", split_left.splits)
+	var small_bottom := WallLayout.slot_area("-1,0:1", split_left.splits)
+	var layout := WallLayout.desktop([big_area, small_top, small_bottom] as Array[Rect2], [four_k, hd, hd] as Array[Vector2i], 0, 0.1)
+	_check(layout[0] == Rect2i(Vector2i.ZERO, four_k) and layout[1].position.x == -1920 and layout[2].position.x == -1920
+			and layout[1].position.y < layout[2].position.y and LayoutEdit.is_valid(layout, 0),
+			"Windows по стене: два маленьких слева от 4K — сбоку, друг над другом: %s" % [layout])
+	var row_layout := WallLayout.desktop([WallLayout.area(Rect2i(0, 0, 1, 1)), WallLayout.area(Rect2i(1, 0, 1, 1)), WallLayout.area(Rect2i(0, 1, 1, 1))] as Array[Rect2],
+			[hd, hd, hd] as Array[Vector2i], 0, 0.1)
+	_check(row_layout[1] == Rect2i(1920, 0, 1920, 1080) and row_layout[2] == Rect2i(0, 1080, 1920, 1080), "Windows по стене: справа и снизу")
+	var apart := WallLayout.desktop([WallLayout.area(Rect2i(0, 0, 1, 1)), WallLayout.area(Rect2i(4, 0, 1, 1))] as Array[Rect2], [hd, hd] as Array[Vector2i], 0, 0.1)
+	_check(LayoutEdit.is_valid(apart, 0) and apart[1].position.x == 1920, "Windows по стене: далёкий экран всё равно рядом")
+	var settled := WallLayout.settle({}, PackedStringArray(["p", "n"]), [Rect2i(0, 0, 1920, 1080), Rect2i(0, 0, 1920, 1080)] as Array[Rect2i], 0,
+			{"p": "0,0:0"}, [Rect2i(0, 0, 1, 1)] as Array[Rect2i])
+	_check(not settled.has("p") and settled.has("n") and not (settled["n"] as Rect2i).intersects(Rect2i(0, 0, 1, 1)),
+			"новые мониторы: в частях не трогаются, разделённые клетки обходятся")
+	var fitted := WallLayout.fit(Vector2(0.6, 0.714), Vector2i(1920, 1080))
+	_check(is_equal_approx(fitted.x, 0.6) and is_equal_approx(fitted.x / fitted.y, 16.0 / 9.0), "экран в узкой части вписан по ширине")
+	# Two 1080p beside a 1080p shown as 2x2 (22.10.2026): both still touch it.
+	var same := WallLayout.desktop([big_area, small_top, small_bottom] as Array[Rect2], [hd, hd, hd] as Array[Vector2i], 0, 0.1)
+	var big_rect := same[0]
+	_check(LayoutEdit.is_valid(same, 0) and same[1].end.x == 0 and same[2].end.x == 0
+			and same[1].position.y < big_rect.end.y and same[1].end.y > 0 and same[2].position.y < big_rect.end.y and same[2].end.y > 0,
+			"Windows по стене: оба маленьких касаются большого и при равных разрешениях: %s" % [same])
+	# A screen whose pixels do not match its place (22.10.2026: 960×1080 on a joined
+	# place of 2×2 cells) keeps the others in the wall's order.
+	var small_px := Vector2i(960, 1080)
+	var mixed := WallLayout.desktop([WallLayout.area(Rect2i(0, 0, 1, 1)), WallLayout.area(Rect2i(0, 1, 1, 1)), WallLayout.area(Rect2i(1, 0, 2, 2)),
+			WallLayout.area(Rect2i(3, 0, 1, 1))] as Array[Rect2], [hd, hd, small_px, hd] as Array[Vector2i], 0, 0.1)
+	_check(mixed[1] == Rect2i(0, 1080, 1920, 1080) and mixed[2].position.x == 1920 and mixed[3].position.x == 1920 + 960
+			and LayoutEdit.is_valid(mixed, 0), "Windows по стене: экран не по размеру не сбивает соседей, порядок как на стене: %s" % [mixed])
+	var under := WallLayout.desktop([WallLayout.area(Rect2i(0, 0, 1, 1)), WallLayout.area(Rect2i(1, 0, 1, 1)), WallLayout.area(Rect2i(2, 0, 1, 1)),
+			WallLayout.area(Rect2i(0, 1, 3, 1))] as Array[Rect2], [hd, hd, hd, small_px] as Array[Vector2i], 1, 0.1)
+	_check(under[0].end.x == 0 and under[2].position.x == 1920 and under[3].position.y == 1080 and LayoutEdit.is_valid(under, 1),
+			"Windows по стене: ряд из трёх и под ним широкое место — ряд вплотную, место снизу: %s" % [under])
+	var split_lines := WallLayout.outline(Rect2i(0, 0, 1, 1), 0.06, WallLayout.shape_of(Rect2i(0, 0, 1, 1), 0.06, 1.5, 0.0), _split_wall({"0,0": "c3"}))
+	_check(split_lines.size() == WallLayout.outline(Rect2i(0, 0, 1, 1), 0.06, WallLayout.shape_of(Rect2i(0, 0, 1, 1), 0.06, 1.5, 0.0)).size() * 3,
+			"контур: линии вокруг каждой части разделённой клетки")

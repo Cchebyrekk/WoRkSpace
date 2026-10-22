@@ -34,6 +34,12 @@ class Fixture:
 	## A wall's size in cells (empty = as big as its screens) and the gap between cells (m).
 	var grid := Rect2i()
 	var gap := WallLayout.DEFAULT_GAP
+	## A wall's screens in parts of split cells (monitor key -> part) and how its
+	## cells are split (cell or part -> "c2", "c3", "r2", "r3"); see WallLayout.Wall.
+	var parts := {}
+	var splits := {}
+	## Joined cells: "B<n>" -> what each covers, "a+b+…" (WallLayout.Wall.blocks).
+	var blocks := {}
 
 	## From the fixture's own space (centre at the origin, its middle along -Z) to the world.
 	func frame() -> Transform3D:
@@ -45,7 +51,8 @@ class Fixture:
 			var cell: Rect2i = cells[key]
 			stored[key] = [cell.position.x, cell.position.y, cell.size.x, cell.size.y]
 		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors,
-				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y]}
+				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y],
+				"parts": parts, "splits": splits, "blocks": blocks}
 
 	static func from_dictionary(data: Dictionary) -> Fixture:
 		var fixture := Fixture.new()
@@ -67,6 +74,26 @@ class Fixture:
 		var grid: Variant = data.get("grid", [])
 		if grid is Array and grid.size() == 4:
 			fixture.grid = Rect2i(int(grid[0]), int(grid[1]), maxi(int(grid[2]), 0), maxi(int(grid[3]), 0))
+		for field: String in ["parts", "splits", "blocks"]:
+			var stored_map: Variant = data.get(field, {})
+			if stored_map is Dictionary:
+				var clean := {}
+				for key: Variant in stored_map:
+					clean[str(key)] = str(stored_map[key])
+				fixture.set(field, clean)
+		# Saved before joined cells were cells of their own (22.10.2026): each group
+		# "a+b" becomes "B<n>", and a screen that stood in the group stands in it.
+		var old_joins: Variant = data.get("joins", [])
+		if old_joins is Array:
+			for entry: Variant in old_joins:
+				var n := 1
+				while fixture.blocks.has("B%d" % n):
+					n += 1
+				var id := "B%d" % n
+				fixture.blocks[id] = str(entry)
+				for key: String in fixture.parts:
+					if fixture.parts[key] == str(entry):
+						fixture.parts[key] = id
 		return fixture
 
 
@@ -104,6 +131,42 @@ static func settle(fixtures: Array[Fixture], monitor_keys: PackedStringArray) ->
 	for key in monitor_keys:
 		if not seen.has(key):
 			fixtures[0].monitors.append(key)
+
+
+## Driver screens that came back under new names take the places of those that
+## are gone (22.10.2026: instances made anew got new device paths, and every
+## screen landed in the nearest free cell instead of its own). Gone and new ones
+## are paired in the order of their keys; only keys containing `marker`.
+## Returns old key -> new key.
+static func adopt(fixtures: Array[Fixture], present: PackedStringArray, marker := "MTT1337") -> Dictionary:
+	var known := {}
+	for fixture in fixtures:
+		for key in fixture.monitors:
+			known[key] = true
+	var gone: Array[String] = []
+	for key: String in known:
+		if key.contains(marker) and not present.has(key):
+			gone.append(key)
+	var fresh: Array[String] = []
+	for key in present:
+		if key.contains(marker) and not known.has(key):
+			fresh.append(key)
+	gone.sort()
+	fresh.sort()
+	var renamed := {}
+	for k in mini(gone.size(), fresh.size()):
+		var old := gone[k]
+		var new := fresh[k]
+		renamed[old] = new
+		for fixture in fixtures:
+			var at := fixture.monitors.find(old)
+			if at >= 0:
+				fixture.monitors[at] = new
+			for places: Dictionary in [fixture.cells, fixture.parts]:
+				if places.has(old):
+					places[new] = places[old]
+					places.erase(old)
+	return renamed
 
 
 ## Moves monitor `key` onto the fixture with id `target`.

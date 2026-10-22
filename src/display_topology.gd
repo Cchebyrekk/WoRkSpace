@@ -11,6 +11,10 @@ signal finished(ok: bool, code: String, detail: String)
 signal modes_listed(monitors: Array)
 ## After count_instances(): working and all MttVDD device instances.
 signal instances_counted(working: int, total: int)
+## After every run, whatever it did (finished, modes_listed or instances_counted
+## first): work that waited for the script starts here (22.10.2026: after a
+## self-restart the first run counted instances, and what waited never started).
+signal idle
 
 const SCRIPT_PATH := "res://tools/display_topology.ps1"
 
@@ -119,8 +123,8 @@ func _report(answer: String) -> void:
 	match str(result.get("code", "")):
 		"modes":
 			modes_listed.emit(result.get("monitors", []))
-			return
 		"instances":
 			instances_counted.emit(int(result.get("working", 0)), int(result.get("total", 0)))
-			return
-	finished.emit(bool(result.get("ok", false)), str(result.get("code", "failed")), str(result.get("detail", answer)))
+		_:
+			finished.emit(bool(result.get("ok", false)), str(result.get("code", "failed")), str(result.get("detail", answer)))
+	idle.emit()

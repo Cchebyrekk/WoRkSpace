@@ -58,6 +58,12 @@ func set_text(text: String) -> void:
 	_label.text = text
 
 
+## The text, its font made smaller when it would run past the button's edges.
+func set_fitted_text(text: String) -> void:
+	_label.text = text
+	_label.font_size = clampi(int(size.x * 0.9 / (maxi(text.length(), 1) * 0.00055)), 14, 36)
+
+
 func hit_distance(origin: Vector3, direction: Vector3) -> float:
 	return PointerMath.ray_rect_distance(origin, direction, global_transform, size)
 

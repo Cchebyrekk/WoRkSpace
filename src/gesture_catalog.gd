@@ -21,7 +21,12 @@ const ACTIONS := [
 	["grab", "Перенос панели рукой", "pose"],
 	["move", "Движение", "pose"],
 	["turn", "Поворот", "pose"],
+	["swipe", "Смахивание", "pose"],
 ]
+## The open hand swipe sideways had: offered for the swipe only (it has its own
+## recogniser in main.gd); any other pose works for the swipe too (22.10.2026).
+const PALM := "pose:palm"
+const PALM_NAME := "Раскрытая ладонь"
 
 ## Touches: id -> [name, contact (HandGestures contact index)].
 const TOUCHES := {
@@ -42,6 +47,7 @@ const POSES := {
 const DEFAULTS := {
 	"left": "touch:index", "right": "touch:middle", "middle": "touch:side",
 	"scroll": "pose:scroll", "grab": "pose:fist", "move": "pose:move", "turn": "pose:move",
+	"swipe": PALM,
 }
 
 
@@ -66,8 +72,11 @@ static func options(action: String, customs: Array[HandPose.Template]) -> Array:
 		for id: String in TOUCHES:
 			result.append([id, TOUCHES[id][0]])
 	else:
+		if action == "swipe":
+			result.append([PALM, PALM_NAME])
 		for id: String in POSES:
-			result.append([id, POSES[id]])
+			if action != "swipe" or id == "pose:move":
+				result.append([id, POSES[id]])
 		for template in customs:
 			result.append([template.id, template.name])
 	result.append([OFF, OFF_NAME])
@@ -77,6 +86,8 @@ static func options(action: String, customs: Array[HandPose.Template]) -> Array:
 static func name_of(id: String, customs: Array[HandPose.Template]) -> String:
 	if id == OFF:
 		return OFF_NAME
+	if id == PALM:
+		return PALM_NAME
 	if TOUCHES.has(id):
 		return TOUCHES[id][0]
 	if POSES.has(id):
@@ -125,7 +136,11 @@ static func sanitize(bindings: Dictionary, customs: Array[HandPose.Template]) ->
 		if entry[2] == "touch":
 			fits = fits or TOUCHES.has(id)
 		else:
-			fits = fits or POSES.has(id) or find(id, customs) != null
+			if action == "swipe":
+				# The scroll pose and the fist have their own recognisers for their own actions.
+				fits = fits or id in [PALM, "pose:move"] or find(id, customs) != null
+			else:
+				fits = fits or POSES.has(id) or find(id, customs) != null
 		result[action] = id if fits else OFF
 	return result
 
@@ -185,6 +200,9 @@ static func preview_joints(id: String, customs: Array[HandPose.Template]) -> Pac
 			return HandPose.synthesize(curls, 0.1)
 		"pose:move":
 			curls = [0.1, 0.55, 0.0, 0.0, 0.0]
+			return HandPose.synthesize(curls, 0.9)
+		PALM:
+			curls = [0.0, 0.0, 0.0, 0.0, 0.0]
 			return HandPose.synthesize(curls, 0.9)
 		OFF:
 			return PackedVector3Array()

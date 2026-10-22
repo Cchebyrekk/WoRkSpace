@@ -13,6 +13,41 @@ const PRESETS: Array[Vector2i] = [
 ]
 ## Written for each resolution; the driver adds its global refresh rates on top.
 const REFRESH_RATE := 120
+## Resolutions outside these are never written. 22.10.2026: a list with 15992×8104,
+## 13984×1080, 5760×4320 and 1920×200 in it left the driver with no screen at all;
+## then tests/vdd_limit_probe.ps1 found widths up to 15360 at 1080 fine, but
+## raising the height (1920×4320, then 1920×8640) crashed Windows (bug check 0x10E,
+## VIDEO_MEMORY_MANAGEMENT_INTERNAL). One step at a time afterwards: with 2
+## instances heights up to 8640 were fine, and with all 8 1920×4320 and 1920×8640
+## were fine too — the crash came right after the helper's heavy fallback
+## (restarting instances one by one, then reinstalling the driver), not from one
+## size alone. So: no more than the sizes tried with 8 instances, 15360×1080 and
+## 1920×8640 (the same number of pixels).
+const MIN_SIDE := 360
+const MAX_SIZE := Vector2i(15360, 8640)
+const MAX_PIXELS := 15360 * 1080
+
+
+## `size` made the biggest supported one of the same shape (the user's wish,
+## 22.10.2026: a place too big for the limits gets the most it can, not nothing);
+## a too thin side is raised. Steps of 8 px; Vector2i.ZERO if no size of that shape fits.
+static func fitted(size: Vector2i) -> Vector2i:
+	if size.x <= 0 or size.y <= 0 or supported(size):
+		return size if size.x > 0 and size.y > 0 else Vector2i.ZERO
+	var scale := 1.0
+	if mini(size.x, size.y) < MIN_SIDE:
+		scale = float(MIN_SIDE) / mini(size.x, size.y)
+	scale = minf(scale, minf(float(MAX_SIZE.x) / size.x, float(MAX_SIZE.y) / size.y))
+	scale = minf(scale, sqrt(float(MAX_PIXELS) / (float(size.x) * size.y)))
+	var result := Vector2i(floori(size.x * scale / 8.0) * 8, floori(size.y * scale / 8.0) * 8)
+	if mini(result.x, result.y) < MIN_SIDE:
+		result = Vector2i(ceili(size.x * scale / 8.0) * 8, ceili(size.y * scale / 8.0) * 8)
+	return result if supported(result) else Vector2i.ZERO
+
+
+static func supported(size: Vector2i) -> bool:
+	return mini(size.x, size.y) >= MIN_SIDE and size.x <= MAX_SIZE.x and size.y <= MAX_SIZE.y \
+			and size.x * size.y <= MAX_PIXELS
 
 static var _block := RegEx.create_from_string("(?s)<resolutions>.*?</resolutions>")
 static var _entry := RegEx.create_from_string("(?s)<resolution>\\s*<width>\\s*(\\d+)\\s*</width>\\s*<height>\\s*(\\d+)\\s*</height>")
@@ -52,7 +87,11 @@ static func read() -> Array[Vector2i]:
 
 ## Writes the list; the first time a copy of the original file is kept next to it.
 ## Returns an empty string or what went wrong.
-static func write(resolutions: Array[Vector2i]) -> String:
+static func write(wanted: Array[Vector2i]) -> String:
+	var resolutions: Array[Vector2i] = []
+	for size in wanted:
+		if supported(size):
+			resolutions.append(size)
 	if resolutions.is_empty():
 		return "нужно хотя бы одно разрешение"
 	var text := FileAccess.get_file_as_string(PATH)

@@ -29,6 +29,7 @@ const ACTIONS := {
 	"center": ["Центр", []],
 	"stand_up": ["Встать", []],
 	"quit": ["Выход", []],
+	"edit": ["Редактирование", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.

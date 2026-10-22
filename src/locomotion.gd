@@ -41,6 +41,22 @@ class Options:
 	var wall_slide_hand := 1
 	## Fixtures drawn as thin outlines (a wall's frame and cells, a sphere's circles): 0 = off, 1 = on.
 	var outlines := 1
+	## Which handles of the fixtures are there (the user's wish, 21.10.2026: every
+	## handle can be switched off): a sphere's radius, a wall's size and bend, the
+	## «÷» that splits a wall's cells. 0 = off, 1 = on.
+	var sphere_handle := 1
+	var wall_size_handle := 1
+	var wall_bend_handle := 1
+	var split_handle := 1
+	## Handles always (0) or only in the editing mode (1; the radial menu's
+	## «Редактирование» switches it, the user's wish 22.10.2026).
+	var handles_mode := 0
+	## Experimental: a screen on a wall also gets the resolution of its cell's or
+	## part's shape (from the driver's list); in the editing mode only after it.
+	var wall_resolution := 0
+	## Settings with a few choices: switched by pressing − / + (0) or picked from a
+	## drop-down list (1); the user's wish, 22.10.2026.
+	var option_lists := 0
 
 
 ## The hand's offset from the centre below this does nothing (tracking jitter).

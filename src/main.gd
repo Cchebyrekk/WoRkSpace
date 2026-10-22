@@ -119,6 +119,7 @@ const TUNABLES := [
 	["gestures", "side_press", "Средняя: касание бока", 1000.0, "мм", 0.002, 0.008, 0.04],
 	["gestures", "side_release", "Средняя: отпускание", 1000.0, "мм", 0.002, 0.02, 0.07],
 	["gestures", "confirm_delay", "Окно распознавания", 1000.0, "мс", 0.02, 0.0, 0.4],
+	["gestures", "approach", "Начало щипка", 1000.0, "мм", 0.005, 0.025, 0.08],
 	["pause", "max_gap", "Пауза: ладони ближе чем", 100.0, "см", 0.02, 0.02, 0.8],
 	["pause", "hold_sec", "Пауза: удерживать", 1000.0, "мс", 0.1, 0.2, 2.0],
 	["pause", "facing", "Пауза: ладони друг к другу", 100.0, "%", 0.05, 0.3, 0.95],
@@ -134,7 +135,6 @@ const TUNABLES := [
 	["gestures", "disc_turn_units", "Диск: щелчков за оборот", 1.0 / 120.0, "", 120.0, 120.0, 4800.0],
 	["gestures", "disc_align", "Диск: пальцы по линии кисти", 100.0, "%", 0.05, 0.3, 1.0],
 	["gestures", "disc_together", "Диск: пальцы вместе", 1000.0, "мм", 0.002, 0.01, 0.05],
-	["gestures", "approach", "Начало щипка", 1000.0, "мм", 0.005, 0.025, 0.08],
 	["engagement", "drop", "Покой: рука ниже глаз на", 100.0, "см", 0.02, 0.2, 0.9],
 	["engagement", "ray_down_deg", "Покой: луч ниже горизонта на", 1.0, "°", 5.0, 10.0, 80.0],
 	["gestures", "disc_ring_curl", "Диск: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
@@ -155,10 +155,17 @@ const TUNABLES := [
 	["world", "snap_degrees", "Поворот рывком на", 1.0, "°", 5.0, 10.0, 90.0],
 	["world", "turn_speed_degrees", "Плавный поворот: скорость", 1.0, "°/с", 15.0, 15.0, 360.0],
 	["world", "wall_slide_hand", "У стены вдоль ведёт", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "wall_resolution", "Разрешение по клетке", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "outlines", "Контуры заготовок", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "sphere_handle", "Ручка радиуса шара", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "wall_size_handle", "Ручка размера стены", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "wall_bend_handle", "Ручка изгиба стены", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "split_handle", "Ручка «÷» деления клеток", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "handles_mode", "Ручки", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "vignette", "Затемнение краёв при движении", 100.0, "%", 0.1, 0.0, 1.0],
 	["world", "grid", "Сетка точками", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
+	["world", "option_lists", "Выбор вариантов в настройках", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
@@ -195,14 +202,23 @@ const MONITOR_MENU_FORWARD := 0.25
 ## "Жесты": everything about recognising the hands — touches, pause, swipe, zoom,
 ## rest, fist, the ring's tilt and the moving hand's reach; 20.10.2026 the user
 ## asked for every setting to sit on the tab it belongs to).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Панели", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Меню"]
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Меню"]
+## Subheadings over the rows they start (the user's wish, 22.10.2026: to find things at a glance).
+const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауза", "swipe_mode": "Смахивание и масштаб",
+	"drop": "Покой", "fist_curl": "Кулак и движение рукой",
+	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
+	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
+	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
+	"wall_slide_hand": "У стены", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики"}
+## The value between − and + is at most this wide; longer text gets a smaller font (m).
+const SETTINGS_VALUE_WIDTH := 0.24
 const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
-	"grab_mode": 4, "move_mode": 4, "magnet": 4, "tilt_mode": 4, "monitor_menu": 4,
-	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "outlines": 8,
-	"vignette": 8, "grid": 8, "grid_step": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8,
+	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
+	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "split_handle": 7, "handles_mode": 7,
+	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -338,17 +354,30 @@ class AimStudy:
 ## which Godot prints every frame). This logger watches the engine's output for it.
 ## A headset resting on the table does not lose the session, so it does not count.
 ## Called from any thread; it only sets a flag.
+## It also catches the GPU device being lost (0x887A0005, DXGI_ERROR_DEVICE_REMOVED;
+## 22.10.2026 after Link refused a 5120×2160 layer the app froze with the log full
+## of rendering errors): nothing in the process recovers from it, a restart does.
 class SessionLossLogger extends Logger:
+	const SIGNS := ["XR_ERROR_SESSION_LOST", "0x887a0005", "0x887A0005"]
 	var lost := false
+	## What gave it away, for the log.
+	var sign := ""
 
 	func _log_message(message: String, _error: bool) -> void:
-		if not lost and message.contains("XR_ERROR_SESSION_LOST"):
-			lost = true
+		_check(message)
 
 	func _log_error(_function: String, _file: String, _line: int, code: String, rationale: String, _editor_notify: bool,
 			_error_type: int, _script_backtraces: Array[ScriptBacktrace]) -> void:
-		if not lost and (code.contains("XR_ERROR_SESSION_LOST") or rationale.contains("XR_ERROR_SESSION_LOST")):
-			lost = true
+		_check(code + " " + rationale)
+
+	func _check(text: String) -> void:
+		if lost:
+			return
+		for found: String in SIGNS:
+			if text.contains(found):
+				sign = found
+				lost = true
+				return
 
 
 class Pointer:
@@ -432,8 +461,12 @@ class Pointer:
 	var radius_lost := 0.0
 	## The handle held is a wall's bend handle, not its distance (or radius) one.
 	var radius_bend := false
+	## Which handle (HANDLE_*): a wall's size balls drag their own corner.
+	var radius_kind := 0
 	## The settings slider this pointer is dragging, or null.
 	var slider: VrSlider
+	## Holding a wall grip's ring menu: the ray does not drive the cursor.
+	var grip_menu := false
 	## The ring shown for moving or turning: which action ("" = none) and the hand's
 	## offset in the plane facing the user (sideways, up), metres.
 	var travel_ring := ""
@@ -499,6 +532,17 @@ var _buttons: Array[VrButton] = []
 var _topology: DisplayTopology
 var _vdd: VddControl
 var _vdd_message := ""
+## Resolutions «Разрешение по клетке» wants and the driver lacks: marked on the
+## «Драйвер» tab until «Применить» writes them.
+var _wall_needed_resolutions: Array[Vector2i] = []
+## Of those, the ones the driver section marked itself (unmarked when no longer needed).
+var _wall_marked: Array[Vector2i] = []
+## «Разрешение по клетке»: the mode being set now ("<monitor key> WxH"), and those
+## Windows refused (never asked for again in this run).
+var _wall_mode_attempt := ""
+var _wall_modes_refused := {}
+## The last mode sent to each monitor ("<key> WxH"), not sent again.
+var _wall_modes_sent := {}
 var _status: Label3D
 ## Whether the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del).
 var _secure_desktop := false
@@ -592,6 +636,7 @@ var _driver_count_label: Label3D
 var _driver_status: Label3D
 var _driver_apply: VrButton
 var _driver_chips := {}
+var _driver_tab: Node3D = null
 var _session_visible := false
 var _frames_logged := 0
 ## The startup probe: frames, the longest frame and capture frames over the current step.
@@ -679,12 +724,56 @@ var _bend_label: Label3D
 ## Where the bend slider is in the rig's space while it is up.
 var _bend_slider_local := Transform3D()
 ## While a panel on a wall is carried: that wall's cells as they will be.
-var _wall_preview := {}
+var _wall_preview: WallLayout.Wall = null
 var _wall_preview_fixture := -1
+## The «÷» grips shown where a ray is on a wall (slice k2).
+var _split_grips: Array[Node3D] = []
+var _grip_menu: Node3D
+var _grip_menu_labels: Array[Label3D] = []
+## The open grip menu: pointer, fixture, slot, items, where it is ("" = shut).
+var _grip_menu_state := {}
+var _grip_count_strip: Node3D
+var _grip_count_labels: Array[Label3D] = []
+## A selection on a wall being drawn: pointer, fixture, from, to (u, v), since, active.
+var _wall_select := {}
+var _select_mesh: MeshInstance3D
+## The «÷» grips shown last frame: [fixture id, part, world position].
+var _split_shown: Array = []
+## The editing mode (radial menu «Редактирование»): with «Ручки: только в режиме
+## редактирования» the handles show only while it is on.
+var _editing := false
 ## Beyond its radius plus this, a sphere no longer offers its seat (metres).
 const SEAT_REACH := 1.0
 ## How far beside a wall's area the user may stand for its seat to be offered (m).
 const WALL_SEAT_MARGIN := 1.0
+## Screens on a wall closer than the gap and this count as touching for the Windows layout (m).
+const WALL_TOUCH_REACH := 0.05
+## The «÷» grip: how big, how near the ray must pass to take it (half the square,
+## m), how far left of its part's upper right corner it stands, and the colour of
+## its join half (a little darker than the split half).
+const SPLIT_GRIP_SIZE := 0.08
+const SPLIT_GRIP_HIT := 0.04
+## The ring menu of a held grip: how far its items are from the middle, and the
+## middle where nothing is picked (m).
+const GRIP_MENU_RADIUS := 0.1
+const GRIP_MENU_DEAD := 0.03
+## An item counts only while the ray is no further than this past the ring (m).
+const GRIP_MENU_REACH := 0.07
+## Held this long on «Горизонтально» / «Вертикально», the strip 1..GRIP_COUNT_MAX
+## comes up (s); its numbers' spacing and height under the ring's middle (m).
+const GRIP_COUNT_DWELL := 0.9
+const GRIP_COUNT_MAX := 10
+const GRIP_COUNT_STEP := 0.045
+const GRIP_COUNT_Y := -(0.1 + 0.11)
+## A press on an empty cell held this long (s) starts a selection.
+const WALL_SELECT_DWELL := 0.4
+const SPLIT_GRIP_INSET := 0.13
+const WALL_RESOLUTION_MESSAGE := "Разрешение по клетке: "
+const SPLIT_JOIN_COLOR := Color(0.6, 0.75, 0.9, 0.55)
+## A «÷» shown stays while a ray passes this near it, even off its cell: going to it
+## in the corner the ray left the cell and the grip jumped away (22.10.2026).
+const SPLIT_GRIP_KEEP := 0.12
+const SPLIT_LABELS := {"": "целая", "c2": "2 столбца", "c3": "3 столбца", "r2": "2 ряда", "r3": "3 ряда"}
 ## How far past its screens the seat at a wall may slide (m).
 const WALL_SLIDE_MARGIN := Vector2(0.5, 0.5)
 ## A wall's bend handle: bend per metre the hand moves sideways, and the magnet
@@ -696,6 +785,13 @@ const BEND_SLIDER_AHEAD := 0.45
 const BEND_SLIDER_DROP := 0.12
 ## The "Заготовки" tab: a row per fixture and a row per monitor (pools, shown as needed).
 const FIXTURE_ROWS := 6
+## Kinds of fixture handles: a sphere's radius / a wall's lower right size ball,
+## the wall's bend ball, and its size balls at the other corners.
+const HANDLE_SIZE := 0
+const HANDLE_BEND := 1
+const HANDLE_KINDS := [0, 1, 2, 3, 4]
+## The corner each size handle drags (WallLayout.dragged_grid); the bend's is unused.
+const HANDLE_CORNERS: Array[Vector2i] = [Vector2i(1, 1), Vector2i(0, 0), Vector2i(-1, 1), Vector2i(-1, -1), Vector2i(1, -1)]
 const FIXTURE_MONITOR_ROWS := 8
 const FIXTURE_RADIUS_STEP := 0.1
 var _fixture_rows: Array[Node3D] = []
@@ -705,12 +801,21 @@ var _fixture_status: Label3D
 var _radius_handles: Array[MeshInstance3D] = []
 var _outlines: Array[MeshInstance3D] = []
 var _outline_keys: Array[String] = []
+## The saved wall each outline was drawn for (its splits as text every frame cost
+## 2 ms on a wall of ~1800 parts).
+var _outline_walls: Array = []
+## Fixture id -> its saved wall (_saved_wall).
+var _saved_walls := {}
+## What the selection highlight shows now: rebuilt only when it changes.
+var _select_shown: Array = []
 var _backings: Array[MeshInstance3D] = []
 var _radius_labels: Array[Label3D] = []
 ## A handle's hit area (metres around it): larger than drawn, a hand ray is not steady.
 const RADIUS_HANDLE_HIT := 0.07
 ## Controller sticks turning in steps: a separate step logic per controller.
 var _stick_snap: Array[Locomotion.SnapTurn] = []
+## Per controller, what its stick does since it left the middle: 0 nothing yet, 1 moves, 2 scrolls.
+var _stick_latch: Array[int] = [0, 0]
 ## Stick values treated like a hand's offset (metres): full tilt = this far.
 const STICK_AS_REACH := 0.15
 ## How far ahead of the fingertips (away from the user) the moving/turning ring floats.
@@ -745,6 +850,17 @@ var _disc_rings: Array[MeshInstance3D] = []
 var _disc_markers: Array[MeshInstance3D] = []
 var _settings_root: Node3D
 var _settings_values: Array[Label3D] = []
+## Per tab: how many rows its deepest column has (the buttons below go under them).
+var _tab_depth: Array[int] = []
+## Rows with a few choices: tunable index -> [−, +, value button, tab, where the value is].
+var _option_rows := {}
+## The drop-down list of «Выбор вариантов: списком»: its buttons and the row it is open for (-1 = shut).
+var _option_list: Node3D
+var _option_list_back: MeshInstance3D
+var _option_buttons: Array[VrButton] = []
+var _option_list_row := -1
+const OPTION_LIST_ROWS := 4
+const OPTION_LIST_STEP := 0.058
 ## Index of the pointer that drives the Windows cursor, or -1.
 var _cursor_owner := -1
 var _cursor_press_armed := false
@@ -813,6 +929,7 @@ func _ready() -> void:
 	_build_radius_handles()
 	_build_outlines()
 	_build_bend_slider()
+	_build_split_grips()
 	_build_settings_panel()
 	_load_settings()
 	_refresh_floor_label()
@@ -947,6 +1064,8 @@ func _process(delta: float) -> void:
 
 	if _secure_desktop:
 		lines.append("ЗАЩИЩЁННЫЙ РАБОЧИЙ СТОЛ (запрос администратора / экран блокировки) — виден через агента")
+	if _editing:
+		lines.append("РЕЖИМ РЕДАКТИРОВАНИЯ — выключается тем же пунктом кругового меню")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
@@ -1303,7 +1422,15 @@ func _stick_moves(index: int) -> bool:
 			return false
 		2:
 			return true
-	return not _pointers[index].on_panel
+	# By the ray: decided when the stick leaves the middle and kept until it is back
+	# (the user's wish, 22.10.2026: moving must not stop when the ray swings onto a
+	# screen); in the editing mode nothing can be scrolled, so it always moves.
+	var stick := _controllers[index].get_vector2(&"primary")
+	if stick.length() <= CONTROLLER_STICK_DEADZONE:
+		_stick_latch[index] = 0
+	elif _stick_latch[index] == 0:
+		_stick_latch[index] = 1 if _editing or not _pointers[index].on_panel else 2
+	return _stick_latch[index] == 1 or (_stick_latch[index] == 0 and (_editing or not _pointers[index].on_panel))
 
 
 ## The rig moved: panel layers (they must hang under the rig, but stand in the
@@ -1425,6 +1552,8 @@ func _sit() -> void:
 		var seen := WallLayout.project(fixture.frame().affine_inverse() * _camera.global_position, _wall_shape(fixture))
 		_seat_slide = WallLayout.nearest_screen(_wall_cell_list(fixture), seen.x, seen.y, fixture.gap)
 	_origin.global_transform = _seat_rig(fixture)
+	if fixture.kind == "wall":
+		_apply_wall_windows(fixture)
 	for pointer in _pointers:
 		pointer.travel_anchors.clear()
 	_keep_world_in_place()
@@ -1601,15 +1730,16 @@ func _fixture_changed(message: String) -> void:
 ## it — smaller; the screens follow live, the radius is saved on letting go.
 func _update_radius_handles(delta: float) -> void:
 	_update_outlines()
-	# Handle h: the fixture h % FIXTURE_ROWS; the second set is walls' bend handles.
+	_update_split_grips()
+	# Handle h: the fixture h % FIXTURE_ROWS, of kind h / FIXTURE_ROWS (HANDLE_*).
 	for h in _radius_handles.size():
 		var fixture: WorldLayout.Fixture = _fixtures[h % FIXTURE_ROWS] if h % FIXTURE_ROWS < _fixtures.size() else null
-		var bend := h >= FIXTURE_ROWS
-		var shown := fixture != null and (not bend or fixture.kind == "wall")
+		var kind := h / FIXTURE_ROWS
+		var shown := fixture != null and _handle_on(fixture, kind)
 		_radius_handles[h].visible = shown
 		_radius_labels[h].visible = false
 		if shown:
-			_radius_handles[h].global_position = _handle_position(fixture, bend)
+			_radius_handles[h].global_position = _handle_position(fixture, kind)
 			(_radius_handles[h].material_override as StandardMaterial3D).albedo_color = ScreenPanel.GRIP_COLOR
 	for pointer in _pointers:
 		if pointer.radius_fixture >= 0:
@@ -1624,7 +1754,8 @@ func _update_radius_handles(delta: float) -> void:
 					# Where the ray points on the wall is where its lower right corner goes.
 					var at := _wall_hit(pointer, fixture)
 					if not is_nan(at.x):
-						var grid := WallLayout.dragged_grid(_wall_grid(fixture), _wall_cell_list(fixture), at.x, at.y, fixture.gap)
+						var grid := WallLayout.dragged_grid(_wall_grid(fixture), _wall_cell_list(fixture), at.x, at.y, fixture.gap,
+								HANDLE_CORNERS[pointer.radius_kind])
 						if grid != fixture.grid:
 							fixture.grid = grid
 				elif pointer.radius_bend:
@@ -1655,7 +1786,7 @@ func _update_radius_handles(delta: float) -> void:
 					if not is_equal_approx(radius, fixture.radius):
 						fixture.radius = radius
 						_place_panels()
-				_show_radius_handle(fixture, ScreenPanel.GRIP_ACTIVE_COLOR, pointer.radius_bend)
+				_show_radius_handle(fixture, ScreenPanel.GRIP_ACTIVE_COLOR, pointer.radius_kind)
 				continue
 			pointer.radius_lost += delta
 			if pointer.radius_lost >= GRAB_GRACE_SEC:
@@ -1668,18 +1799,20 @@ func _update_radius_handles(delta: float) -> void:
 			continue
 		var found := false
 		for fixture in _fixtures:
-			for bend: bool in [false, true]:
-				if bend and fixture.kind != "wall":
+			for kind: int in HANDLE_KINDS:
+				if not _handle_on(fixture, kind):
 					continue
-				var at := _handle_position(fixture, bend)
+				var bend := kind == HANDLE_BEND
+				var at := _handle_position(fixture, kind)
 				var along := (at - pointer.origin).dot(pointer.direction)
 				if along <= 0.0 or (pointer.origin + pointer.direction * along).distance_to(at) > RADIUS_HANDLE_HIT:
 					continue
 				pointer.hit_distance = minf(pointer.hit_distance, along)
-				_show_radius_handle(fixture, ScreenPanel.GRIP_HOVER_COLOR, bend)
+				_show_radius_handle(fixture, ScreenPanel.GRIP_HOVER_COLOR, kind)
 				if pointer.just_pressed:
 					pointer.radius_fixture = fixture.id
 					pointer.radius_bend = bend
+					pointer.radius_kind = kind
 					pointer.radius_start = fixture.bend if bend else fixture.radius
 					pointer.radius_start_distance = _handle_measure(fixture, pointer.origin)
 					pointer.radius_lost = 0.0
@@ -1692,16 +1825,619 @@ func _update_radius_handles(delta: float) -> void:
 				break
 
 
-func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, bend := false) -> void:
+func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, kind: int) -> void:
 	var i := _fixtures.find(fixture)
 	if i < 0 or i >= FIXTURE_ROWS:
 		return
-	var h := i + (FIXTURE_ROWS if bend else 0)
+	var h := i + FIXTURE_ROWS * kind
+	var bend := kind == HANDLE_BEND
 	(_radius_handles[h].material_override as StandardMaterial3D).albedo_color = color
 	var label := _radius_labels[h]
 	label.visible = true
 	label.text = _handle_text(fixture, bend).trim_prefix(fixture.name + ": ")
-	label.global_position = _handle_position(fixture, bend) + Vector3.UP * 0.07
+	label.global_position = _handle_position(fixture, kind) + Vector3.UP * 0.07
+
+
+## Whether a fixture has a handle of `kind` (HANDLE_*) and it is switched on in
+## the settings (tab «Мир»): a sphere only its radius ball.
+func _handle_on(fixture: WorldLayout.Fixture, kind: int) -> bool:
+	if not _handles_shown():
+		return false
+	if fixture.kind != "wall":
+		return kind == HANDLE_SIZE and _world.sphere_handle == 1
+	return (_world.wall_bend_handle if kind == HANDLE_BEND else _world.wall_size_handle) == 1
+
+
+## Handles show always, or with «Ручки: только в режиме редактирования» only while
+## the editing mode is on (the user's wish, 22.10.2026).
+func _handles_shown() -> bool:
+	return _world.handles_mode == 0 or _editing
+
+
+## «÷» grip (slice k2): where a ray is on a wall, one at the part (cell, or joined
+## place) under it, above its top edge a little left of the corner (the corner
+## below is the resize grip of the screen above). Two halves along its diagonal
+## (the user's wishes, 22.10.2026): «÷» (upper left) and «+» (lower right). Held,
+## each opens a ring menu at the grip (`_grip_menu`): «÷» — split horizontally,
+## vertically, delete (`WallLayout.deleted`); «+» — join with the place
+## above, right, below, left (where the shared side is the same; others greyed).
+## The ray picks, letting go runs it. Not on cells under a screen that takes
+## several cells. Switched off in the settings too.
+func _update_split_grips() -> void:
+	if not _grip_menu_state.is_empty():
+		_update_grip_menu()
+		for grip in _split_grips:
+			grip.visible = false
+		return
+	if _update_wall_select():
+		for grip in _split_grips:
+			grip.visible = false
+		return
+	var used := 0
+	var shown_now: Array = []
+	for index in 2:
+		var pointer := _pointers[index]
+		if _world.split_handle != 1 or not _handles_shown() or not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0:
+			continue
+		for fixture in _fixtures:
+			if fixture.kind != "wall":
+				continue
+			var at := _wall_hit(pointer, fixture)
+			if is_nan(at.x) or not WallLayout.area(_wall_grid(fixture), fixture.gap).grow(0.1).has_point(at):
+				continue
+			var wall := _saved_wall(fixture)
+			var cell := WallLayout.cell_at(at.x, at.y, Vector2i.ONE, fixture.gap).position
+			var covered := false
+			for key: String in wall.cells:
+				var rect: Rect2i = wall.cells[key]
+				covered = covered or (rect.size != Vector2i.ONE and rect.has_point(cell))
+			if covered:
+				continue
+			var slot := WallLayout.leaf_at(wall, cell, at.x, at.y, fixture.gap)
+			# A grip shown last frame that the ray still passes near stays.
+			for kept: Array in _split_shown:
+				if kept[0] == fixture.id and WallLayout.is_leaf(wall, kept[1]):
+					var along_kept := ((kept[2] as Vector3) - pointer.origin).dot(pointer.direction)
+					if along_kept > 0.0 and (pointer.origin + pointer.direction * along_kept).distance_to(kept[2]) <= SPLIT_GRIP_KEEP:
+						slot = kept[1]
+			if used >= _split_grips.size():
+				break
+			var spot := wall.area_of(slot, fixture.gap)
+			var corner := Vector2(maxf(spot.end.x - SPLIT_GRIP_INSET, spot.get_center().x), spot.end.y + SPLIT_GRIP_SIZE * 0.5)
+			var placed := fixture.frame() * WallLayout.surface(corner.x, corner.y, 0.03, _wall_shape(fixture))
+			var grip := _split_grips[used]
+			used += 1
+			grip.global_transform = placed
+			grip.visible = true
+			shown_now.append([fixture.id, slot, placed.origin])
+			# Which half the ray is on, in the grip's plane: above the diagonal = split.
+			var half := 0
+			var along := 0.0
+			var normal := placed.basis.z.normalized()
+			var facing := pointer.direction.dot(normal)
+			if absf(facing) > 0.01:
+				var t := (placed.origin - pointer.origin).dot(normal) / facing
+				var local := placed.affine_inverse() * (pointer.origin + pointer.direction * t)
+				if t > 0.0 and absf(local.x) <= SPLIT_GRIP_HIT and absf(local.y) <= SPLIT_GRIP_HIT:
+					along = t
+					half = 1 if local.y >= local.x else 2
+			for k in 2:
+				var piece := grip.get_child(k) as MeshInstance3D
+				(piece.material_override as StandardMaterial3D).albedo_color = ScreenPanel.GRIP_HOVER_COLOR if half == k + 1 \
+						else (ScreenPanel.GRIP_COLOR if k == 0 else SPLIT_JOIN_COLOR)
+			if half != 0:
+				pointer.hit_distance = minf(pointer.hit_distance, along)
+				if pointer.just_pressed and pointer.button == HandGestures.Click.LEFT:
+					_open_grip_menu(index, fixture, slot, half == 2, Vector3(corner.x, corner.y, 0.03))
+			break
+	for k in range(used, _split_grips.size()):
+		_split_grips[k].visible = false
+	_split_shown = shown_now
+	_try_start_wall_select()
+
+
+## The ring menu of a held grip half: its items [id, label, can] clockwise from the top.
+## The ring menu of a held grip half (or of a selection: `leaves`, opened by
+## letting go of it, picked by a press — `click`): its items [id, label, can]
+## clockwise from the top.
+## `at`: where on the wall (u, v, and how far in front of it) — the menu stays
+## there while the wall moves (22.10.2026: seated, bringing the wall closer left
+## the menu behind, out of reach).
+func _open_grip_menu(index: int, fixture: WorldLayout.Fixture, slot: String, join: bool, at: Vector3,
+		leaves := PackedStringArray(), click := false) -> void:
+	var wall := _saved_wall(fixture)
+	var grid := _wall_grid(fixture)
+	var items := []
+	if not leaves.is_empty():
+		items = [["rows", "Горизонтально", _split_counts(fixture, slot, leaves, "r")[2]],
+				["columns", "Вертикально", _split_counts(fixture, slot, leaves, "c")[2]],
+				["join", "Соединить", WallLayout.joined_many(wall, leaves, grid, fixture.gap) != wall]]
+	elif join:
+		for entry: Array in [["up", "Вверх", Vector2i(0, -1)], ["right", "Вправо", Vector2i(1, 0)],
+				["down", "Вниз", Vector2i(0, 1)], ["left", "Влево", Vector2i(-1, 0)]]:
+			items.append([entry[0], entry[1], WallLayout.join_target(wall, slot, entry[2], grid, fixture.gap) != ""])
+	else:
+		var deletable := WallLayout.deleted(wall, slot, grid, fixture.gap) != wall
+		items = [["rows", "Горизонтально", _split_counts(fixture, slot, leaves, "r")[2]],
+				["columns", "Вертикально", _split_counts(fixture, slot, leaves, "c")[2]], ["delete", "Удалить", deletable]]
+	var xf := _wall_point(fixture, at)
+	_grip_menu_state = {"pointer": index, "fixture": fixture.id, "slot": slot, "leaves": leaves, "items": items, "xf": xf, "at": at,
+			"click": click, "armed": not click, "dwell_pick": -1, "dwell_since": 0.0, "counting": false, "count_item": -1, "count": 2,
+			"allowed": []}
+	_pointers[index].grip_menu = true
+	_grip_menu.global_transform = xf
+	_grip_menu.visible = true
+	_grip_count_strip.visible = false
+	for k in _grip_menu_labels.size():
+		var label := _grip_menu_labels[k]
+		label.visible = k < items.size()
+		if label.visible:
+			var angle := k * TAU / items.size()
+			label.text = items[k][1]
+			label.position = Vector3(sin(angle), cos(angle), 0.0) * GRIP_MENU_RADIUS
+	print("[world] меню %s" % ("выделения (%d)" % leaves.size() if not leaves.is_empty() else ("ручки: соединить" if join else "ручки: разделить")))
+
+
+## The menu's frame at `at` (u, v, depth) on a wall as it is now, a little in front.
+func _wall_point(fixture: WorldLayout.Fixture, at: Vector3) -> Transform3D:
+	return fixture.frame() * WallLayout.surface(at.x, at.y, at.z + 0.02, _wall_shape(fixture))
+
+
+## Which counts (1..10) a split `kind` may take: [allowed per count (index 0 = 1),
+## the biggest, whether 2 is allowed].
+func _split_counts(fixture: WorldLayout.Fixture, slot: String, leaves: PackedStringArray, kind: String) -> Array:
+	var wall := _saved_wall(fixture)
+	var allowed: Array[bool] = [true]
+	var biggest := 1
+	for count in range(2, GRIP_COUNT_MAX + 1):
+		var can := false
+		if not leaves.is_empty():
+			can = WallLayout.split_many(wall, leaves, kind, count, fixture.gap) != wall
+		else:
+			can = WallLayout.can_split(wall, slot, kind, count, fixture.gap)
+		allowed.append(can)
+		if can:
+			biggest = count
+	return [allowed, biggest, allowed[1]]
+
+
+## The menu while it is open: the ray picks an item; held on «Горизонтально» or
+## «Вертикально» for GRIP_COUNT_DWELL, a strip 1..10 comes up under the ring and the
+## ray picks into how many equal parts (the user's wish, 22.10.2026); letting go runs
+## it. A selection's menu waits for a press on an item (a press elsewhere shuts it).
+func _update_grip_menu() -> void:
+	var state := _grip_menu_state
+	var pointer := _pointers[int(state["pointer"])]
+	var items: Array = state["items"]
+	# With the wall where it is now (it moves when the seat brings it closer).
+	var wall_now := WorldLayout.find(_fixtures, int(state["fixture"]))
+	if wall_now != null:
+		state["xf"] = _wall_point(wall_now, state["at"])
+		_grip_menu.global_transform = state["xf"]
+		if not (state["leaves"] as PackedStringArray).is_empty():
+			_show_selection(wall_now, state["leaves"])
+	var xf: Transform3D = state["xf"]
+	var now := Time.get_ticks_msec() / 1000.0
+	var pick := -1
+	var local := Vector3(INF, INF, 0.0)
+	var normal := xf.basis.z.normalized()
+	var facing := pointer.direction.dot(normal)
+	if absf(facing) > 0.01:
+		var t := (xf.origin - pointer.origin).dot(normal) / facing
+		if t > 0.0:
+			local = xf.affine_inverse() * (pointer.origin + pointer.direction * t)
+			# Only with the ray on the ring itself, not anywhere past it in that
+			# direction (the user's wish, 22.10.2026).
+			if Vector2(local.x, local.y).length() <= GRIP_MENU_RADIUS + GRIP_MENU_REACH:
+				pick = MenuSet.item_at(Vector2(local.x, local.y), GRIP_MENU_DEAD, items.size())
+			pointer.hit_distance = minf(pointer.hit_distance, t)
+	var allowed: Array = state["allowed"]
+	if state["counting"]:
+		pick = state["count_item"]
+		if absf(local.y - GRIP_COUNT_Y) <= GRIP_COUNT_STEP and absf(local.x) <= GRIP_COUNT_STEP * GRIP_COUNT_MAX * 0.5:
+			var hovered := clampi(int((local.x + GRIP_COUNT_STEP * GRIP_COUNT_MAX * 0.5) / GRIP_COUNT_STEP), 0, GRIP_COUNT_MAX - 1) + 1
+			if allowed[hovered - 1]:
+				state["count"] = hovered
+	elif state["armed"] and pointer.pressed:
+		if pick != state["dwell_pick"]:
+			state["dwell_pick"] = pick
+			state["dwell_since"] = now
+		elif pick >= 0 and items[pick][2] and str(items[pick][0]) in ["rows", "columns"] and now - float(state["dwell_since"]) >= GRIP_COUNT_DWELL:
+			var fixture := WorldLayout.find(_fixtures, int(state["fixture"]))
+			if fixture != null:
+				var counts := _split_counts(fixture, str(state["slot"]), state["leaves"], "r" if items[pick][0] == "rows" else "c")
+				state["counting"] = true
+				state["count_item"] = pick
+				state["allowed"] = counts[0]
+				allowed = counts[0]
+				_grip_count_strip.visible = true
+	for k in items.size():
+		var label := _grip_menu_labels[k]
+		label.modulate = Color(0.45, 0.45, 0.5) if not items[k][2] else (Color(1.0, 0.85, 0.3) if k == pick else Color.WHITE)
+		label.font_size = 30 if k == pick and items[k][2] else 24
+	if state["counting"]:
+		for n in GRIP_COUNT_MAX:
+			var number := _grip_count_labels[n]
+			var chosen: bool = n + 1 == int(state["count"])
+			number.modulate = Color(0.45, 0.45, 0.5) if not allowed[n] else (Color(1.0, 0.85, 0.3) if chosen else Color.WHITE)
+			number.font_size = 34 if chosen else 26
+	if not state["armed"]:
+		# A selection's menu: a press on an item arms it, anywhere else shuts the menu.
+		if pointer.active and pointer.just_pressed:
+			if pick >= 0 and items[pick][2]:
+				state["armed"] = true
+				state["dwell_pick"] = pick
+				state["dwell_since"] = now
+			else:
+				_close_grip_menu()
+		return
+	if pointer.active and pointer.pressed:
+		return
+	var fixture := WorldLayout.find(_fixtures, int(state["fixture"]))
+	var count := int(state["count"]) if state["counting"] else 2
+	_close_grip_menu()
+	if fixture != null and pick >= 0 and items[pick][2] and count >= 2:
+		_run_grip_item(fixture, str(state["slot"]), str(items[pick][0]), count, state["leaves"])
+
+
+func _close_grip_menu() -> void:
+	if not _grip_menu_state.is_empty():
+		_pointers[int(_grip_menu_state["pointer"])].grip_menu = false
+	_grip_menu_state = {}
+	_grip_menu.visible = false
+	_select_mesh.visible = false
+
+
+func _run_grip_item(fixture: WorldLayout.Fixture, slot: String, id: String, count := 2, leaves := PackedStringArray()) -> void:
+	var wall := _saved_wall(fixture)
+	var grid := _wall_grid(fixture)
+	var next: WallLayout.Wall
+	match id:
+		"rows", "columns":
+			var kind := "r" if id == "rows" else "c"
+			next = WallLayout.split_many(wall, leaves, kind, count, fixture.gap) if not leaves.is_empty() \
+					else WallLayout.split_step(wall, slot, kind, fixture.gap, count)
+		"join":
+			next = WallLayout.joined_many(wall, leaves, grid, fixture.gap)
+		"delete":
+			next = WallLayout.deleted(wall, slot, grid, fixture.gap)
+		_:
+			var dir: Vector2i = {"up": Vector2i(0, -1), "right": Vector2i(1, 0), "down": Vector2i(0, 1), "left": Vector2i(-1, 0)}[id]
+			next = WallLayout.joined(wall, slot, dir, grid, fixture.gap)
+	fixture.cells = next.cells
+	fixture.parts = next.parts
+	fixture.splits = next.splits
+	fixture.blocks = next.blocks
+	var what := ("%d частей" % count) if id in ["rows", "columns"] else id
+	_fixture_changed("%s: %s — %s %s" % [fixture.name, ("выделено %d" % leaves.size()) if not leaves.is_empty() else slot, id, what])
+	if _seated == fixture.id:
+		_apply_wall_windows(fixture)
+	_apply_wall_resolutions()
+
+
+## Selecting cells on a wall (the user's wish, 22.10.2026; only in the editing
+## mode): a press on an empty cell or part held WALL_SELECT_DWELL, then dragged,
+## selects every part the rectangle touches; letting go opens the selection's
+## menu — split them all or join them. True while a selection is being drawn.
+func _update_wall_select() -> bool:
+	if _wall_select.is_empty():
+		return false
+	var pointer := _pointers[int(_wall_select["pointer"])]
+	var fixture := WorldLayout.find(_fixtures, int(_wall_select["fixture"]))
+	if fixture == null or not pointer.active or not _editing:
+		if _wall_select["active"]:
+			pointer.grip_menu = false
+		_wall_select = {}
+		_select_mesh.visible = false
+		return false
+	if not _wall_select["active"]:
+		if not pointer.pressed:
+			_wall_select = {}
+			return false
+		if Time.get_ticks_msec() / 1000.0 - float(_wall_select["since"]) < WALL_SELECT_DWELL:
+			return false
+		_wall_select["active"] = true
+		pointer.grip_menu = true
+		print("[world] выделение клеток на «%s»" % fixture.name)
+	var at := _wall_hit(pointer, fixture)
+	if not is_nan(at.x):
+		_wall_select["to"] = at
+		var spot := fixture.frame() * WallLayout.surface(at.x, at.y, 0.0, _wall_shape(fixture))
+		pointer.hit_distance = minf(pointer.hit_distance, pointer.origin.distance_to(spot.origin))
+	var wall := _saved_wall(fixture)
+	var leaves := WallLayout.selection(wall, _wall_grid(fixture), _wall_select["from"], _wall_select["to"], fixture.gap)
+	_show_selection(fixture, leaves)
+	if pointer.pressed:
+		return true
+	var index := int(_wall_select["pointer"])
+	pointer.grip_menu = false
+	_wall_select = {}
+	var box := WallLayout._box(wall, leaves, fixture.gap)
+	var middle := box.get_center()
+	_open_grip_menu(index, fixture, "", false, Vector3(middle.x, middle.y, 0.05), leaves, true)
+	return true
+
+
+## A press with the editing mode on, on an empty cell or part of a wall (not on a
+## grip, not on a screen): it may become a selection (_update_wall_select).
+func _try_start_wall_select() -> void:
+	if not _editing or not _wall_select.is_empty():
+		return
+	for index in 2:
+		var pointer := _pointers[index]
+		if not pointer.active or not pointer.just_pressed or pointer.button != HandGestures.Click.LEFT or pointer.grip_menu \
+				or pointer.grab_panel != null or pointer.radius_fixture >= 0:
+			continue
+		for fixture in _fixtures:
+			if fixture.kind != "wall":
+				continue
+			var at := _wall_hit(pointer, fixture)
+			if is_nan(at.x) or not WallLayout.area(_wall_grid(fixture), fixture.gap).has_point(at):
+				continue
+			var wall := _saved_wall(fixture)
+			var cell := WallLayout.cell_at(at.x, at.y, Vector2i.ONE, fixture.gap).position
+			var leaf := WallLayout.leaf_at(wall, cell, at.x, at.y, fixture.gap)
+			var covered := false
+			for key: String in wall.cells:
+				covered = covered or (wall.cells[key] as Rect2i).has_point(cell)
+			if covered or wall.occupant(leaf) != "":
+				continue
+			_wall_select = {"pointer": index, "fixture": fixture.id, "from": at, "to": at,
+					"since": Time.get_ticks_msec() / 1000.0, "active": false}
+			return
+
+
+## The selected parts lit up on the wall (in front of it, through everything).
+func _show_selection(fixture: WorldLayout.Fixture, leaves: PackedStringArray) -> void:
+	var wall := _saved_wall(fixture)
+	var shown := [fixture.id, wall, leaves, fixture.radius, fixture.bend, fixture.gap, _wall_grid(fixture)]
+	if shown == _select_shown and _select_mesh.visible:
+		_select_mesh.global_transform = fixture.frame()
+		return
+	_select_shown = shown
+	var shape := _wall_shape(fixture)
+	var triangles := PackedVector3Array()
+	for leaf in leaves:
+		var box := wall.area_of(leaf, fixture.gap)
+		var pieces := 4 if shape.bent() else 1
+		for k in pieces:
+			var u0 := lerpf(box.position.x, box.end.x, float(k) / pieces)
+			var u1 := lerpf(box.position.x, box.end.x, float(k + 1) / pieces)
+			var a := WallLayout.surface(u0, box.position.y, 0.035, shape).origin
+			var b := WallLayout.surface(u1, box.position.y, 0.035, shape).origin
+			var c := WallLayout.surface(u1, box.end.y, 0.035, shape).origin
+			var d := WallLayout.surface(u0, box.end.y, 0.035, shape).origin
+			triangles.append_array(PackedVector3Array([a, b, c, a, c, d]))
+	if triangles.is_empty():
+		_select_mesh.visible = false
+		return
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = triangles
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	_select_mesh.mesh = mesh
+	_select_mesh.global_transform = fixture.frame()
+	_select_mesh.visible = true
+
+
+## A grip square cut along its diagonal: split (upper left, «÷») and join (lower
+## right, «+»); and the ring menu they open.
+func _build_split_grips() -> void:
+	var h := SPLIT_GRIP_SIZE * 0.5
+	for i in 2:
+		var grip := Node3D.new()
+		grip.visible = false
+		for part in 2:
+			var corners := PackedVector3Array([Vector3(-h, -h, 0), Vector3(h, h, 0), Vector3(-h, h, 0)]) if part == 0 \
+					else PackedVector3Array([Vector3(-h, -h, 0), Vector3(h, -h, 0), Vector3(h, h, 0)])
+			var arrays := []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = corners
+			var mesh := ArrayMesh.new()
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			var material := StandardMaterial3D.new()
+			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			material.cull_mode = BaseMaterial3D.CULL_DISABLED
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.albedo_color = ScreenPanel.GRIP_COLOR if part == 0 else SPLIT_JOIN_COLOR
+			material.no_depth_test = true
+			material.render_priority = 10
+			var piece := MeshInstance3D.new()
+			piece.mesh = mesh
+			piece.material_override = material
+			var sign := Label3D.new()
+			sign.text = "÷" if part == 0 else "+"
+			sign.pixel_size = 0.001
+			sign.font_size = 34
+			sign.no_depth_test = true
+			sign.render_priority = 11
+			sign.modulate = Color(0.1, 0.1, 0.15)
+			sign.outline_size = 0
+			sign.position = Vector3(-h * 0.4, h * 0.4, 0.001) if part == 0 else Vector3(h * 0.4, -h * 0.4, 0.001)
+			piece.add_child(sign)
+			grip.add_child(piece)
+		add_child(grip)
+		_split_grips.append(grip)
+	_grip_menu = Node3D.new()
+	_grip_menu.visible = false
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = Vector2.ONE * (GRIP_MENU_RADIUS * 2.0 + 0.16)
+	var back := MeshInstance3D.new()
+	back.mesh = back_mesh
+	var back_material := StandardMaterial3D.new()
+	back_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	back_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	back_material.albedo_color = Color(0.03, 0.04, 0.07, 0.85)
+	back_material.no_depth_test = true
+	back_material.render_priority = 11
+	back.material_override = back_material
+	_grip_menu.add_child(back)
+	for k in 4:
+		var label := Label3D.new()
+		label.pixel_size = 0.001
+		label.font_size = 24
+		label.no_depth_test = true
+		label.render_priority = 12
+		label.outline_size = 6
+		_grip_menu.add_child(label)
+		_grip_menu_labels.append(label)
+	# Into how many parts: 1..10 in a row under the ring.
+	_grip_count_strip = Node3D.new()
+	_grip_count_strip.visible = false
+	_grip_menu.add_child(_grip_count_strip)
+	var strip_mesh := QuadMesh.new()
+	strip_mesh.size = Vector2(GRIP_COUNT_STEP * GRIP_COUNT_MAX + 0.04, GRIP_COUNT_STEP * 1.6)
+	var strip_back := MeshInstance3D.new()
+	strip_back.mesh = strip_mesh
+	strip_back.material_override = back_material
+	strip_back.position = Vector3(0.0, GRIP_COUNT_Y, 0.0)
+	_grip_count_strip.add_child(strip_back)
+	for n in GRIP_COUNT_MAX:
+		var number := Label3D.new()
+		number.text = str(n + 1)
+		number.pixel_size = 0.001
+		number.font_size = 26
+		number.no_depth_test = true
+		number.render_priority = 12
+		number.outline_size = 6
+		number.position = Vector3(-GRIP_COUNT_STEP * GRIP_COUNT_MAX * 0.5 + GRIP_COUNT_STEP * (n + 0.5), GRIP_COUNT_Y, 0.001)
+		_grip_count_strip.add_child(number)
+		_grip_count_labels.append(number)
+	add_child(_grip_menu)
+	_select_mesh = MeshInstance3D.new()
+	var select_material := StandardMaterial3D.new()
+	select_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	select_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	select_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	select_material.albedo_color = Color(0.35, 0.75, 1.0, 0.28)
+	select_material.no_depth_test = true
+	select_material.render_priority = 9
+	_select_mesh.material_override = select_material
+	_select_mesh.visible = false
+	add_child(_select_mesh)
+
+
+## «Разрешение по клетке» (experimental, the user's wish 22.10.2026): each screen
+## on a wall gets the driver's resolution nearest its cell's or part's shape (at
+## 60 Hz) — at once, also while editing (changing it needs no restart). A shape
+## the driver has no resolution for (half a cell, 2×1 cells) is marked on the
+## «Драйвер» tab: it comes with «Применить», which restarts the driver. Later,
+## with an own client instead of Link, the resolution will always follow.
+func _apply_wall_resolutions() -> void:
+	if _world.wall_resolution != 1:
+		return
+	var available := VddConfig.read()
+	var missing: Array[Vector2i] = []
+	# Every wall at once: one at a time, a wall with nothing missing wiped out
+	# what the one before had found (22.10.2026: nothing showed on «Драйвер»).
+	for wall in _fixtures:
+		if wall.kind != "wall":
+			continue
+		var state := _saved_wall(wall)
+		for panel in _panels:
+			if _fixture_of(panel) != wall or not state.has(panel.monitor_key):
+				continue
+			# Only the driver's screens: a real monitor on the wall (22.10.2026 the
+			# Philips) cannot take these modes and is only scaled.
+			if not panel.monitor_key.contains("MTT1337"):
+				continue
+			var box := WallLayout.screen_area(state, panel.monitor_key, wall.gap).size
+			var want := WallLayout.best_resolution(box, available)
+			if want == Vector2i.ZERO:
+				# Too big or too thin for the driver: the most it allows of the same shape.
+				var needed := VddConfig.fitted(WallLayout.wanted_resolution(box))
+				if needed != Vector2i.ZERO and not missing.has(needed):
+					missing.append(needed)
+			elif want != panel.monitor_rect.size and not _topology.busy:
+				# A mode Windows refused once is not asked for again (22.10.2026 it was
+				# asked every 6 s, keeping the layout script busy).
+				var attempt := "%s %dx%d" % [panel.monitor_key, want.x, want.y]
+				# Sent already: the panel shows the new size only once it is rebuilt
+				# (22.10.2026 the same mode was sent again every 6 s meanwhile).
+				if _wall_modes_refused.has(attempt) or _wall_modes_sent.get(panel.monitor_key, "") == attempt:
+					continue
+				_wall_modes_sent[panel.monitor_key] = attempt
+				_wall_mode_attempt = attempt
+				print("[world] %s: разрешение по клетке %dx%d" % [panel.monitor_name, want.x, want.y])
+				_mode_change_monitor = panel.monitor_name
+				_topology.set_mode(panel.monitor_name, "%dx%d@60" % [want.x, want.y], 0)
+				return  # one at a time; the next after the panels are rebuilt
+	# Only what the walls want now (22.10.2026 every shape ever tried piled up,
+	# 15992×8104 among them, and the driver came up with no screen at all).
+	if missing == _wall_needed_resolutions:
+		return
+	_wall_needed_resolutions = missing
+	var names := PackedStringArray()
+	for size in missing:
+		names.append("%d×%d" % [size.x, size.y])
+	if missing.is_empty():
+		if _vdd_message.begins_with(WALL_RESOLUTION_MESSAGE):
+			_vdd_message = ""
+	else:
+		_vdd_message = WALL_RESOLUTION_MESSAGE + "в драйвере нет %s — отмечены на вкладке «Драйвер», нажмите «Применить» (Link переподключится)" % ", ".join(names)
+		print("[world] ", _vdd_message)
+	_refresh_driver_section()
+
+
+## Seated at a wall, the Windows layout follows it (slice k2, the user's choice
+## 21.10.2026): screens next to each other on the wall are next to each other on
+## the desktop (two small ones beside a big one lead sideways into it). The
+## primary stays primary (changing it rebuilds every panel); if it hangs on
+## another fixture, the wall's screens go to its right. Monitors of other
+## fixtures go in a row to the right; what Windows would not take, LayoutEdit puts right.
+func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
+	# As with a sphere: only when carrying changes the Windows layout (the user's
+	# wish, 22.10.2026); in the "only VR" mode Windows stays as it is.
+	if _panel_options.move_mode != 0:
+		return
+	var state := _saved_wall(wall)
+	var on_wall: Array[int] = []
+	var areas: Array[Rect2] = []
+	var pixels: Array[Vector2i] = []
+	for i in _panels.size():
+		if _fixture_of(_panels[i]) == wall and state.has(_panels[i].monitor_key):
+			on_wall.append(i)
+			areas.append(WallLayout.screen_area(state, _panels[i].monitor_key, wall.gap))
+			pixels.append(_panels[i].monitor_rect.size)
+	if on_wall.is_empty():
+		return
+	var primary := _primary_index()
+	var local_primary := on_wall.find(primary)
+	var group := WallLayout.desktop(areas, pixels, maxi(local_primary, 0), wall.gap + WALL_TOUCH_REACH)
+	var rects := _current_rects()
+	var shift := Vector2i.ZERO
+	if local_primary < 0:
+		var low := group[0].position
+		for rect in group:
+			low = low.min(rect.position)
+		shift = Vector2i(rects[primary].end.x, 0) - low
+	var right := rects[primary].end.x
+	for k in on_wall.size():
+		rects[on_wall[k]] = Rect2i(group[k].position + shift, group[k].size)
+		right = maxi(right, rects[on_wall[k]].end.x)
+	for i in _panels.size():
+		if i != primary and not on_wall.has(i):
+			rects[i] = Rect2i(Vector2i(right, 0), rects[i].size)
+			right += rects[i].size.x
+	for i in rects.size():
+		if LayoutEdit.is_valid(rects, primary):
+			break
+		if i != primary:
+			rects = LayoutEdit.repair(rects, primary, i)
+	if rects == _current_rects():
+		return
+	var positions := {}
+	for i in _panels.size():
+		positions[_panels[i].monitor_name] = rects[i].position
+	_layout_pending = rects
+	print("[world] раскладка Windows — как на «%s»: %s" % [wall.name, positions])
+	if _topology.busy:
+		_queued_positions = positions
+		_vdd_message = "раскладка по стене: жду предыдущее изменение…"
+	else:
+		_vdd_message = "раскладка Windows — как на стене…"
+		_topology.arrange(positions)
 
 
 func _handle_text(fixture: WorldLayout.Fixture, bend: bool) -> String:
@@ -1714,13 +2450,14 @@ func _handle_text(fixture: WorldLayout.Fixture, bend: bool) -> String:
 
 
 ## A fixture's handle: a sphere's radius ball low in front of its seat; a wall's
-## size ball past its lower right corner and its bend ball past the lower left one
-## (the user's choices, 21.10.2026; the distance to a wall is set by the buttons).
-func _handle_position(fixture: WorldLayout.Fixture, bend := false) -> Vector3:
+## size balls past its corners (the user's wish, 22.10.2026: not only the lower
+## right) and its bend ball under its middle (the distance is set by the buttons).
+func _handle_position(fixture: WorldLayout.Fixture, kind := HANDLE_SIZE) -> Vector3:
 	if fixture.kind != "wall":
 		return WorldLayout.radius_handle(fixture)
 	var grid := _wall_grid(fixture)
-	var point := WallLayout.bend_handle_point(grid, fixture.gap) if bend else WallLayout.size_handle_point(grid, fixture.gap)
+	var point := WallLayout.bend_handle_point(grid, fixture.gap) if kind == HANDLE_BEND \
+			else WallLayout.size_handle_point(grid, fixture.gap, HANDLE_CORNERS[kind])
 	return (fixture.frame() * WallLayout.surface(point.x, point.y, 0.04, _wall_shape(fixture))).origin
 
 
@@ -1776,12 +2513,14 @@ func _update_outlines() -> void:
 			continue
 		var grid := _wall_grid(fixture) if fixture.kind == "wall" else Rect2i()
 		var key := str([fixture.kind, fixture.radius, fixture.bend, fixture.gap, grid])
-		if key != _outline_keys[i]:
+		var drawn_for: WallLayout.Wall = _saved_wall(fixture) if fixture.kind == "wall" else null
+		if key != _outline_keys[i] or drawn_for != _outline_walls[i]:
 			_outline_keys[i] = key
+			_outline_walls[i] = drawn_for
 			var started := Time.get_ticks_usec()
 			if fixture.kind == "wall":
 				var shape := _wall_shape(fixture)
-				outline.mesh = _line_mesh(WallLayout.outline(grid, fixture.gap, shape), Mesh.PRIMITIVE_LINES)
+				outline.mesh = _line_mesh(WallLayout.outline(grid, fixture.gap, shape, _saved_wall(fixture)), Mesh.PRIMITIVE_LINES)
 				backing.mesh = _line_mesh(WallLayout.backing(grid, fixture.gap, shape), Mesh.PRIMITIVE_TRIANGLES)
 			else:
 				outline.mesh = _line_mesh(WallLayout.sphere_outline(fixture.radius), Mesh.PRIMITIVE_LINES)
@@ -1833,6 +2572,7 @@ func _build_outlines() -> void:
 		add_child(outline)
 		_outlines.append(outline)
 		_outline_keys.append("")
+		_outline_walls.append(null)
 		var backing := MeshInstance3D.new()
 		backing.material_override = body
 		backing.visible = false
@@ -1844,7 +2584,7 @@ func _build_radius_handles() -> void:
 	var ball := SphereMesh.new()
 	ball.radius = 0.025
 	ball.height = 0.05
-	for i in FIXTURE_ROWS * 2:
+	for i in FIXTURE_ROWS * HANDLE_KINDS.size():
 		var material := StandardMaterial3D.new()
 		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -1931,11 +2671,7 @@ void fragment() {
 ## The "Мир" tab, below its tunables: the floor where the user stands now. (A
 ## "Домой" button did what "Центр" in the radial menu does; dropped 20.10.2026.)
 func _build_world_section(tab: Node3D) -> void:
-	var rows := 0
-	for tunable: Array in TUNABLES:
-		if TUNABLE_TABS.get(tunable[1], 0) == SETTINGS_TABS.find("Мир"):
-			rows += 1
-	var bottom := 0.52 - rows * 0.062 - 0.04
+	var bottom := 0.52 - _tab_depth[SETTINGS_TABS.find("Мир")] * 0.062 - 0.04
 	_add_button_to(tab, "Пол здесь", Vector3(-0.1, bottom, 0.0), Vector2(0.3, 0.07), 0.6).activated.connect(_on_floor_here)
 	_floor_label = _settings_label("", Vector3(0.0, bottom - 0.08, 0.0), 22, tab)
 	_settings_label("Движение: рука со знаком в плоскости кольца — от центра туда, куда ехать; вбок — шаг в сторону.\nПоворот — вторая рука вбок. Наклон кольца и ход руки — на вкладке «Жесты». К экранам — «Центр» в круговом меню.",
@@ -1965,7 +2701,7 @@ func _update_bound_poses(index: int, pointer: Pointer, time: float, resting: boo
 	var held := {}
 	var split: bool = _bindings.get("move") == _bindings.get("turn")
 	var actions: Array[String] = []
-	for action: String in ["scroll", "grab", "move", "turn"]:
+	for action: String in ["scroll", "grab", "move", "turn", "swipe"]:
 		if split and ((action == "move" and index != _move_hand) or (action == "turn" and index == _move_hand)):
 			continue
 		if _pose_template(_bindings.get(action, GestureCatalog.OFF)) != null:
@@ -2417,7 +3153,7 @@ func _update_cursor() -> void:
 		pointer.panel = null
 		# A pointer that carries a panel (or a sphere's radius) does not touch the
 		# cursor; nor does one on a monitor's menu.
-		if not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0 or pointer.slider != null:
+		if not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0 or pointer.slider != null or pointer.grip_menu:
 			continue
 		var on_menu := _monitor_menu.hit_distance(pointer.origin, pointer.direction)
 		if on_menu >= 0.0:
@@ -2443,6 +3179,15 @@ func _update_cursor() -> void:
 			pointer.spread_final.add(pointer.panel_uv * Vector2(pointer.panel.monitor_rect.size))
 			_add_plane_point(pointer.spread_raw, pointer.panel, pointer.raw_origin, pointer.raw_direction)
 			_add_plane_point(pointer.spread_position_only, pointer.panel, pointer.raw_origin, pointer.shoulder_direction)
+
+	# While editing, nothing reaches the computer (the user's wish, 22.10.2026); the
+	# rays still end on the screens.
+	if _editing:
+		_release_cursor_button()
+		_cursor_owner = -1
+		_scroll_remainder = 0.0
+		_hscroll_remainder = 0.0
+		return
 
 	# One pointer owns the cursor: whoever pressed last, otherwise whoever aims at
 	# the panel (right hand first). The owner cannot change while the button is held.
@@ -2541,7 +3286,7 @@ func _update_two_hand_gestures() -> void:
 
 	var zooming := left.mode == "рука" and right.mode == "рука" \
 			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT \
-			and left.grab_panel == null and right.grab_panel == null
+			and left.grab_panel == null and right.grab_panel == null and not _editing
 	if zooming:
 		var gap := left.pinch_point.distance_to(right.pinch_point)
 		if not _zoom_active:
@@ -2758,9 +3503,21 @@ func _rebuild_panels() -> void:
 	var keys := PackedStringArray()
 	for panel in _panels:
 		keys.append(panel.monitor_key)
+	var adopted := WorldLayout.adopt(_fixtures, keys)
+	if not adopted.is_empty():
+		print("[world] экраны драйвера с новыми именами заняли места пропавших: %s" % adopted)
+		_save_settings()
 	WorldLayout.settle(_fixtures, keys)
 	_refresh_fixture_section()
 	_place_panels([], true)
+	# Seated at a wall, Windows follows it again (22.10.2026: after a start or a
+	# resolution change the positions stayed as they were; sizes change with
+	# resolutions, so the layout is worked out anew).
+	var seat := WorldLayout.find(_fixtures, _seated)
+	if seat != null and seat.kind == "wall":
+		_apply_wall_windows(seat)
+	# «Разрешение по клетке» goes one screen at a time: the next after each rebuild.
+	_apply_wall_resolutions()
 
 
 ## Puts the panels on an arc around the user, mirroring the Windows layout, or
@@ -2844,20 +3601,20 @@ func _place_wall(fixture: WorldLayout.Fixture, members: Array[int], rects: Array
 	for i in members:
 		keys.append(_panels[i].monitor_key)
 		member_rects.append(rects[i])
-	fixture.cells = WallLayout.settle(fixture.cells, keys, member_rects, maxi(members.find(primary_index), 0))
-	var saved: Array[Rect2i] = []
-	for key in keys:
-		saved.append(fixture.cells[key])
-	fixture.grid = WallLayout.settle_grid(fixture.grid, saved)
-	var cells := _wall_cells(fixture)
+	fixture.cells = WallLayout.settle(fixture.cells, keys, member_rects, maxi(members.find(primary_index), 0),
+			fixture.parts, WallLayout.split_cells(fixture.splits, fixture.blocks))
+	fixture.grid = WallLayout.settle_grid(fixture.grid, _wall_cell_list(fixture))
+	var wall := _wall_state(fixture)
 	var shape := _wall_shape(fixture)
 	for k in members.size():
 		var i := members[k]
-		var cell: Rect2i = cells.get(keys[k], fixture.cells[keys[k]])
-		var middle := WallLayout.cell_centre(cell, fixture.gap)
+		var spot := WallLayout.screen_area(wall, keys[k], fixture.gap)
+		var middle := spot.get_center()
 		var local := WallLayout.surface(middle.x, middle.y, 0.0, shape)
 		var placement := PanelLayout.Placement.new()
-		placement.size = WallLayout.panel_size(cell, rects[i].size, fixture.gap)
+		# Scaled to fill its cell or part (the user's wish, 22.10.2026: fitted it was
+		# much smaller); the resolution follows only with «Разрешение по клетке».
+		placement.size = spot.size
 		# Bent, every panel is curved like the wall: the same radius round the same axis.
 		placement.curvature = 1.0 if shape.bent() else 0.0
 		var direction := local.origin.normalized()
@@ -2869,18 +3626,39 @@ func _place_wall(fixture: WorldLayout.Fixture, members: Array[int], rects: Array
 		_panels[i].distance = shape.radius() if shape.bent() else fixture.radius
 
 
-## A wall's cells: as they will be while a panel on it is carried, else as saved.
-func _wall_cells(fixture: WorldLayout.Fixture) -> Dictionary:
-	return _wall_preview if _wall_preview_fixture == fixture.id and not _wall_preview.is_empty() else fixture.cells
+## A wall's screens as saved: on whole cells, in parts, its splits. The same
+## (frozen, remembering what is asked of it) until any of these is replaced: they
+## are only ever replaced, never changed in place.
+func _saved_wall(fixture: WorldLayout.Fixture) -> WallLayout.Wall:
+	var wall: WallLayout.Wall = _saved_walls.get(fixture.id)
+	if wall != null and is_same(wall.cells, fixture.cells) and is_same(wall.parts, fixture.parts) \
+			and is_same(wall.splits, fixture.splits) and is_same(wall.blocks, fixture.blocks):
+		return wall
+	wall = WallLayout.Wall.new()
+	wall.cells = fixture.cells
+	wall.parts = fixture.parts
+	wall.splits = fixture.splits
+	wall.blocks = fixture.blocks
+	wall.frozen = true
+	_saved_walls[fixture.id] = wall
+	return wall
 
 
-## The cells of the screens on a wall now (not of monitors that are gone).
+## A wall's screens as they will be while a panel on it is carried, else as saved.
+func _wall_state(fixture: WorldLayout.Fixture) -> WallLayout.Wall:
+	return _wall_preview if _wall_preview_fixture == fixture.id and _wall_preview != null else _saved_wall(fixture)
+
+
+## The cells of the screens on a wall now (not of monitors that are gone); a screen
+## in a part counts its whole cell.
 func _wall_cell_list(fixture: WorldLayout.Fixture) -> Array[Rect2i]:
 	var cells: Array[Rect2i] = []
-	var current := _wall_cells(fixture)
+	var current := _wall_state(fixture)
 	for panel in _panels:
-		if _fixture_of(panel) == fixture and current.has(panel.monitor_key):
-			cells.append(current[panel.monitor_key])
+		if _fixture_of(panel) != fixture:
+			continue
+		if current.has(panel.monitor_key):
+			cells.append(WallLayout.screen_cells(current, panel.monitor_key))
 	return cells
 
 
@@ -2944,11 +3722,15 @@ func _primary_index() -> int:
 ## The menu grip is there whenever the menu is switched on in the settings.
 func _allowed_grips(panel: ScreenPanel) -> Array:
 	var grips := []
+	if not _handles_shown():
+		return grips
 	if _gesture_settings.grab_mode <= 1:
 		grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
-		if _fixture_of(panel).kind == "wall":
-			# On a wall a panel stands upright in its cells; the whole wall bends.
-			grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE]
+		var fixture := _fixture_of(panel)
+		if fixture.kind == "wall":
+			# On a wall a panel stands upright in its cells; the whole wall bends. A
+			# screen in a part of a split cell has the part's size.
+			grips = [ScreenPanel.Grip.MOVE] if fixture.parts.has(panel.monitor_key) else [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE]
 		if not panel.primary:
 			grips.append(ScreenPanel.Grip.PRIMARY)
 	if _panel_options.monitor_menu != 0:
@@ -3195,15 +3977,17 @@ func _drag(pointer: Pointer) -> void:
 
 func _start_wall_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool, fixture: WorldLayout.Fixture) -> bool:
 	var at := _wall_hit(pointer, fixture)
-	if is_nan(at.x) or not fixture.cells.has(panel.monitor_key):
+	var saved := _saved_wall(fixture)
+	if is_nan(at.x) or not saved.has(panel.monitor_key):
 		return false
 	pointer.grab_panel = panel
 	pointer.grab_kind = kind
 	pointer.grab_by_fist = by_fist
 	pointer.grab_lost_sec = 0.0
 	pointer.grab_start = at
-	pointer.grab_cell = fixture.cells[panel.monitor_key]
-	_wall_preview = fixture.cells.duplicate()
+	pointer.grab_cell = WallLayout.screen_cells(saved, panel.monitor_key)
+	pointer.grab_centre = WallLayout.screen_area(saved, panel.monitor_key, fixture.gap).get_center()
+	_wall_preview = saved.copy()
 	_wall_preview_fixture = fixture.id
 	print("[panels] %s: %s на «%s» (%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], fixture.name, "кулак" if by_fist else pointer.mode])
 	return true
@@ -3211,23 +3995,29 @@ func _start_wall_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: 
 
 ## Carrying on a wall: the panel stands in the cells it will take (snapped as it
 ## goes) and the screens there step aside; the corner grip makes it take more or
-## fewer cells (towards lower right more), its shape kept.
+## fewer cells, across and down each on its own (the user's wish, 22.10.2026: 1×2
+## and 2×1 too, not only squares; the picture is stretched to the cells).
 func _drag_wall(pointer: Pointer, fixture: WorldLayout.Fixture) -> void:
 	var at := _wall_hit(pointer, fixture)
 	if is_nan(at.x):
 		return
 	var start := pointer.grab_cell
-	var target := start
 	var shift := at - pointer.grab_start
+	var key := pointer.grab_panel.monitor_key
+	var preview: WallLayout.Wall
 	if pointer.grab_kind == ScreenPanel.Grip.RESIZE:
 		var step := WallLayout.pitch(fixture.gap)
-		var grow := roundi((shift.x / step.x - shift.y / step.y) * 0.5)
-		target.size = (start.size + Vector2i(grow, grow)).clamp(Vector2i.ONE, Vector2i(WallLayout.MAX_SPAN, WallLayout.MAX_SPAN))
+		var grow := Vector2i(roundi(shift.x / step.x), roundi(-shift.y / step.y))
+		var size := (start.size + grow).clamp(Vector2i.ONE, Vector2i(WallLayout.MAX_SPAN, WallLayout.MAX_SPAN))
+		preview = WallLayout.onto_cells(_saved_wall(fixture), key, Rect2i(start.position, size))
 	else:
-		var middle := WallLayout.cell_centre(start, fixture.gap) + shift
-		target = WallLayout.cell_at(middle.x, middle.y, start.size, fixture.gap)
-	var preview := WallLayout.moved(fixture.cells, pointer.grab_panel.monitor_key, target)
-	if preview != _wall_preview:
+		# Into the part under it if that cell is split, else onto whole cells.
+		var middle := pointer.grab_centre + shift
+		preview = WallLayout.dropped(_saved_wall(fixture), key, middle.x, middle.y, fixture.gap)
+	if preview.cells != _wall_preview.cells or preview.parts != _wall_preview.parts \
+			or preview.splits != _wall_preview.splits or preview.blocks != _wall_preview.blocks:
+		# Only read from here on (the panels are placed from it every frame).
+		preview.frozen = true
 		_wall_preview = preview
 		_place_panels()
 
@@ -3235,17 +4025,26 @@ func _drag_wall(pointer: Pointer, fixture: WorldLayout.Fixture) -> void:
 func _end_wall_grab(panel: ScreenPanel) -> void:
 	var fixture := WorldLayout.find(_fixtures, _wall_preview_fixture)
 	var grid := _wall_grid(fixture) if fixture != null else Rect2i()
-	if fixture != null and not _wall_preview.is_empty():
-		fixture.cells = _wall_preview
+	if fixture != null and _wall_preview != null:
+		fixture.cells = _wall_preview.cells
+		fixture.parts = _wall_preview.parts
+		fixture.splits = _wall_preview.splits
+		fixture.blocks = _wall_preview.blocks
 		# A screen carried past the edge made the wall bigger: it stays so.
 		fixture.grid = grid
-	_wall_preview = {}
+	_wall_preview = null
 	_wall_preview_fixture = -1
 	_save_settings()
 	_place_panels([], true)
 	if fixture != null and panel != null:
-		var cell: Rect2i = fixture.cells.get(panel.monitor_key, Rect2i())
-		print("[panels] %s: на «%s» с клетки %s, %d×%d" % [panel.monitor_name, fixture.name, cell.position, cell.size.x, cell.size.y])
+		if fixture.parts.has(panel.monitor_key):
+			print("[panels] %s: на «%s» в части %s" % [panel.monitor_name, fixture.name, fixture.parts[panel.monitor_key]])
+		else:
+			var cell: Rect2i = fixture.cells.get(panel.monitor_key, Rect2i())
+			print("[panels] %s: на «%s» с клетки %s, %d×%d" % [panel.monitor_name, fixture.name, cell.position, cell.size.x, cell.size.y])
+		if _seated == fixture.id:
+			_apply_wall_windows(fixture)
+		_apply_wall_resolutions()
 
 
 ## Tilt: of the panel's whole row, or of this panel only (settings); a panel placed
@@ -3414,7 +4213,10 @@ func _update_xr_session(delta: float) -> void:
 			_schedule_reconnect()
 
 	if _session_loss.lost and _reconnect_timer < 0.0:
-		print("[xr] среда ответила XR_ERROR_SESSION_LOST — сессия потеряна")
+		if _session_loss.sign == "XR_ERROR_SESSION_LOST":
+			print("[xr] среда ответила XR_ERROR_SESSION_LOST — сессия потеряна")
+		else:
+			print("[xr] видеокарта потеряла устройство D3D12 (%s) — перезапускаю приложение" % _session_loss.sign)
 		_schedule_reconnect()
 
 	if _reconnect_timer < 0.0:
@@ -3584,6 +4386,11 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 	var text: String = TOPOLOGY_MESSAGES.get(code, code)
 	_vdd_message = ("готово: " if ok else "ошибка: ") + text + ((" (" + detail + ")") if detail != "" else "")
 	print("[screens] ", _vdd_message)
+	if _wall_mode_attempt != "":
+		if code != "mode_set":
+			_wall_modes_refused[_wall_mode_attempt] = true
+			print("[world] разрешение по клетке: Windows не приняла %s — больше не пробую" % _wall_mode_attempt)
+		_wall_mode_attempt = ""
 	if not _slot_loading.is_empty() and not ok:
 		if code == "no_free_screen":
 			# Not enough driver instances: create more (Quest Link reconnects; the
@@ -3604,15 +4411,27 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 		if _monitor_menu.visible:
 			_monitor_menu.show_loading(_monitor_menu.monitor_name)
 			_topology.list_modes()
-	if not _queued_positions.is_empty() and not _topology.busy:
+	if not ok and _queued_positions.is_empty() and not _layout_pending.is_empty():
+		# Windows refused the new layout: the panels go back to what it really is.
+		_layout_pending.clear()
+		_place_panels()
+
+
+## The layout script is free again, after whatever it did: what waited for it
+## starts — a Windows layout queued meanwhile, then «Разрешение по клетке» (it
+## waits while the script watches the windows for up to 10 s after a move).
+## 22.10.2026 after a self-restart the first run only counted the driver's
+## instances, which ended with no `finished`, and neither ever started.
+func _on_topology_idle() -> void:
+	if _topology.busy:
+		return
+	if not _queued_positions.is_empty():
 		var positions := _queued_positions
 		_queued_positions = {}
 		_vdd_message = "меняю раскладку Windows…"
 		_topology.arrange(positions)
-	elif not ok and not _layout_pending.is_empty():
-		# Windows refused the new layout: the panels go back to what it really is.
-		_layout_pending.clear()
-		_place_panels()
+		return
+	_apply_wall_resolutions()
 
 
 func _own_arrangement() -> Dictionary:
@@ -3671,7 +4490,8 @@ func _finish_menu(index: int, how: String) -> void:
 func _run_menu_action(id: String) -> void:
 	var keys: Array = MenuSet.action(id)[1]
 	if not keys.is_empty():
-		MouseInput.press_keys(PackedInt32Array(keys))
+		if not _editing:
+			MouseInput.press_keys(PackedInt32Array(keys))
 	elif id == "center":
 		# Seated: back to the seat, facing the fixture (the user's wish, 21.10.2026:
 		# "Центр" sitting too; standing up is its own item now).
@@ -3685,6 +4505,10 @@ func _run_menu_action(id: String) -> void:
 	elif id == "stand_up":
 		if _seated >= 0:
 			_stand_up()
+	elif id == "edit":
+		_editing = not _editing
+		_release_cursor_button()
+		print("[world] режим редактирования %s" % ("включён" if _editing else "выключен"))
 	elif id == "quit":
 		# The ordinary exit: the layout stays as it is.
 		_quit()
@@ -3788,21 +4612,40 @@ func _build_driver_section(tab: Node3D) -> void:
 	_driver_count_label = _settings_label("", Vector3(x + 0.13, 0.51, 0.0), 26, tab)
 	_add_button_to(tab, "+", Vector3(x + 0.26, 0.51, 0.0), small, 0.25).activated.connect(_on_driver_count.bind(1))
 	_settings_label("Разрешения драйвера", Vector3(x, 0.44, 0.0), 26, tab)
+	_driver_tab = tab
+	_driver_status = _settings_label("", Vector3.ZERO, 22, tab)
+	_driver_apply = _add_button_to(tab, "Применить", Vector3.ZERO, Vector2(0.3, 0.07), DRIVER_APPLY_HOLD_SEC)
+	_driver_apply.activated.connect(_on_driver_apply)
+	_build_driver_chips()
+
+
+## The resolution chips: the presets, what the driver has and what the walls want
+## (rebuilt when a wall wants a new one).
+func _build_driver_chips() -> void:
+	for size: Vector2i in _driver_chips:
+		var old: VrButton = _driver_chips[size]
+		_buttons.erase(old)
+		old.queue_free()
+	_driver_chips.clear()
 	var options: Array[Vector2i] = VddConfig.PRESETS.duplicate()
-	for size in VddConfig.read():
+	for size in VddConfig.read() + _wall_needed_resolutions:
 		if not options.has(size):
 			options.append(size)
-	options.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.x * a.y < b.x * b.y)
+	# What a wall wants comes first (22.10.2026: sorted by area, 1920×496 was easy to miss).
+	options.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var wanted_a := _wall_needed_resolutions.has(a)
+		if wanted_a != _wall_needed_resolutions.has(b):
+			return wanted_a
+		return a.x * a.y < b.x * b.y)
 	var per_column := ceili(options.size() / 2.0)
 	for i in options.size():
-		var at := Vector3(x - 0.15 + (i / per_column) * 0.3, 0.38 - (i % per_column) * 0.058, 0.0)
-		var chip := _add_button_to(tab, "", at, Vector2(0.28, 0.05), 0.25)
+		var at := Vector3(-0.15 + (i / per_column) * 0.3, 0.38 - (i % per_column) * 0.058, 0.0)
+		var chip := _add_button_to(_driver_tab, "", at, Vector2(0.28, 0.05), 0.25)
 		chip.activated.connect(_on_driver_chip.bind(options[i]))
 		_driver_chips[options[i]] = chip
 	var bottom := 0.38 - per_column * 0.058 - 0.03
-	_driver_status = _settings_label("", Vector3(x, bottom, 0.0), 22, tab)
-	_driver_apply = _add_button_to(tab, "Применить", Vector3(x, bottom - 0.08, 0.0), Vector2(0.3, 0.07), DRIVER_APPLY_HOLD_SEC)
-	_driver_apply.activated.connect(_on_driver_apply)
+	_driver_status.position = Vector3(0.0, bottom, 0.002)
+	_driver_apply.position = Vector3(0.0, bottom - 0.08, 0.0)
 
 
 ## `reload` reads what the driver has now (when the settings panel opens).
@@ -3812,11 +4655,28 @@ func _refresh_driver_section(reload := false) -> void:
 		_driver_selected = _driver_resolutions.duplicate()
 		_driver_count = -1
 		_count_instances_when_free()
+	if _driver_tab == null:
+		return
+	# What the walls want and the driver lacks stays marked until «Применить».
+	# Marked earlier for a shape no wall has any more: unmarked again.
+	for size in _wall_marked:
+		if not _wall_needed_resolutions.has(size):
+			_driver_selected.erase(size)
+	_wall_marked.clear()
+	var rebuild := false
+	for size in _wall_needed_resolutions:
+		if not _driver_resolutions.has(size) and not _driver_selected.has(size):
+			_driver_selected.append(size)
+			_wall_marked.append(size)
+		rebuild = rebuild or not _driver_chips.has(size)
+	if rebuild:
+		_build_driver_chips()
 	for size: Vector2i in _driver_chips:
 		var on := _driver_selected.has(size)
 		var mark := "[x]" if on else "[ ]"
 		var differs := on != _driver_resolutions.has(size)
-		(_driver_chips[size] as VrButton).set_text("%s %d×%d%s" % [mark, size.x, size.y, " *" if differs else ""])
+		(_driver_chips[size] as VrButton).set_fitted_text("%s %d×%d%s%s" % [mark, size.x, size.y, " *" if differs else "",
+				" — для стены" if _wall_needed_resolutions.has(size) and not _driver_resolutions.has(size) else ""])
 	if _driver_count < 0:
 		_driver_count_label.text = "…"
 	elif _driver_target != _driver_count:
@@ -4383,11 +5243,15 @@ func _update_pointer(index: int, delta: float) -> void:
 		# Swipe of the open hand sideways (as the user sees it).
 		var head_right := Vector3(_camera.global_basis.x.x, 0.0, _camera.global_basis.x.z).normalized()
 		pointer.swipe.distance = _gesture_settings.swipe_distance
+		# The gesture is the user's choice on «Назначения» (22.10.2026): the open hand,
+		# any pose, or off.
+		var swipe_id: String = _bindings.get("swipe", GestureCatalog.PALM)
+		var swipe_pose := open_hand if swipe_id == GestureCatalog.PALM else bool(pointer.poses.get("swipe", false))
 		var swipe := pointer.swipe.update(frame.time, palm.dot(head_right),
 				# Only while the hand's ray is on a screen (last frame): turning round with
 				# an open hand swings it sideways too, but points it away from the screens.
-				open_hand and not resting and not pointer.scrolling and not pointer.menu_open and pointer.on_panel)
-		if swipe != 0:
+				swipe_pose and not resting and not pointer.scrolling and not pointer.menu_open and pointer.on_panel)
+		if swipe != 0 and not _editing:
 			var keys := SWIPE_KEYS[_gesture_settings.swipe_mode][0 if swipe < 0 else 1] as Array
 			MouseInput.press_keys(PackedInt32Array(keys))
 			print("[gesture] %s: смахивание %s" % [SIDE_LABELS[index], "влево" if swipe < 0 else "вправо"])
@@ -4474,7 +5338,7 @@ func _update_pointer(index: int, delta: float) -> void:
 func _update_buttons(delta: float) -> void:
 	for button in _buttons:
 		# Buttons of a hidden panel cannot be pressed.
-		if not button.is_visible_in_tree():
+		if not button.is_visible_in_tree() or (_option_list_row >= 0 and button.get_parent() == _option_list.get_parent()):
 			button.update(false, false, false, delta)
 			continue
 		var hovered := false
@@ -4701,6 +5565,7 @@ func _build_helpers() -> void:
 	_topology.finished.connect(_on_topology_finished)
 	_topology.modes_listed.connect(_on_modes_listed)
 	_topology.instances_counted.connect(_on_instances_counted)
+	_topology.idle.connect(_on_topology_idle)
 	add_child(_topology)
 	_monitor_menu = MonitorMenu.new()
 	_monitor_menu.visible = false
@@ -4750,19 +5615,36 @@ func _build_settings_panel() -> void:
 	# How many rows each tab has: a long one gets two columns.
 	var totals: Array[int] = []
 	totals.resize(SETTINGS_TABS.size())
+	var headed: Array[bool] = []
+	headed.resize(SETTINGS_TABS.size())
+	_tab_depth.resize(SETTINGS_TABS.size())
 	for tunable: Array in TUNABLES:
-		totals[TUNABLE_TABS.get(tunable[1], 0)] += 1
+		var tab_index: int = TUNABLE_TABS.get(tunable[1], 0)
+		totals[tab_index] += 2 if SETTINGS_HEADERS.has(tunable[1]) else 1
+		headed[tab_index] = headed[tab_index] or SETTINGS_HEADERS.has(tunable[1])
 	for i in TUNABLES.size():
 		var t: int = TUNABLE_TABS.get(TUNABLES[i][1], 0)
 		var tab := _settings_tabs[t]
-		var per_column := ceili(totals[t] / 2.0) if totals[t] > SETTINGS_ROWS_PER_COLUMN else totals[t]
+		# A spare row in two columns with subheadings: one may skip a column's last row.
+		var per_column := ceili(totals[t] / 2.0) + (1 if headed[t] else 0) if totals[t] > SETTINGS_ROWS_PER_COLUMN else totals[t]
+		if SETTINGS_HEADERS.has(TUNABLES[i][1]):
+			# A subheading takes a row of its own, never the last of a column.
+			if rows[t] % per_column == per_column - 1:
+				rows[t] += 1
+			var header_x: float = [-0.5, 0.62][rows[t] / per_column] if totals[t] > SETTINGS_ROWS_PER_COLUMN else 0.15
+			var header := _settings_label(SETTINGS_HEADERS[TUNABLES[i][1]], Vector3(header_x - 0.06, 0.52 - (rows[t] % per_column) * 0.062, 0.0), 28, tab)
+			header.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			header.modulate = Color(0.55, 0.85, 1.0)
+			rows[t] += 1
 		var column := rows[t] / per_column
 		var y := 0.52 - (rows[t] % per_column) * 0.062
+		_tab_depth[t] = maxi(_tab_depth[t], rows[t] % per_column + 1)
 		rows[t] += 1
 		var x: float = [-0.5, 0.62][column] if totals[t] > SETTINGS_ROWS_PER_COLUMN else 0.15
 		var name_label := _settings_label(TUNABLES[i][2], Vector3(x - 0.06, y, 0.0), 26, tab)
 		name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		_add_button_to(tab, "−", Vector3(x, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, -1.0))
+		var minus := _add_button_to(tab, "−", Vector3(x, y, 0.0), small, 0.25)
+		minus.activated.connect(_on_tunable_button.bind(i, -1.0))
 		if _is_slider_tunable(TUNABLES[i]):
 			# A slider between − and + (20.10.2026: quicker than many presses; the
 			# buttons stay for fine steps), the value after +.
@@ -4775,12 +5657,18 @@ func _build_settings_panel() -> void:
 			_add_button_to(tab, "+", Vector3(x + 0.33, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
 			_settings_values.append(_settings_label("", Vector3(x + 0.46, y, 0.0), 24, tab))
 		else:
-			_settings_values.append(_settings_label("", Vector3(x + 0.13, y, 0.0), 26, tab))
-			_add_button_to(tab, "+", Vector3(x + 0.26, y, 0.0), small, 0.25).activated.connect(_on_tunable_button.bind(i, 1.0))
+			# As wide as a slider row (the user's wish, 22.10.2026).
+			_settings_values.append(_settings_label("", Vector3(x + 0.165, y, 0.0), 26, tab))
+			var plus := _add_button_to(tab, "+", Vector3(x + 0.33, y, 0.0), small, 0.25)
+			plus.activated.connect(_on_tunable_button.bind(i, 1.0))
+			# «Выбор вариантов: списком»: one button with the value opens the list instead.
+			var choice := _add_button_to(tab, "", Vector3(x + 0.165, y, 0.0), Vector2(0.4, 0.052), 0.2)
+			choice.activated.connect(_toggle_option_list.bind(i))
+			_option_rows[i] = [minus, plus, choice, tab, Vector3(x + 0.165, y, 0.0)]
+	_build_option_list()
 
 	var gestures := _settings_tabs[0]
-	var column_rows := ceili(rows[0] / 2.0) if rows[0] > SETTINGS_ROWS_PER_COLUMN else rows[0]
-	var bottom := 0.52 - column_rows * 0.062 - 0.03
+	var bottom := 0.52 - _tab_depth[0] * 0.062 - 0.03
 	_add_button_to(gestures, "По умолчанию", Vector3(-0.55, bottom, 0.0), Vector2(0.26, 0.08), 1.0).activated.connect(_on_tunables_default)
 	# Self-tuning: record a few touches and derive the thresholds from them.
 	_add_button_to(gestures, "Настроить щипок", Vector3(-0.2, bottom, 0.0), Vector2(0.3, 0.08), 0.6).activated.connect(_start_calibration.bind(0))
@@ -4818,6 +5706,7 @@ func _show_settings_tab(index: int) -> void:
 	if SETTINGS_TABS[index] == "Драйвер" and _driver_count_label != null:
 		_refresh_driver_section(true)
 	_close_binding_menu()
+	_close_option_list()
 
 
 ## The hand ray: Meta's or our own, and our own ray's mix and trim (they used to
@@ -5130,6 +6019,8 @@ func _set_tunable(index: int, raw: float, save: bool) -> void:
 	if save:
 		_save_settings()
 		print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
+		if tunable[1] == "wall_resolution":
+			_apply_wall_resolutions()
 
 
 ## The settings sliders: a pinch (or trigger) that starts on one takes it; while
@@ -5187,42 +6078,121 @@ func _refresh_settings_panel() -> void:
 	for i in mini(TUNABLES.size(), _settings_values.size()):
 		var tunable: Array = TUNABLES[i]
 		var value := float(_tunable_target(tunable[0]).get(tunable[1]))
-		if tunable[1] == "disc_ring_curl" and value <= 0.0:
-			_settings_values[i].text = "не нужно"
-		elif tunable[1] == "swipe_mode":
-			_settings_values[i].text = "отмена/повтор" if value >= 0.5 else "назад/вперёд"
-		elif tunable[1] == "scroll_mode":
-			_settings_values[i].text = "диск" if value >= 0.5 else "направление"
-		elif tunable[1] == "grab_mode":
-			_settings_values[i].text = ["ручка", "ручка и кулак", "только кулак", "выключен"][clampi(roundi(value), 0, 3)]
-		elif tunable[1] == "monitor_menu":
-			_settings_values[i].text = "показано" if value >= 0.5 else "скрыто"
-		elif tunable[1] == "tilt_mode":
-			_settings_values[i].text = "монитор" if value >= 0.5 else "ряд"
-		elif tunable[1] == "move_mode":
-			_settings_values[i].text = "только VR" if value >= 0.5 else "раскладку Windows"
-		elif tunable[1] == "magnet":
-			_settings_values[i].text = "да" if value >= 0.5 else "нет"
-		elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
-			_settings_values[i].text = "да" if value >= 0.5 else "нет"
-		elif tunable[1] == "travel_mode":
-			_settings_values[i].text = "гравитация" if value >= 0.5 else "космос"
-		elif tunable[1] == "wall_slide_hand":
-			_settings_values[i].text = "правая рука" if value >= 0.5 else "левая рука"
-		elif tunable[1] == "turn_mode":
-			_settings_values[i].text = ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
-		elif tunable[1] == "stick_mode":
-			_settings_values[i].text = ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
-		elif tunable[1] in ["grid", "outlines"]:
-			_settings_values[i].text = "да" if value >= 0.5 else "нет"
-		elif tunable[1] == "vignette" and value <= 0.0:
-			_settings_values[i].text = "выключено"
-		elif tunable[1] in ["render_radius", "interact_radius"] and value <= 0.0:
-			_settings_values[i].text = "без ограничения"
-		elif tunable[1] in ["move_speed", "grid_step"]:
-			_settings_values[i].text = "%.2f %s" % [value, tunable[4]] if tunable[1] == "grid_step" else "%.1f %s" % [value, tunable[4]]
-		else:
-			_settings_values[i].text = "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
+		_settings_values[i].text = _tunable_text(tunable, value)
+		# Long values get a smaller font to stay between − and + (22.10.2026).
+		if not _is_slider_tunable(tunable):
+			var length := maxi(_settings_values[i].text.length(), 1)
+			_settings_values[i].font_size = clampi(int(SETTINGS_VALUE_WIDTH / (length * 0.00055)), 12, 26)
+		if _option_rows.has(i):
+			var row: Array = _option_rows[i]
+			var listed := _world.option_lists == 1
+			(row[0] as VrButton).visible = not listed
+			(row[1] as VrButton).visible = not listed
+			_settings_values[i].visible = not listed
+			(row[2] as VrButton).visible = listed
+			(row[2] as VrButton).set_fitted_text(_settings_values[i].text)
+
+
+## How a setting's value reads on the panel and in the log.
+func _tunable_text(tunable: Array, value: float) -> String:
+	if tunable[1] == "disc_ring_curl" and value <= 0.0:
+		return "не нужно"
+	elif tunable[1] == "swipe_mode":
+		return "отмена/повтор" if value >= 0.5 else "назад/вперёд"
+	elif tunable[1] == "scroll_mode":
+		return "диск" if value >= 0.5 else "направление"
+	elif tunable[1] == "grab_mode":
+		return ["ручка", "ручка и кулак", "только кулак", "выключен"][clampi(roundi(value), 0, 3)]
+	elif tunable[1] == "monitor_menu":
+		return "показано" if value >= 0.5 else "скрыто"
+	elif tunable[1] == "tilt_mode":
+		return "монитор" if value >= 0.5 else "ряд"
+	elif tunable[1] == "move_mode":
+		return "только VR" if value >= 0.5 else "раскладку Windows"
+	elif tunable[1] == "magnet":
+		return "да" if value >= 0.5 else "нет"
+	elif tunable[1] in ["invert_vertical", "invert_horizontal"]:
+		return "да" if value >= 0.5 else "нет"
+	elif tunable[1] == "travel_mode":
+		return "гравитация" if value >= 0.5 else "космос"
+	elif tunable[1] == "wall_resolution":
+		return "да (экспериментально)" if value >= 0.5 else "нет, только масштаб"
+	elif tunable[1] == "handles_mode":
+		return "только в режиме редактирования" if value >= 0.5 else "всегда"
+	elif tunable[1] == "wall_slide_hand":
+		return "правая рука" if value >= 0.5 else "левая рука"
+	elif tunable[1] == "turn_mode":
+		return ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
+	elif tunable[1] == "stick_mode":
+		return ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
+	elif tunable[1] in ["grid", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "split_handle"]:
+		return "да" if value >= 0.5 else "нет"
+	elif tunable[1] == "option_lists":
+		return "списком" if value >= 0.5 else "нажатиями"
+	elif tunable[1] == "vignette" and value <= 0.0:
+		return "выключено"
+	elif tunable[1] in ["render_radius", "interact_radius"] and value <= 0.0:
+		return "без ограничения"
+	elif tunable[1] in ["move_speed", "grid_step"]:
+		return "%.2f %s" % [value, tunable[4]] if tunable[1] == "grid_step" else "%.1f %s" % [value, tunable[4]]
+	return "%d %s" % [roundi(value * float(tunable[3])), tunable[4]]
+
+
+## The drop-down list (built once, moved to the row it opens for).
+func _build_option_list() -> void:
+	_option_list = Node3D.new()
+	_option_list.visible = false
+	_settings_root.add_child(_option_list)
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = Vector2(0.44, 1.0)
+	_option_list_back = MeshInstance3D.new()
+	_option_list_back.mesh = back_mesh
+	_option_list_back.material_override = _flat_material(Color(0.05, 0.06, 0.09))
+	_option_list_back.position = Vector3(0.0, 0.0, -0.004)
+	_option_list.add_child(_option_list_back)
+	for k in OPTION_LIST_ROWS:
+		var button := _add_button_to(_option_list, "", Vector3(0.0, -k * OPTION_LIST_STEP, 0.0), Vector2(0.4, 0.052), 0.2)
+		button.activated.connect(_on_option_pick.bind(k))
+		_option_buttons.append(button)
+
+
+## Opens the list of a row's choices under it (or shuts it if it is open there).
+func _toggle_option_list(index: int) -> void:
+	if _option_list_row == index:
+		_close_option_list()
+		return
+	var tunable: Array = TUNABLES[index]
+	var row: Array = _option_rows[index]
+	var count := mini(roundi((float(tunable[7]) - float(tunable[6])) / float(tunable[5])) + 1, OPTION_LIST_ROWS)
+	var current := float(_tunable_target(tunable[0]).get(tunable[1]))
+	_option_list.reparent(row[3] as Node3D, false)
+	_option_list.position = (row[4] as Vector3) + Vector3(0.0, -OPTION_LIST_STEP, 0.03)
+	for k in OPTION_LIST_ROWS:
+		var button := _option_buttons[k]
+		button.visible = k < count
+		if k < count:
+			var value := float(tunable[6]) + k * float(tunable[5])
+			var text := _tunable_text(tunable, value)
+			button.set_fitted_text(("» %s «" if is_equal_approx(value, current) else "%s") % text)
+	_option_list_back.scale = Vector3(1.0, count * OPTION_LIST_STEP + 0.01, 1.0)
+	_option_list_back.position = Vector3(0.0, -(count - 1) * OPTION_LIST_STEP * 0.5, -0.004)
+	_option_list_row = index
+	_option_list.visible = true
+
+
+func _on_option_pick(k: int) -> void:
+	if _option_list_row < 0:
+		return
+	var tunable: Array = TUNABLES[_option_list_row]
+	var index := _option_list_row
+	_close_option_list()
+	_set_tunable(index, float(tunable[6]) + k * float(tunable[5]), true)
+
+
+func _close_option_list() -> void:
+	_option_list_row = -1
+	if _option_list != null:
+		_option_list.visible = false
 
 
 ## A thin hidden ring of `radius` (scroll disc, moving and turning rings), placed

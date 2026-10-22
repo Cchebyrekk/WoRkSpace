@@ -38,6 +38,8 @@ var distance := 1.0
 const ACTIVE_HOLD_SEC := 1.0
 ## Below the bottom edge, to the middle of the grips.
 const GRIP_DROP := 0.036
+## The longest side (px) of the picture handed to the layer (see layer_size).
+const MAX_LAYER_SIDE := 4096
 const GRIP_SIZES := {Grip.MOVE: Vector2(0.18, 0.022), Grip.TILT: Vector2(0.07, 0.022),
 		Grip.CURVE: Vector2(0.07, 0.022), Grip.RESIZE: Vector2(0.045, 0.045), Grip.PRIMARY: Vector2(0.03, 0.03),
 		Grip.MENU: Vector2(0.03, 0.03)}
@@ -92,7 +94,7 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	picture.stretch_mode = TextureRect.STRETCH_SCALE
 	picture.set_anchors_preset(Control.PRESET_FULL_RECT)
 	panel._viewport = SubViewport.new()
-	panel._viewport.size = panel.monitor_rect.size
+	panel._viewport.size = layer_size(panel.monitor_rect.size)
 	panel._viewport.disable_3d = true
 	# Drawn on demand, see refresh().
 	panel._viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -176,6 +178,19 @@ func _make_layer(curved: bool) -> void:
 ## "\\?\DISPLAY#MTT1337#1&2240405a&2&UID256#{...}" it is "MTT1337#1&2240405a&UID256".
 ## The third part ("&2") changed when the driver was reinstalled (18.10.2026), so
 ## saved places were not found. Anything else is returned as it is.
+## The picture the layer gets for a monitor of `pixels`: at most MAX_LAYER_SIDE
+## on its longer side, its shape kept. 22.10.2026 a 5120×2160 screen made Quest
+## Link refuse the layer's swapchain (XR_ERROR_FEATURE_UNSUPPORTED) and the GPU
+## device was lost (0x887A0005); 3840×2160 had always worked. Clicks still map to
+## the monitor's real pixels (monitor_rect).
+static func layer_size(pixels: Vector2i) -> Vector2i:
+	var longer := maxi(pixels.x, pixels.y)
+	if longer <= MAX_LAYER_SIDE:
+		return pixels
+	var scale := float(MAX_LAYER_SIDE) / longer
+	return Vector2i(maxi(roundi(pixels.x * scale), 1), maxi(roundi(pixels.y * scale), 1))
+
+
 static func key_of(path: String) -> String:
 	var parts := path.split("#")
 	if parts.size() < 3 or not parts[0].ends_with("DISPLAY"):
