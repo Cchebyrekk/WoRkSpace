@@ -154,12 +154,13 @@ const TUNABLES := [
 	["world", "turn_mode", "Поворот", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "snap_degrees", "Поворот рывком на", 1.0, "°", 5.0, 10.0, 90.0],
 	["world", "turn_speed_degrees", "Плавный поворот: скорость", 1.0, "°/с", 15.0, 15.0, 360.0],
-	["world", "wall_slide_hand", "У стены вдоль ведёт", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "wall_slide_hand", "У стены и столба вдоль ведёт", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "wall_resolution", "Разрешение по клетке", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "outlines", "Контуры заготовок", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "sphere_handle", "Ручка радиуса шара", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "wall_size_handle", "Ручка размера стены", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "wall_bend_handle", "Ручка изгиба стены", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "wall_tilt_handle", "Ручка наклона стены", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "split_handle", "Ручка «÷» деления клеток", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "handles_mode", "Ручки", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "vignette", "Затемнение краёв при движении", 100.0, "%", 0.1, 0.0, 1.0],
@@ -209,7 +210,7 @@ const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауз
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
 	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
-	"wall_slide_hand": "У стены", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики"}
+	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики"}
 ## The value between − and + is at most this wide; longer text gets a smaller font (m).
 const SETTINGS_VALUE_WIDTH := 0.24
 const TUNABLE_TABS := {
@@ -217,7 +218,7 @@ const TUNABLE_TABS := {
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
-	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "split_handle": 7, "handles_mode": 7,
+	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
 	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7,
 }
 ## The sliders of the settings rows (see VrSlider).
@@ -453,16 +454,19 @@ class Pointer:
 	## Moving / turning: where the hand was when its pose formed (rig space), by action.
 	var travel_anchors := {}
 	var snap_turn := Locomotion.SnapTurn.new()
-	## Dragging a sphere's radius handle: the sphere's id (-1 = not), its radius and
-	## the hand's distance from its centre when taken, and how long the press was lost.
+	## Holding a handle of a fixture, or a screen's tilt, bend or size grip: the
+	## fixture's id (-1 = not), and how long the press was lost. Every one of them
+	## is set on sliders in front of the user (the user's wish, 22.10.2026).
 	var radius_fixture := -1
-	var radius_start := 0.0
-	var radius_start_distance := 0.0
 	var radius_lost := 0.0
-	## The handle held is a wall's bend handle, not its distance (or radius) one.
+	## The sliders are up (always, while a handle is held).
 	var radius_bend := false
-	## Which handle (HANDLE_*): a wall's size balls drag their own corner.
+	## Which handle (HANDLE_*): a wall's size balls change their own corner's sides.
 	var radius_kind := 0
+	## The screen whose grip is held (HANDLE_PANEL_*), or null.
+	var radius_panel: ScreenPanel
+	## Which of the sliders the ray works (0 the upper, 1 the lower; -1 none yet).
+	var slider_index := 0
 	## The settings slider this pointer is dragging, or null.
 	var slider: VrSlider
 	## Holding a wall grip's ring menu: the ray does not drive the cursor.
@@ -721,6 +725,23 @@ var _seat_eye_known := false
 var _bend_perf := {"frames": 0, "seconds": 0.0, "place": 0, "outline": 0, "seat": 0}
 var _bend_slider: VrSlider
 var _bend_label: Label3D
+## Two values on one plane (a wall's cells across and down, a screen's turn and
+## lean, the user's wish 22.10.2026), where the slider would be.
+var _pad: VrPad
+var _pad_label: Label3D
+## Screens on walls and columns turned left or right (radians, by monitor key; slice l).
+var _panel_yaws := {}
+## Screens placed freely on a wall or column in the "only VR" mode: monitor key ->
+## the middle (u, v) on it (slice l).
+var _wall_positions := {}
+## Where each screen on a wall stands now: its middle (u, v), and what it covers
+## of the wall (WallLayout.footprint), for the magnet.
+var _wall_middles := {}
+var _wall_spots := {}
+## Each column's axis in the world as last placed: the column stays there while
+## its distance, size, thickness or bend change, and the user is carried instead
+## (22.10.2026: changing the distance moved the column the user went round).
+var _column_axes := {}
 ## Where the bend slider is in the rig's space while it is up.
 var _bend_slider_local := Transform3D()
 ## While a panel on a wall is carried: that wall's cells as they will be.
@@ -786,12 +807,26 @@ const BEND_SLIDER_DROP := 0.12
 ## The "Заготовки" tab: a row per fixture and a row per monitor (pools, shown as needed).
 const FIXTURE_ROWS := 6
 ## Kinds of fixture handles: a sphere's radius / a wall's lower right size ball,
-## the wall's bend ball, and its size balls at the other corners.
+## the wall's bend ball, and its size balls at the other corners; its tilt ball over the top.
 const HANDLE_SIZE := 0
 const HANDLE_BEND := 1
-const HANDLE_KINDS := [0, 1, 2, 3, 4]
-## The corner each size handle drags (WallLayout.dragged_grid); the bend's is unused.
-const HANDLE_CORNERS: Array[Vector2i] = [Vector2i(1, 1), Vector2i(0, 0), Vector2i(-1, 1), Vector2i(-1, -1), Vector2i(1, -1)]
+const HANDLE_TILT := 5
+const HANDLE_KINDS := [0, 1, 2, 3, 4, 5]
+## A screen's grips, set on sliders like the fixtures' handles (not drawn as balls).
+const HANDLE_PANEL_TILT := 10
+const HANDLE_PANEL_CURVE := 11
+const HANDLE_PANEL_SIZE := 12
+const PANEL_GRIP_HANDLES := {ScreenPanel.Grip.TILT: HANDLE_PANEL_TILT, ScreenPanel.Grip.CURVE: HANDLE_PANEL_CURVE,
+		ScreenPanel.Grip.RESIZE: HANDLE_PANEL_SIZE}
+## The pad of two values (m).
+const PAD_SIZE := Vector2(0.5, 0.32)
+## Making a column thinner sticks to every 5 % within 1.5 %.
+const SQUEEZE_MAGNET_STEP := 0.05
+const SQUEEZE_MAGNET_REACH := 0.015
+## The magnet of screens placed freely on a wall (m).
+const FREE_MAGNET_REACH := 0.06
+## The corner whose sides each size handle moves (_slider_apply); the bend's and the tilt's are unused.
+const HANDLE_CORNERS: Array[Vector2i] = [Vector2i(1, 1), Vector2i(0, 0), Vector2i(-1, 1), Vector2i(-1, -1), Vector2i(1, -1), Vector2i(0, 0)]
 const FIXTURE_MONITOR_ROWS := 8
 const FIXTURE_RADIUS_STEP := 0.1
 var _fixture_rows: Array[Node3D] = []
@@ -1262,7 +1297,7 @@ func _update_locomotion(delta: float) -> void:
 	# Seated at a wall, the hands slide along it and bring it closer or farther
 	# (the user's wish, 21.10.2026: turning is not needed there).
 	var wall := WorldLayout.find(_fixtures, _seated) if seated else null
-	if wall != null and wall.kind != "wall":
+	if wall != null and not _walled(wall):
 		wall = null
 	var slide := Vector2.ZERO
 	var approach := 0.0
@@ -1367,7 +1402,12 @@ func _update_wall_seat(wall: WorldLayout.Fixture, slide_velocity: Vector2, appro
 	var moving := slide_velocity != Vector2.ZERO or approach != 0.0
 	if moving:
 		var area := WallLayout.area(_wall_grid(wall), wall.gap)
-		_seat_slide = (_seat_slide + slide_velocity * delta).clamp(area.position - WALL_SLIDE_MARGIN, area.end + WALL_SLIDE_MARGIN)
+		var shape := _wall_shape(wall)
+		var slid := _seat_slide + slide_velocity * delta
+		_seat_slide = slid.clamp(area.position - WALL_SLIDE_MARGIN, area.end + WALL_SLIDE_MARGIN)
+		if shape.bend >= 0.999:
+			# All the way round a closed one (a column above all), no end to it.
+			_seat_slide.x = WallLayout.wrapped(slid.x, shape.middle, shape)
 		if approach != 0.0:
 			# On a bent wall the seat goes back at most to the axis (WallLayout.seat_depth).
 			var farthest := WallLayout.max_distance(_wall_shape(wall), WorldLayout.MAX_RADIUS)
@@ -1380,7 +1420,7 @@ func _update_wall_seat(wall: WorldLayout.Fixture, slide_velocity: Vector2, appro
 	# While the bend slider is up the user stays put and the wall changes in front
 	# of them; they are carried once, when it is let go (21.10.2026: being carried
 	# and turned every frame made the bend jerky).
-	if _bend_slider != null and _bend_slider.visible:
+	if _sliders_up():
 		target = _seat_eye if _seat_eye_known else target
 	if _seat_eye_known and not target.is_equal_approx(_seat_eye):
 		var started := Time.get_ticks_usec()
@@ -1400,7 +1440,8 @@ func _update_wall_seat(wall: WorldLayout.Fixture, slide_velocity: Vector2, appro
 		_wall_seat_moving = moving
 		if not moving:
 			_save_settings()
-			print("[world] у «%s»: вдоль %+.2f м, вверх %+.2f м, до стены %.2f м" % [wall.name, _seat_slide.x, _seat_slide.y, wall.radius])
+			print("[world] у «%s»: вдоль %+.2f м, вверх %+.2f м, до %s %.2f м" % [wall.name, _seat_slide.x, _seat_slide.y,
+					"столба" if wall.kind == "column" else "стены", wall.radius])
 	_set_vignette(Locomotion.vignette_strength(_world.vignette, slide_velocity.length() + absf(approach), _world.move_speed,
 			0.0, deg_to_rad(_world.turn_speed_degrees)))
 
@@ -1526,7 +1567,7 @@ func _seat_offer_near(head: Vector3) -> WorldLayout.Fixture:
 	var best_distance := INF
 	for fixture in _fixtures:
 		var distance := head.distance_to(fixture.centre)
-		if fixture.kind == "wall":
+		if _walled(fixture):
 			var seen := WallLayout.project(fixture.frame().affine_inverse() * head, _wall_shape(fixture))
 			var area := WallLayout.area(_wall_grid(fixture), fixture.gap).grow(WALL_SEAT_MARGIN)
 			if seen.z < 0.0 or seen.z > fixture.radius + SEAT_REACH or not area.has_point(Vector2(seen.x, seen.y)):
@@ -1546,27 +1587,27 @@ func _sit() -> void:
 	var fixture := _sit_offer
 	_seated = fixture.id
 	_seat_slide = Vector2.ZERO
-	if fixture.kind == "wall":
+	if _walled(fixture):
 		# In front of the screen nearest to the user (the user's wish, 21.10.2026:
 		# the seat's middle had drifted below the wall as screens were moved).
 		var seen := WallLayout.project(fixture.frame().affine_inverse() * _camera.global_position, _wall_shape(fixture))
 		_seat_slide = WallLayout.nearest_screen(_wall_cell_list(fixture), seen.x, seen.y, fixture.gap)
 	_origin.global_transform = _seat_rig(fixture)
-	if fixture.kind == "wall":
+	if _walled(fixture):
 		_apply_wall_windows(fixture)
 	for pointer in _pointers:
 		pointer.travel_anchors.clear()
 	_keep_world_in_place()
 	_save_settings()
 	_refresh_fixture_section()
-	print("[world] сел %s «%s» (%s %.2f м)" % ["у" if fixture.kind == "wall" else "в центре", fixture.name,
-			"до стены" if fixture.kind == "wall" else "радиус", fixture.radius])
+	print("[world] сел %s «%s» (%s %.2f м)" % ["у" if _walled(fixture) else "в центре", fixture.name,
+			{"wall": "до стены", "column": "до столба"}.get(fixture.kind, "радиус"), fixture.radius])
 
 
 ## The rig at a fixture's seat: a sphere's centre, or the place along a wall the
 ## seat has slid to, facing the screens.
 func _seat_rig(fixture: WorldLayout.Fixture) -> Transform3D:
-	if fixture.kind == "wall":
+	if _walled(fixture):
 		# From here on _update_wall_seat carries the user along with this point.
 		_seat_eye = WorldLayout.wall_eyes(fixture, _seat_slide, _wall_shape(fixture))
 		_seat_eye_known = true
@@ -1612,7 +1653,8 @@ func _build_fixture_section(tab: Node3D) -> void:
 		_fixture_rows.append(row)
 	_add_button_to(tab, "Добавить шар здесь", Vector3(-0.66, -0.07, 0.0), Vector2(0.38, 0.07), 0.6).activated.connect(_on_fixture_add.bind("sphere"))
 	_add_button_to(tab, "Добавить стену здесь", Vector3(-0.24, -0.07, 0.0), Vector2(0.4, 0.07), 0.6).activated.connect(_on_fixture_add.bind("wall"))
-	_fixture_status = _settings_label("«Сюда» — место заготовки в вашу голову, лицом туда, куда смотрите.\nШар: радиус — и шарик внизу перед местом. Стена: кнопки — расстояние и зазор между клетками,\nшарик справа внизу — размер (наведите, куда встанет угол), слева — изгиб (вбок).",
+	_add_button_to(tab, "Добавить столб здесь", Vector3(0.2, -0.07, 0.0), Vector2(0.4, 0.07), 0.6).activated.connect(_on_fixture_add.bind("column"))
+	_fixture_status = _settings_label("«Сюда» — место заготовки в вашу голову, лицом туда, куда смотрите.\nШар: радиус — и шарик внизу перед местом. Стена и столб: кнопки — расстояние и зазор между клетками,\nшарики у углов — размер (наведите, куда встанет угол), под серединой — изгиб (столб — охват), над ней — наклон.",
 			Vector3(-0.45, -0.17, 0.0), 20, tab)
 
 	_settings_label("Мониторы", Vector3(0.72, 0.53, 0.0), 28, tab)
@@ -1640,7 +1682,7 @@ func _refresh_fixture_section() -> void:
 			var fixture := _fixtures[r]
 			(row.get_node("Name") as Label3D).text = fixture.name + (" (сижу)" if fixture.id == _seated else "")
 			(row.get_node("Radius") as Label3D).text = "%.1f м" % fixture.radius
-			var wall := fixture.kind == "wall"
+			var wall := _walled(fixture)
 			for part: String in ["GapLess", "Gap", "GapMore"]:
 				(row.get_node(part) as Node3D).visible = wall
 			(row.get_node("Gap") as Label3D).text = "зазор %d см" % roundi(fixture.gap * 100.0)
@@ -1658,15 +1700,15 @@ func _on_fixture_radius(row: int, direction: float) -> void:
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
-	var farthest := WallLayout.max_distance(_wall_shape(fixture), WorldLayout.MAX_RADIUS) if fixture.kind == "wall" else WorldLayout.MAX_RADIUS
+	var farthest := WallLayout.max_distance(_wall_shape(fixture), WorldLayout.MAX_RADIUS) if _walled(fixture) else WorldLayout.MAX_RADIUS
 	fixture.radius = clampf(snappedf(minf(fixture.radius, farthest) + direction * FIXTURE_RADIUS_STEP, FIXTURE_RADIUS_STEP),
 			WorldLayout.MIN_RADIUS, farthest)
-	_fixture_changed("%s: %s %.1f м" % [fixture.name, "до стены" if fixture.kind == "wall" else "радиус", fixture.radius])
+	_fixture_changed("%s: %s %.1f м" % [fixture.name, {"wall": "до стены", "column": "до столба"}.get(fixture.kind, "радиус"), fixture.radius])
 
 
 ## A wall's gap between cells, a centimetre per press.
 func _on_fixture_gap(row: int, direction: float) -> void:
-	if row >= _fixtures.size() or _fixtures[row].kind != "wall":
+	if row >= _fixtures.size() or not _walled(_fixtures[row]):
 		return
 	var fixture := _fixtures[row]
 	fixture.gap = clampf(snappedf(fixture.gap + direction * 0.01, 0.01), 0.0, WallLayout.MAX_GAP)
@@ -1682,6 +1724,7 @@ func _on_fixture_here(row: int) -> void:
 	var head := _camera.global_transform
 	fixture.centre = head.origin
 	fixture.yaw = atan2(head.basis.z.x, head.basis.z.z)
+	_column_axes.erase(fixture.id)
 	_fixture_changed("%s: центр здесь" % fixture.name)
 
 
@@ -1714,6 +1757,7 @@ func _on_monitor_fixture(m: int) -> void:
 	var panel := _panels[m]
 	var next := _fixtures[(_fixtures.find(_fixture_of(panel)) + 1) % _fixtures.size()]
 	WorldLayout.assign(_fixtures, panel.monitor_key, next.id)
+	_wall_positions.erase(panel.monitor_key)
 	_fixture_changed("%s — на «%s»" % [panel.monitor_name, next.name])
 
 
@@ -1747,53 +1791,27 @@ func _update_radius_handles(delta: float) -> void:
 			if fixture == null:
 				pointer.radius_fixture = -1
 				continue
+			var panel := pointer.radius_panel
+			if pointer.radius_kind >= HANDLE_PANEL_TILT and not is_instance_valid(panel):
+				pointer.radius_fixture = -1
+				_hide_sliders()
+				continue
 			if pointer.active and pointer.pressed:
 				pointer.radius_lost = 0.0
-				var measure := _handle_measure(fixture, pointer.origin)
-				if fixture.kind == "wall" and not pointer.radius_bend:
-					# Where the ray points on the wall is where its lower right corner goes.
-					var at := _wall_hit(pointer, fixture)
-					if not is_nan(at.x):
-						var grid := WallLayout.dragged_grid(_wall_grid(fixture), _wall_cell_list(fixture), at.x, at.y, fixture.gap,
-								HANDLE_CORNERS[pointer.radius_kind])
-						if grid != fixture.grid:
-							fixture.grid = grid
-				elif pointer.radius_bend:
-					# Set on the slider that came up in front of the user, not by the hand
-					# in space: seated, the bend carries and turns the user, and the hand
-					# with them (the user's wish, 21.10.2026: the handle jumped).
-					_bend_slider.global_transform = _origin.global_transform * _bend_slider_local
-					var degrees := _bend_slider.value_from_ray(pointer.origin, pointer.direction)
-					# The ray ends on the slider's plane, also off the bar (the user's wish,
-					# 21.10.2026: it flew on to the wall behind).
-					var facing := _bend_slider.global_transform.basis.z.normalized()
-					var towards := pointer.direction.dot(facing)
-					if absf(towards) > 0.0001:
-						var along := (_bend_slider.global_position - pointer.origin).dot(facing) / towards
-						if along > 0.0:
-							pointer.hit_distance = minf(pointer.hit_distance, along)
-					var bend := fixture.bend if is_nan(degrees) else WallLayout.bend_from_degrees(degrees, WALL_BEND_MAGNET)
-					_bend_slider.set_value(bend * 360.0)
-					_bend_label.text = "изгиб стены %d°" % roundi(bend * 360.0)
-					if not is_equal_approx(bend, fixture.bend):
-						fixture.bend = bend
-						var started := Time.get_ticks_usec()
-						_place_panels()
-						_bend_perf["place"] += Time.get_ticks_usec() - started
-					_log_bend_perf(delta)
-				else:
-					var radius := WorldLayout.dragged_radius(pointer.radius_start, pointer.radius_start_distance, measure)
-					if not is_equal_approx(radius, fixture.radius):
-						fixture.radius = radius
-						_place_panels()
-				_show_radius_handle(fixture, ScreenPanel.GRIP_ACTIVE_COLOR, pointer.radius_kind)
+				_drag_sliders(pointer, fixture, delta)
+				if pointer.radius_kind < HANDLE_PANEL_TILT:
+					_show_radius_handle(fixture, ScreenPanel.GRIP_ACTIVE_COLOR, pointer.radius_kind)
 				continue
 			pointer.radius_lost += delta
 			if pointer.radius_lost >= GRAB_GRACE_SEC:
 				pointer.radius_fixture = -1
-				if pointer.radius_bend:
-					_bend_slider.visible = false
-				_fixture_changed(_handle_text(fixture, pointer.radius_bend))
+				pointer.radius_panel = null
+				_hide_sliders()
+				_fixture_changed(_handle_text(fixture, pointer.radius_kind, panel))
+				if _walled(fixture):
+					if _seated == fixture.id:
+						_apply_wall_windows(fixture)
+					_apply_wall_resolutions()
 			continue
 		if not pointer.active or pointer.grab_panel != null:
 			continue
@@ -1802,7 +1820,6 @@ func _update_radius_handles(delta: float) -> void:
 			for kind: int in HANDLE_KINDS:
 				if not _handle_on(fixture, kind):
 					continue
-				var bend := kind == HANDLE_BEND
 				var at := _handle_position(fixture, kind)
 				var along := (at - pointer.origin).dot(pointer.direction)
 				if along <= 0.0 or (pointer.origin + pointer.direction * along).distance_to(at) > RADIUS_HANDLE_HIT:
@@ -1810,15 +1827,7 @@ func _update_radius_handles(delta: float) -> void:
 				pointer.hit_distance = minf(pointer.hit_distance, along)
 				_show_radius_handle(fixture, ScreenPanel.GRIP_HOVER_COLOR, kind)
 				if pointer.just_pressed:
-					pointer.radius_fixture = fixture.id
-					pointer.radius_bend = bend
-					pointer.radius_kind = kind
-					pointer.radius_start = fixture.bend if bend else fixture.radius
-					pointer.radius_start_distance = _handle_measure(fixture, pointer.origin)
-					pointer.radius_lost = 0.0
-					if bend:
-						_show_bend_slider(fixture)
-					print("[world] %s: %s (%s)" % [fixture.name, "изгиб" if bend else ("размер" if fixture.kind == "wall" else "радиус"), pointer.mode])
+					_open_sliders(pointer, fixture, kind, null)
 				found = true
 				break
 			if found:
@@ -1830,11 +1839,10 @@ func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, kind: int) 
 	if i < 0 or i >= FIXTURE_ROWS:
 		return
 	var h := i + FIXTURE_ROWS * kind
-	var bend := kind == HANDLE_BEND
 	(_radius_handles[h].material_override as StandardMaterial3D).albedo_color = color
 	var label := _radius_labels[h]
 	label.visible = true
-	label.text = _handle_text(fixture, bend).trim_prefix(fixture.name + ": ")
+	label.text = _handle_text(fixture, kind).trim_prefix(fixture.name + ": ")
 	label.global_position = _handle_position(fixture, kind) + Vector3.UP * 0.07
 
 
@@ -1843,8 +1851,10 @@ func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, kind: int) 
 func _handle_on(fixture: WorldLayout.Fixture, kind: int) -> bool:
 	if not _handles_shown():
 		return false
-	if fixture.kind != "wall":
+	if not _walled(fixture):
 		return kind == HANDLE_SIZE and _world.sphere_handle == 1
+	if kind == HANDLE_TILT:
+		return _world.wall_tilt_handle == 1
 	return (_world.wall_bend_handle if kind == HANDLE_BEND else _world.wall_size_handle) == 1
 
 
@@ -1880,7 +1890,7 @@ func _update_split_grips() -> void:
 		if _world.split_handle != 1 or not _handles_shown() or not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0:
 			continue
 		for fixture in _fixtures:
-			if fixture.kind != "wall":
+			if not _walled(fixture):
 				continue
 			var at := _wall_hit(pointer, fixture)
 			if is_nan(at.x) or not WallLayout.area(_wall_grid(fixture), fixture.gap).grow(0.1).has_point(at):
@@ -2169,7 +2179,7 @@ func _try_start_wall_select() -> void:
 				or pointer.grab_panel != null or pointer.radius_fixture >= 0:
 			continue
 		for fixture in _fixtures:
-			if fixture.kind != "wall":
+			if not _walled(fixture):
 				continue
 			var at := _wall_hit(pointer, fixture)
 			if is_nan(at.x) or not WallLayout.area(_wall_grid(fixture), fixture.gap).has_point(at):
@@ -2332,7 +2342,7 @@ func _apply_wall_resolutions() -> void:
 	# Every wall at once: one at a time, a wall with nothing missing wiped out
 	# what the one before had found (22.10.2026: nothing showed on «Драйвер»).
 	for wall in _fixtures:
-		if wall.kind != "wall":
+		if not _walled(wall):
 			continue
 		var state := _saved_wall(wall)
 		for panel in _panels:
@@ -2392,13 +2402,19 @@ func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
 	if _panel_options.move_mode != 0:
 		return
 	var state := _saved_wall(wall)
+	var shape := _wall_shape(wall)
+	# Closed (a column above all): unrolled round where the user sits, the seam
+	# behind them (the user's choice, 22.10.2026).
+	var around := _seat_slide.x if _seated == wall.id else shape.middle
 	var on_wall: Array[int] = []
 	var areas: Array[Rect2] = []
 	var pixels: Array[Vector2i] = []
 	for i in _panels.size():
 		if _fixture_of(_panels[i]) == wall and state.has(_panels[i].monitor_key):
 			on_wall.append(i)
-			areas.append(WallLayout.screen_area(state, _panels[i].monitor_key, wall.gap))
+			var spot := WallLayout.screen_area(state, _panels[i].monitor_key, wall.gap)
+			spot.position.x = WallLayout.wrapped(spot.get_center().x, around, shape) - spot.size.x * 0.5
+			areas.append(spot)
 			pixels.append(_panels[i].monitor_rect.size)
 	if on_wall.is_empty():
 		return
@@ -2431,7 +2447,7 @@ func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
 	for i in _panels.size():
 		positions[_panels[i].monitor_name] = rects[i].position
 	_layout_pending = rects
-	print("[world] раскладка Windows — как на «%s»: %s" % [wall.name, positions])
+	print("[world] раскладка Windows — как %s «%s»: %s" % ["у" if wall.kind == "column" else "на", wall.name, positions])
 	if _topology.busy:
 		_queued_positions = positions
 		_vdd_message = "раскладка по стене: жду предыдущее изменение…"
@@ -2440,12 +2456,17 @@ func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
 		_topology.arrange(positions)
 
 
-func _handle_text(fixture: WorldLayout.Fixture, bend: bool) -> String:
-	if bend:
-		return "%s: изгиб стены %d°" % [fixture.name, roundi(fixture.bend * 360.0)]
-	if fixture.kind == "wall":
+func _handle_text(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel = null) -> String:
+	if panel != null and kind >= HANDLE_PANEL_TILT:
+		var parts := PackedStringArray()
+		for k in _slider_specs(fixture, kind, panel).size():
+			parts.append(_slider_text(fixture, kind, panel, k, _slider_value(fixture, kind, panel, k)))
+		return "%s: %s" % [panel.monitor_name, ", ".join(parts)]
+	if kind == HANDLE_BEND or kind == HANDLE_TILT:
+		return "%s: %s" % [fixture.name, _slider_text(fixture, kind, null, 0, _slider_value(fixture, kind, null, 0))]
+	if _walled(fixture):
 		var grid := _wall_grid(fixture)
-		return "%s: стена %d×%d клеток" % [fixture.name, grid.size.x, grid.size.y]
+		return "%s: %s %d×%d клеток" % [fixture.name, "столб" if fixture.kind == "column" else "стена", grid.size.x, grid.size.y]
 	return "%s: радиус шара %.2f м" % [fixture.name, fixture.radius]
 
 
@@ -2453,49 +2474,300 @@ func _handle_text(fixture: WorldLayout.Fixture, bend: bool) -> String:
 ## size balls past its corners (the user's wish, 22.10.2026: not only the lower
 ## right) and its bend ball under its middle (the distance is set by the buttons).
 func _handle_position(fixture: WorldLayout.Fixture, kind := HANDLE_SIZE) -> Vector3:
-	if fixture.kind != "wall":
+	if not _walled(fixture):
 		return WorldLayout.radius_handle(fixture)
 	var grid := _wall_grid(fixture)
-	var point := WallLayout.bend_handle_point(grid, fixture.gap) if kind == HANDLE_BEND \
-			else WallLayout.size_handle_point(grid, fixture.gap, HANDLE_CORNERS[kind])
+	var point := WallLayout.size_handle_point(grid, fixture.gap, HANDLE_CORNERS[kind])
+	if kind == HANDLE_BEND:
+		point = WallLayout.bend_handle_point(grid, fixture.gap)
+	elif kind == HANDLE_TILT:
+		point = WallLayout.tilt_handle_point(grid, fixture.gap)
 	return (fixture.frame() * WallLayout.surface(point.x, point.y, 0.04, _wall_shape(fixture))).origin
 
 
-## What dragging a sphere's radius handle measures: the hand's distance from its
-## centre. (A wall's size follows the ray on the wall, its bend the bend slider.)
-func _handle_measure(fixture: WorldLayout.Fixture, point: Vector3) -> float:
-	return point.distance_to(fixture.centre)
+## The sliders for a held handle or grip (the user's wish, 22.10.2026: dragging
+## in space did not work where the user is carried along — a column's size —
+## so every handle is set this way): one or two, each [low, high, step of the
+## marks, step of the value (0 = by the fixture's own magnet)].
+func _slider_specs(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel) -> Array:
+	var walled := _walled(fixture)
+	var top := rad_to_deg(WallLayout.MAX_TILT)
+	match kind:
+		HANDLE_BEND:
+			return [[0.0, 360.0, 45.0, 0.0]]
+		HANDLE_TILT:
+			return [[-top, top, 15.0, 0.0]]
+		HANDLE_PANEL_TILT:
+			# On a wall or a column a screen also turns left and right (across the pad)
+			# besides leaning (up it); on a sphere it only leans.
+			return [[-75.0, 75.0, 15.0, 1.0], [-75.0, 75.0, 15.0, 1.0]] if walled else [[-75.0, 75.0, 15.0, 1.0]]
+		HANDLE_PANEL_CURVE:
+			return [[-1.0, 1.0, 0.25, 0.05]] if walled else [[0.0, 1.0, 0.25, 0.05]]
+		HANDLE_PANEL_SIZE:
+			if _wall_cells_sized(fixture, panel):
+				return [[1.0, float(WallLayout.MAX_SPAN), 1.0, 1.0], [1.0, float(WallLayout.MAX_SPAN), 1.0, 1.0]]
+			return [[PANEL_SCALE_MIN, PANEL_SCALE_MAX, 0.25, 0.05]]
+	if walled:
+		var grid := _wall_grid(fixture)
+		# Bent, it can be made thinner than its cells (below the fewest that hold its
+		# screens), only to look at: the screens keep their size and order round it.
+		var least := float(_wall_least_width(fixture))
+		var thinnest := least * WallLayout.MIN_SQUEEZE if _wall_shape(fixture).bent() else 1.0
+		return [[thinnest, float(maxi(20, grid.size.x + 6)), 1.0, 0.0 if thinnest < least else 1.0],
+				[1.0, float(maxi(12, grid.size.y + 4)), 1.0, 1.0]]
+	return [[WorldLayout.MIN_RADIUS, WorldLayout.MAX_RADIUS, 0.5, 0.1]]
 
 
-## The bend slider: comes up in front of the user when a wall's bend handle is
-## taken, 0..360° (marks every 45°, the magnet every 15°), and goes with the user
-## (kept in the rig's space) while the bend carries them.
-func _show_bend_slider(fixture: WorldLayout.Fixture) -> void:
+## The fewest cells across that hold a wall's screens.
+func _wall_least_width(fixture: WorldLayout.Fixture) -> int:
+	return maxi(WallLayout.settle_grid(Rect2i(), _wall_cell_list(fixture)).size.x, 1)
+
+
+## Whether a handle's sliders or pad are up (the seat then stays put).
+func _sliders_up() -> bool:
+	return (_bend_slider != null and _bend_slider.visible) or (_pad != null and _pad.visible)
+
+
+func _hide_sliders() -> void:
+	_bend_slider.visible = false
+	_pad.visible = false
+
+
+## A screen on a wall sized by cells (the Windows layout's mode, on whole cells),
+## not by a scale.
+func _wall_cells_sized(fixture: WorldLayout.Fixture, panel: ScreenPanel) -> bool:
+	return _walled(fixture) and _panel_options.move_mode == 0 and panel != null and not fixture.parts.has(panel.monitor_key)
+
+
+## What slider `index` shows now.
+func _slider_value(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel, index: int) -> float:
+	match kind:
+		HANDLE_BEND:
+			return fixture.bend * 360.0
+		HANDLE_TILT:
+			return rad_to_deg(fixture.tilt)
+		HANDLE_PANEL_TILT:
+			if _tilt_turns(fixture, index):
+				return rad_to_deg(float(_panel_yaws.get(panel.monitor_key, 0.0)))
+			return rad_to_deg(panel.placement.pitch)
+		HANDLE_PANEL_CURVE:
+			return panel.placement.curvature
+		HANDLE_PANEL_SIZE:
+			if _wall_cells_sized(fixture, panel):
+				var cells := WallLayout.screen_cells(_saved_wall(fixture), panel.monitor_key)
+				return float(cells.size.x if index == 0 else cells.size.y)
+			return _panel_scales.get(panel.monitor_key, 1.0)
+	if _walled(fixture):
+		var grid := _wall_grid(fixture)
+		if index == 0 and fixture.squeeze < 1.0:
+			return _wall_least_width(fixture) * fixture.squeeze
+		return float(grid.size.x if index == 0 else grid.size.y)
+	return fixture.radius
+
+
+## A wall's or column's screen: the first value of its tilt is the turn (across
+## the pad), the second the lean; on a sphere the only one is the lean.
+func _tilt_turns(fixture: WorldLayout.Fixture, index: int) -> bool:
+	return _walled(fixture) and index == 0
+
+
+func _slider_text(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel, index: int, value: float) -> String:
+	var column := fixture.kind == "column"
+	match kind:
+		HANDLE_BEND:
+			return ("охват столба %d°" if column else "изгиб стены %d°") % roundi(value)
+		HANDLE_TILT:
+			return "наклон %s %+d°" % ["столба" if column else "стены", roundi(value)]
+		HANDLE_PANEL_TILT:
+			return ("поворот вправо-влево %+d°" if _tilt_turns(fixture, index) else "наклон вверх-вниз %+d°") % roundi(value)
+		HANDLE_PANEL_CURVE:
+			return "изгиб %+.2f%s" % [value, " (вогнуто)" if value > 0.0 else (" (выпукло)" if value < 0.0 else "")]
+		HANDLE_PANEL_SIZE:
+			if _wall_cells_sized(fixture, panel):
+				return ("клеток в ширину %d" if index == 0 else "клеток в высоту %d") % roundi(value)
+			return "размер %.2f" % value
+	if _walled(fixture):
+		if index == 0 and value < _wall_least_width(fixture) - 0.01:
+			return "тоньше клеток: %d %%" % roundi(value / _wall_least_width(fixture) * 100.0)
+		return ("клеток в ширину %d" if index == 0 else "клеток в высоту %d") % roundi(value)
+	return "радиус шара %.1f м" % value
+
+
+## Slider `index` set to `value`: the fixture or screen changes live.
+func _slider_apply(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel, index: int, value: float) -> void:
+	var key := panel.monitor_key if panel != null else ""
+	match kind:
+		HANDLE_BEND:
+			fixture.bend = WallLayout.bend_from_degrees(value, WALL_BEND_MAGNET)
+		HANDLE_TILT:
+			fixture.tilt = WallLayout.tilt_from_degrees(value, WALL_BEND_MAGNET)
+		HANDLE_PANEL_TILT:
+			if _tilt_turns(fixture, index):
+				_panel_yaws[key] = deg_to_rad(value)
+			elif _walled(fixture):
+				_panel_pitches[key] = deg_to_rad(value)
+			else:
+				_set_pitch(panel, deg_to_rad(value))
+		HANDLE_PANEL_CURVE:
+			if value != 0.0 or _walled(fixture):
+				_panel_curvatures[key] = value
+			else:
+				_panel_curvatures.erase(key)
+		HANDLE_PANEL_SIZE:
+			if _wall_cells_sized(fixture, panel):
+				var saved := _saved_wall(fixture)
+				var cells := WallLayout.screen_cells(saved, key)
+				var size := cells.size
+				size[index] = roundi(value)
+				var resized := WallLayout.onto_cells(saved, key, Rect2i(cells.position, size))
+				fixture.cells = resized.cells
+				fixture.parts = resized.parts
+				fixture.splits = resized.splits
+				fixture.blocks = resized.blocks
+				fixture.grid = _wall_grid(fixture)
+			else:
+				_panel_scales[key] = value
+		_:
+			if _walled(fixture):
+				# The size from the corner held: its sides move, the others stay.
+				var corner := HANDLE_CORNERS[kind]
+				var grid := _wall_grid(fixture)
+				var count := roundi(value)
+				if index == 0:
+					# Below the fewest cells that hold the screens (bent only): thinner, the cells stay.
+					var least := _wall_least_width(fixture)
+					var thinner := value < least - 0.01 and _wall_shape(fixture).bent()
+					var share := value / least
+					# The magnet every 5 % (the user's wish, 22.10.2026).
+					if absf(share - snappedf(share, SQUEEZE_MAGNET_STEP)) < SQUEEZE_MAGNET_REACH:
+						share = snappedf(share, SQUEEZE_MAGNET_STEP)
+					fixture.squeeze = clampf(share, WallLayout.MIN_SQUEEZE, 1.0) if thinner else 1.0
+					count = maxi(count, least)
+					if corner.x < 0:
+						grid.position.x = grid.end.x - count
+					grid.size.x = count
+				else:
+					if corner.y < 0:
+						grid.position.y = grid.end.y - count
+					grid.size.y = count
+				fixture.grid = WallLayout.settle_grid(grid, _wall_cell_list(fixture))
+				var kept := WallLayout.pruned(_saved_wall(fixture), fixture.grid)
+				if kept.splits.size() != fixture.splits.size() or kept.blocks.size() != fixture.blocks.size() \
+						or kept.parts.size() != fixture.parts.size():
+					fixture.splits = kept.splits
+					fixture.blocks = kept.blocks
+					fixture.parts = kept.parts
+			else:
+				fixture.radius = value
+	_place_panels()
+
+
+## A handle or a screen's grip taken: its sliders come up in front of the user,
+## and go with the user (kept in the rig's space) while a bend carries them.
+func _open_sliders(pointer: Pointer, fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel) -> void:
+	pointer.radius_fixture = fixture.id
+	pointer.radius_bend = true
+	pointer.radius_kind = kind
+	pointer.radius_panel = panel
+	pointer.radius_lost = 0.0
+	# None yet: nothing changes until the ray has been on the slider or pad (else the
+	# value jumped to wherever the ray crossed its plane when the grip was taken).
+	pointer.slider_index = -1
 	var head := _camera.global_transform
 	var ahead := Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
 	var placed := Transform3D(Basis.looking_at(ahead, Vector3.UP), head.origin + ahead * BEND_SLIDER_AHEAD + Vector3.DOWN * BEND_SLIDER_DROP)
 	_bend_slider_local = _origin.global_transform.affine_inverse() * placed
-	_bend_slider.global_transform = placed
-	_bend_slider.set_value(fixture.bend * 360.0)
-	_bend_slider.set_active(true, true)
-	_bend_label.text = "изгиб стены %d°" % roundi(fixture.bend * 360.0)
-	_bend_slider.visible = true
+	var specs := _slider_specs(fixture, kind, panel)
+	var two := specs.size() == 2
+	_bend_slider.visible = not two
+	_pad.visible = two
+	if two:
+		var across: Array = specs[0]
+		var up: Array = specs[1]
+		_pad.global_transform = placed
+		_pad.set_ranges(Vector2(across[0], up[0]), Vector2(across[1], up[1]), Vector2(across[2], up[2]), Vector2(across[3], up[3]))
+	else:
+		var spec: Array = specs[0]
+		_bend_slider.global_transform = placed
+		_bend_slider.set_range(spec[0], spec[1], spec[2])
+		_bend_slider.step = spec[3]
+		if spec[3] == 0.0:
+			# The marks only; the magnet is the fixture's own.
+			_bend_slider.notches = PackedFloat32Array()
+		_bend_slider.set_active(true, true)
+	_show_slider_values(fixture, kind, panel)
+	print("[world] %s (%s)" % [_handle_text(fixture, kind, panel), pointer.mode])
+
+
+## The slider's or pad's knob and text from the values as they are now.
+func _show_slider_values(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel) -> void:
+	if _pad.visible:
+		var values := Vector2(_slider_value(fixture, kind, panel, 0), _slider_value(fixture, kind, panel, 1))
+		_pad.set_value(values)
+		_pad_label.text = "%s\n%s" % [_slider_text(fixture, kind, panel, 1, values.y), _slider_text(fixture, kind, panel, 0, values.x)]
+	else:
+		var value := _slider_value(fixture, kind, panel, 0)
+		_bend_slider.set_value(value)
+		_bend_label.text = _slider_text(fixture, kind, panel, 0, value)
+
+
+## The held handle's sliders: the one the ray is on (or was on last) takes the
+## value where the ray crosses its plane, also off the bar (the user's wish,
+## 21.10.2026: it flew on to the wall behind).
+func _drag_sliders(pointer: Pointer, fixture: WorldLayout.Fixture, delta: float) -> void:
+	var placed := _origin.global_transform * _bend_slider_local
+	var control: Node3D = _pad if _pad.visible else _bend_slider
+	control.global_transform = placed
+	var on := _pad.hit_distance(pointer.origin, pointer.direction) if _pad.visible \
+			else _bend_slider.hit_distance(pointer.origin, pointer.direction)
+	if on >= 0.0:
+		pointer.slider_index = 0
+	if pointer.slider_index < 0:
+		return
+	var facing := placed.basis.z.normalized()
+	var towards := pointer.direction.dot(facing)
+	if absf(towards) > 0.0001:
+		var along := (placed.origin - pointer.origin).dot(facing) / towards
+		if along > 0.0:
+			pointer.hit_distance = minf(pointer.hit_distance, along)
+	var kind := pointer.radius_kind
+	var panel := pointer.radius_panel
+	var started := Time.get_ticks_usec()
+	if _pad.visible:
+		var values := _pad.values_from_ray(pointer.origin, pointer.direction)
+		for k in 2:
+			if not is_nan(values[k]) and not is_equal_approx(values[k], _slider_value(fixture, kind, panel, k)):
+				_slider_apply(fixture, kind, panel, k, values[k])
+	else:
+		var value := _bend_slider.value_from_ray(pointer.origin, pointer.direction)
+		if not is_nan(value) and not is_equal_approx(value, _slider_value(fixture, kind, panel, 0)):
+			_slider_apply(fixture, kind, panel, 0, value)
+	_bend_perf["place"] += Time.get_ticks_usec() - started
+	_show_slider_values(fixture, kind, panel)
+	if kind == HANDLE_BEND or kind == HANDLE_TILT:
+		_log_bend_perf(delta)
 
 
 func _build_bend_slider() -> void:
 	_bend_slider = VrSlider.new(BEND_SLIDER_WIDTH)
-	_bend_slider.set_range(0.0, 360.0, 45.0)
-	# The marks stay every 45°; the value is the slider's own, the magnet the wall's.
-	_bend_slider.notches = PackedFloat32Array()
-	_bend_slider.step = 0.0
 	_bend_slider.visible = false
 	add_child(_bend_slider)
-	_bend_label = Label3D.new()
-	_bend_label.pixel_size = 0.001
-	_bend_label.font_size = 28
-	_bend_label.outline_size = 8
-	_bend_label.position = Vector3(0.0, 0.05, 0.002)
-	_bend_slider.add_child(_bend_label)
+	_bend_label = _slider_label(_bend_slider)
+	_pad = VrPad.new(PAD_SIZE)
+	_pad.visible = false
+	add_child(_pad)
+	_pad_label = _slider_label(_pad)
+	_pad_label.position = Vector3(0.0, PAD_SIZE.y * 0.5 + 0.05, 0.002)
+
+
+func _slider_label(slider: Node3D) -> Label3D:
+	var label := Label3D.new()
+	label.pixel_size = 0.001
+	label.font_size = 28
+	label.outline_size = 8
+	label.position = Vector3(0.0, 0.05, 0.002)
+	slider.add_child(label)
+	return label
 
 
 ## Thin outlines of the fixtures, so their shape is seen (the user's wish,
@@ -2508,17 +2780,17 @@ func _update_outlines() -> void:
 		var backing := _backings[i]
 		outline.visible = fixture != null and _world.outlines == 1
 		# A wall's body is always there; the outlines can be switched off.
-		backing.visible = fixture != null and fixture.kind == "wall"
+		backing.visible = fixture != null and _walled(fixture)
 		if fixture == null:
 			continue
-		var grid := _wall_grid(fixture) if fixture.kind == "wall" else Rect2i()
-		var key := str([fixture.kind, fixture.radius, fixture.bend, fixture.gap, grid])
-		var drawn_for: WallLayout.Wall = _saved_wall(fixture) if fixture.kind == "wall" else null
+		var grid := _wall_grid(fixture) if _walled(fixture) else Rect2i()
+		var key := str([fixture.kind, fixture.radius, fixture.bend, fixture.tilt, fixture.squeeze, fixture.gap, grid])
+		var drawn_for: WallLayout.Wall = _saved_wall(fixture) if _walled(fixture) else null
 		if key != _outline_keys[i] or drawn_for != _outline_walls[i]:
 			_outline_keys[i] = key
 			_outline_walls[i] = drawn_for
 			var started := Time.get_ticks_usec()
-			if fixture.kind == "wall":
+			if _walled(fixture):
 				var shape := _wall_shape(fixture)
 				outline.mesh = _line_mesh(WallLayout.outline(grid, fixture.gap, shape, _saved_wall(fixture)), Mesh.PRIMITIVE_LINES)
 				backing.mesh = _line_mesh(WallLayout.backing(grid, fixture.gap, shape), Mesh.PRIMITIVE_TRIANGLES)
@@ -2546,6 +2818,9 @@ func _log_bend_perf(delta: float) -> void:
 
 
 func _line_mesh(points: PackedVector3Array, primitive: Mesh.PrimitiveType) -> ArrayMesh:
+	# Nothing to draw: no mesh, not an empty one (an error every frame).
+	if points.is_empty():
+		return null
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = points
@@ -3508,13 +3783,24 @@ func _rebuild_panels() -> void:
 		print("[world] экраны драйвера с новыми именами заняли места пропавших: %s" % adopted)
 		_save_settings()
 	WorldLayout.settle(_fixtures, keys)
+	# No memory of cells outside a wall's size (saved before it was forgotten on resizing).
+	for fixture in _fixtures:
+		# Against its saved size only (it only grows by itself; without screens yet,
+		# e.g. while the driver restarts, nothing is forgotten).
+		if _walled(fixture) and fixture.grid.has_area():
+			var kept := WallLayout.pruned(_saved_wall(fixture), fixture.grid)
+			if kept.splits.size() != fixture.splits.size() or kept.blocks.size() != fixture.blocks.size():
+				fixture.splits = kept.splits
+				fixture.blocks = kept.blocks
+				fixture.parts = kept.parts
+				print("[world] %s: забыты клетки за краем" % fixture.name)
 	_refresh_fixture_section()
 	_place_panels([], true)
 	# Seated at a wall, Windows follows it again (22.10.2026: after a start or a
 	# resolution change the positions stayed as they were; sizes change with
 	# resolutions, so the layout is worked out anew).
 	var seat := WorldLayout.find(_fixtures, _seated)
-	if seat != null and seat.kind == "wall":
+	if seat != null and _walled(seat):
 		_apply_wall_windows(seat)
 	# «Разрешение по клетке» goes one screen at a time: the next after each rebuild.
 	_apply_wall_resolutions()
@@ -3544,7 +3830,8 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 		panel.vr_scale = _panel_scales.get(panel.monitor_key, 1.0)
 		scales.append(panel.vr_scale)
 		pitches.append(_pitch_of(panel.monitor_key, row_offsets[i]))
-		curvatures.append(_panel_curvatures.get(panel.monitor_key, 0.0))
+		# Bent the other way only on walls and columns.
+		curvatures.append(maxf(_panel_curvatures.get(panel.monitor_key, 0.0), 0.0))
 	# Each fixture lays out its own monitors in its own space (centre at the origin,
 	# its middle along -Z), then the panels go where the fixture is (slice j).
 	var placements: Array[PanelLayout.Placement] = []
@@ -3556,7 +3843,7 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 				members.append(i)
 		if members.is_empty():
 			continue
-		if fixture.kind == "wall":
+		if _walled(fixture):
 			_place_wall(fixture, members, rects, primary_index, placements)
 			continue
 		var sub_rects: Array[Rect2i] = []
@@ -3604,26 +3891,67 @@ func _place_wall(fixture: WorldLayout.Fixture, members: Array[int], rects: Array
 	fixture.cells = WallLayout.settle(fixture.cells, keys, member_rects, maxi(members.find(primary_index), 0),
 			fixture.parts, WallLayout.split_cells(fixture.splits, fixture.blocks))
 	fixture.grid = WallLayout.settle_grid(fixture.grid, _wall_cell_list(fixture))
+	_hold_column_axis(fixture)
 	var wall := _wall_state(fixture)
 	var shape := _wall_shape(fixture)
+	var free := _panel_options.move_mode == 1
 	for k in members.size():
 		var i := members[k]
 		var spot := WallLayout.screen_area(wall, keys[k], fixture.gap)
+		var scale := 1.0
+		if free:
+			# Only VR: its size in VR, wherever it was put (else in its cells).
+			scale = _panel_scales.get(keys[k], 1.0)
+			var at: Variant = _wall_positions.get(keys[k])
+			var centre: Vector2 = at if at is Vector2 else spot.get_center()
+			spot = Rect2(centre - spot.size * scale * 0.5, spot.size * scale)
 		var middle := spot.get_center()
 		var local := WallLayout.surface(middle.x, middle.y, 0.0, shape)
 		var placement := PanelLayout.Placement.new()
 		# Scaled to fill its cell or part (the user's wish, 22.10.2026: fitted it was
 		# much smaller); the resolution follows only with «Разрешение по клетке».
 		placement.size = spot.size
-		# Bent, every panel is curved like the wall: the same radius round the same axis.
-		placement.curvature = 1.0 if shape.bent() else 0.0
+		# Each screen's own lean and bend, either way (slice l, the user's wish
+		# 22.10.2026). Unset, on a wall bent inwards it is curved like the wall (the
+		# same radius round the same axis), elsewhere flat; curvature 1 / -1 is the
+		# wall's (or column's) own radius at that height, on a flat wall the seat's distance.
+		placement.pitch = _panel_pitches.get(keys[k], 0.0)
+		if is_nan(placement.pitch):
+			placement.pitch = 0.0
+		placement.curvature = _panel_curvatures.get(keys[k], 1.0 if shape.bent() and not shape.outside else 0.0)
+		var reach := fixture.radius
+		if shape.bent():
+			reach = maxf(shape.radius() + shape.flare() * local.origin.y, 0.05)
+		var yaw: float = _panel_yaws.get(keys[k], 0.0)
+		# Never into the wall or column (the user's wish, 22.10.2026: a tilted screen
+		# went through the column): out by how far its edges would go behind it.
+		var face := local.basis.z
+		local = local * Transform3D(Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, -placement.pitch))
+		var lift := WallLayout.lift(shape, reach, spot.size, placement.curvature, placement.pitch, yaw)
+		local.origin += face * lift
+		var covers := WallLayout.footprint(shape, reach, spot.size, placement.curvature, placement.pitch, yaw, lift)
+		_wall_middles[keys[k]] = middle
+		_wall_spots[keys[k]] = Rect2(middle + covers.position, covers.size)
 		var direction := local.origin.normalized()
 		placement.heading = atan2(direction.x, -direction.z)
 		placement.elevation = asin(clampf(direction.y, -1.0, 1.0))
 		placement.transform = fixture.frame() * local
 		placements[i] = placement
-		_panels[i].vr_scale = 1.0
-		_panels[i].distance = shape.radius() if shape.bent() else fixture.radius
+		_panels[i].vr_scale = scale
+		_panels[i].distance = reach
+
+
+## A column keeps its axis where it was in the world: whatever changed its shape,
+## its centre (the seat's middle) moves by as much the other way.
+func _hold_column_axis(fixture: WorldLayout.Fixture) -> void:
+	if fixture.kind != "column":
+		return
+	var axis := fixture.frame() * _wall_shape(fixture).axis()
+	var held: Variant = _column_axes.get(fixture.id)
+	if held is Vector3 and not (held as Vector3).is_equal_approx(axis):
+		fixture.centre += (held as Vector3) - axis
+		axis = held
+	_column_axes[fixture.id] = axis
 
 
 ## A wall's screens as saved: on whole cells, in parts, its splits. The same
@@ -3675,7 +4003,8 @@ func _wall_hit(pointer: Pointer, fixture: WorldLayout.Fixture) -> Vector2:
 
 ## A wall's shape now: its distance, bend, and middle and length from its size.
 func _wall_shape(fixture: WorldLayout.Fixture) -> WallLayout.Shape:
-	return WallLayout.shape_of(_wall_grid(fixture), fixture.gap, fixture.radius, fixture.bend)
+	return WallLayout.shape_of(_wall_grid(fixture), fixture.gap, fixture.radius, fixture.bend, fixture.kind == "column", fixture.tilt,
+			fixture.squeeze)
 
 
 ## Each monitor's row, counted from the primary's (-1 = the row above it).
@@ -3727,10 +4056,13 @@ func _allowed_grips(panel: ScreenPanel) -> Array:
 	if _gesture_settings.grab_mode <= 1:
 		grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
 		var fixture := _fixture_of(panel)
-		if fixture.kind == "wall":
-			# On a wall a panel stands upright in its cells; the whole wall bends. A
-			# screen in a part of a split cell has the part's size.
-			grips = [ScreenPanel.Grip.MOVE] if fixture.parts.has(panel.monitor_key) else [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE]
+		if _walled(fixture):
+			# On a wall a panel stands in its cells (or freely, only in VR), leaning,
+			# turned and bent as set (slice l). A screen in a part of a split cell has
+			# the part's size, unless sized in VR.
+			grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
+			if not fixture.parts.has(panel.monitor_key) or _panel_options.move_mode == 1:
+				grips.append(ScreenPanel.Grip.RESIZE)
 		if not panel.primary:
 			grips.append(ScreenPanel.Grip.PRIMARY)
 	if _panel_options.monitor_menu != 0:
@@ -3759,7 +4091,7 @@ func _update_grabs(delta: float) -> void:
 				if pointer.grab_lost_sec >= (FIST_GRACE_SEC if pointer.grab_by_fist else GRAB_GRACE_SEC):
 					_end_grab(pointer)
 			continue
-		if carrying or not pointer.active:
+		if carrying or not pointer.active or pointer.radius_fixture >= 0:
 			continue
 		var target: ScreenPanel = null
 		var kind := 0
@@ -3783,6 +4115,9 @@ func _update_grabs(delta: float) -> void:
 			_make_primary(target)
 		elif target != null and kind == ScreenPanel.Grip.MENU:
 			_toggle_monitor_menu(target)
+		elif target != null and PANEL_GRIP_HANDLES.has(kind):
+			# Tilt, bend and size are set on sliders (the user's wish, 22.10.2026).
+			_open_sliders(pointer, _fixture_of(target), PANEL_GRIP_HANDLES[kind], target)
 		elif target != null and _start_grab(pointer, target, kind, by_fist):
 			carrying = true
 
@@ -3796,6 +4131,9 @@ func _update_grabs(delta: float) -> void:
 			if pointer.grab_panel == panel:
 				near = true
 				held = pointer.grab_kind
+			elif pointer.radius_panel == panel and pointer.radius_fixture >= 0:
+				near = true
+				held = PANEL_GRIP_HANDLES.find_key(pointer.radius_kind)
 			elif pointer.active and pointer.grab_panel == null and panel.is_near(pointer.origin, pointer.direction):
 				near = true
 				var hit := panel.grip_at(pointer.origin, pointer.direction, allowed)
@@ -3822,6 +4160,11 @@ func _make_primary(panel: ScreenPanel) -> void:
 	else:
 		_vdd_message = "делаю %s основным…" % panel.monitor_name
 		_topology.arrange(positions)
+
+
+## A wall, or a column (a wall bent outwards, slice l).
+func _walled(fixture: WorldLayout.Fixture) -> bool:
+	return fixture != null and (fixture.kind == "wall" or fixture.kind == "column")
 
 
 ## The fixture a panel hangs on.
@@ -3852,7 +4195,7 @@ func _windows_moves() -> bool:
 
 func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool) -> bool:
 	var fixture := _fixture_of(panel)
-	if fixture.kind == "wall":
+	if _walled(fixture):
 		return _start_wall_grab(pointer, panel, kind, by_fist, fixture)
 	var angles := _fixture_angles(pointer, fixture)
 	if is_nan(angles.x):
@@ -3865,10 +4208,6 @@ func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool)
 	pointer.snap_held = Vector2(NAN, NAN)
 	pointer.grab_centre = Vector2(panel.placement.heading, panel.placement.elevation)
 	pointer.grab_offset = angles - pointer.grab_centre
-	pointer.grab_scale = panel.vr_scale
-	pointer.grab_angle = maxf(PanelLayout.direction_of(pointer.grab_centre.x, pointer.grab_centre.y).angle_to(
-			PanelLayout.direction_of(angles.x, angles.y)), 0.01)
-	pointer.grab_value = panel.placement.pitch if kind == ScreenPanel.Grip.TILT else panel.placement.curvature
 	if kind == ScreenPanel.Grip.MOVE:
 		# From the layout as it will be: a change may still be on its way to Windows.
 		_drag_rects = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
@@ -3893,52 +4232,6 @@ func _drag(pointer: Pointer) -> void:
 	if is_nan(angles.x):
 		return
 	var magnet := _panel_options.magnet != 0
-	match pointer.grab_kind:
-		ScreenPanel.Grip.RESIZE:
-			var centre := PanelLayout.direction_of(pointer.grab_centre.x, pointer.grab_centre.y)
-			var ratio := centre.angle_to(PanelLayout.direction_of(angles.x, angles.y)) / pointer.grab_angle
-			var scale := clampf(pointer.grab_scale * ratio, PANEL_SCALE_MIN, PANEL_SCALE_MAX)
-			if magnet:
-				# As wide or as tall as another panel, or the original size.
-				var others: Array[Vector2] = []
-				for other in _panels:
-					if other != panel:
-						others.append(other.placement.size)
-				scale = PanelLayout.snap_scale(scale, panel.placement.size / panel.vr_scale, others, SIZE_MAGNET_SHARE)
-			# Live, so that the neighbours move aside while the size changes.
-			_panel_scales[panel.monitor_key] = scale
-			_place_panels()
-			return
-		ScreenPanel.Grip.TILT:
-			# Up and down tilts: the panel follows the hand, faster.
-			var pitch := clampf(pointer.grab_value + (angles.y - pointer.grab_start.y) * TILT_GAIN,
-					-deg_to_rad(75.0), deg_to_rad(75.0))
-			if magnet:
-				# Upright, or facing the eye.
-				for candidate: float in [0.0, panel.placement.elevation]:
-					if absf(pitch - candidate) < deg_to_rad(MAGNET_REACH_DEG):
-						pitch = candidate
-			_set_pitch(panel, pitch)
-			_place_panels()
-			return
-		ScreenPanel.Grip.CURVE:
-			# Sideways bends: to the right more, to the left less.
-			var curvature := clampf(pointer.grab_value + (angles.x - pointer.grab_start.x) * CURVE_GAIN, 0.0, 1.0)
-			if magnet:
-				# Flat, around the eye, or like another panel.
-				var candidates: Array[float] = [0.0, 1.0]
-				for other in _panels:
-					if other != panel and other.placement.curvature > 0.0:
-						candidates.append(other.placement.curvature)
-				for candidate in candidates:
-					if absf(curvature - candidate) < CURVE_MAGNET:
-						curvature = candidate
-			if curvature > 0.0:
-				_panel_curvatures[panel.monitor_key] = curvature
-			else:
-				_panel_curvatures.erase(panel.monitor_key)
-			_place_panels()
-			return
 	var at := angles - pointer.grab_offset
 	at.y = clampf(at.y, -1.2, 1.2)
 	if not _windows_moves():
@@ -3987,6 +4280,9 @@ func _start_wall_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: 
 	pointer.grab_start = at
 	pointer.grab_cell = WallLayout.screen_cells(saved, panel.monitor_key)
 	pointer.grab_centre = WallLayout.screen_area(saved, panel.monitor_key, fixture.gap).get_center()
+	if _panel_options.move_mode == 1:
+		# Only VR: from where it stands now, freely placed or in its cells.
+		pointer.grab_centre = _wall_middles.get(panel.monitor_key, pointer.grab_centre)
 	_wall_preview = saved.copy()
 	_wall_preview_fixture = fixture.id
 	print("[panels] %s: %s на «%s» (%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], fixture.name, "кулак" if by_fist else pointer.mode])
@@ -3994,26 +4290,45 @@ func _start_wall_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: 
 
 
 ## Carrying on a wall: the panel stands in the cells it will take (snapped as it
-## goes) and the screens there step aside; the corner grip makes it take more or
-## fewer cells, across and down each on its own (the user's wish, 22.10.2026: 1×2
-## and 2×1 too, not only squares; the picture is stretched to the cells).
+## goes) and the screens there step aside; in the "only VR" mode it goes freely.
+## (The size is set on sliders: cells across and down, or a scale.)
 func _drag_wall(pointer: Pointer, fixture: WorldLayout.Fixture) -> void:
 	var at := _wall_hit(pointer, fixture)
 	if is_nan(at.x):
 		return
-	var start := pointer.grab_cell
+	var shape := _wall_shape(fixture)
+	# Round a closed one the nearest way (past the seam behind too).
+	at.x = WallLayout.wrapped(at.x, pointer.grab_start.x, shape)
 	var shift := at - pointer.grab_start
 	var key := pointer.grab_panel.monitor_key
-	var preview: WallLayout.Wall
-	if pointer.grab_kind == ScreenPanel.Grip.RESIZE:
-		var step := WallLayout.pitch(fixture.gap)
-		var grow := Vector2i(roundi(shift.x / step.x), roundi(-shift.y / step.y))
-		var size := (start.size + grow).clamp(Vector2i.ONE, Vector2i(WallLayout.MAX_SPAN, WallLayout.MAX_SPAN))
-		preview = WallLayout.onto_cells(_saved_wall(fixture), key, Rect2i(start.position, size))
-	else:
-		# Into the part under it if that cell is split, else onto whole cells.
-		var middle := pointer.grab_centre + shift
-		preview = WallLayout.dropped(_saved_wall(fixture), key, middle.x, middle.y, fixture.gap)
+	var middle := pointer.grab_centre + shift
+	if _panel_options.move_mode == 1:
+		# Only VR (the user's wish, 22.10.2026: as on a sphere): wherever it is put,
+		# with the magnet to the other screens on it and to the cells.
+		if _panel_options.magnet != 0:
+			var others: Array[Rect2] = []
+			for other: String in _wall_spots:
+				var spot: Rect2 = _wall_spots[other]
+				if other != key and fixture.monitors.has(other):
+					spot.position.x = WallLayout.wrapped(spot.get_center().x, middle.x, shape) - spot.size.x * 0.5
+					others.append(spot)
+			var covers: Rect2 = _wall_spots.get(key, Rect2())
+			var own := Rect2(covers.position - (_wall_middles.get(key, covers.get_center()) as Vector2), covers.size)
+			middle = WallLayout.snap_free(middle, own, others, fixture.gap, FREE_MAGNET_REACH, WallLayout.pitch(fixture.gap))
+		if _wall_positions.get(key) != middle:
+			_wall_positions[key] = middle
+			_place_panels()
+		return
+	if fixture.kind == "column":
+		# A column does not grow when a screen is carried to its edge (the user's
+		# wish, 22.10.2026: only its handles size it): closed, the screen goes on
+		# round past the seam; else, and up and down, it stops at the edge.
+		var area := WallLayout.area(_wall_grid(fixture), fixture.gap)
+		var extent := WallLayout.screen_area(_saved_wall(fixture), key, fixture.gap).size * 0.5
+		middle.x = WallLayout.wrapped(middle.x, area.get_center().x, shape)
+		middle = middle.clamp(area.position + extent, area.end - extent)
+	# Into the part under it if that cell is split, else onto whole cells.
+	var preview := WallLayout.dropped(_saved_wall(fixture), key, middle.x, middle.y, fixture.gap)
 	if preview.cells != _wall_preview.cells or preview.parts != _wall_preview.parts \
 			or preview.splits != _wall_preview.splits or preview.blocks != _wall_preview.blocks:
 		# Only read from here on (the panels are placed from it every frame).
@@ -4036,6 +4351,10 @@ func _end_wall_grab(panel: ScreenPanel) -> void:
 	_wall_preview_fixture = -1
 	_save_settings()
 	_place_panels([], true)
+	if fixture != null and panel != null and _panel_options.move_mode == 1:
+		var free: Vector2 = _wall_positions.get(panel.monitor_key, Vector2.ZERO)
+		print("[panels] %s: свободно на «%s», %+.2f м, %+.2f м" % [panel.monitor_name, fixture.name, free.x, free.y])
+		return
 	if fixture != null and panel != null:
 		if fixture.parts.has(panel.monitor_key):
 			print("[panels] %s: на «%s» в части %s" % [panel.monitor_name, fixture.name, fixture.parts[panel.monitor_key]])
@@ -4076,13 +4395,6 @@ func _end_grab(pointer: Pointer) -> void:
 		return
 	if not is_instance_valid(panel):
 		return
-	match pointer.grab_kind:
-		ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE:
-			_save_settings()
-			_place_panels([], true)
-			print("[panels] %s: размер %.2f, наклон %+.0f°, изгиб %.2f" % [panel.monitor_name, panel.vr_scale,
-					rad_to_deg(panel.placement.pitch), panel.placement.curvature])
-			return
 	if not _windows_moves():
 		_panel_positions[panel.monitor_key] = Vector2(panel.placement.heading, panel.placement.elevation)
 		_save_settings()
@@ -4254,7 +4566,7 @@ func _load_settings() -> void:
 	if arrangements is Dictionary:
 		var identity := {}
 		for mode: String in arrangements:
-			for part: String in ["positions", "scales", "pitches", "curvatures"]:
+			for part: String in ["positions", "scales", "pitches", "curvatures", "yaws", "wall_positions"]:
 				for key: String in (arrangements[mode] as Dictionary).get(part, {}):
 					identity[ScreenPanel.key_of(key)] = ScreenPanel.key_of(key)
 		for mode: String in arrangements:
@@ -4437,7 +4749,8 @@ func _on_topology_idle() -> void:
 func _own_arrangement() -> Dictionary:
 	return {"positions": _panel_positions.duplicate(), "scales": _panel_scales.duplicate(),
 			"pitches": _panel_pitches.duplicate(), "row_pitches": _row_pitches.duplicate(),
-			"curvatures": _panel_curvatures.duplicate()}
+			"curvatures": _panel_curvatures.duplicate(), "yaws": _panel_yaws.duplicate(),
+			"wall_positions": _wall_positions.duplicate()}
 
 
 func _apply_arrangement(own: Dictionary) -> void:
@@ -4446,6 +4759,8 @@ func _apply_arrangement(own: Dictionary) -> void:
 	_panel_pitches = own.get("pitches", {}).duplicate()
 	_row_pitches = own.get("row_pitches", {}).duplicate()
 	_panel_curvatures = own.get("curvatures", {}).duplicate()
+	_panel_yaws = own.get("yaws", {}).duplicate()
+	_wall_positions = own.get("wall_positions", {}).duplicate()
 
 
 ## Opens the menu of `panel` in front of the lower part of it, or closes it if it
@@ -5934,7 +6249,7 @@ func _normalized_keys(by_monitor: Dictionary) -> Dictionary:
 
 func _remapped_arrangement(arrangement: Dictionary, mapping: Dictionary) -> Dictionary:
 	var result := {"row_pitches": (arrangement.get("row_pitches", {}) as Dictionary).duplicate()}
-	for part: String in ["positions", "scales", "pitches", "curvatures"]:
+	for part: String in ["positions", "scales", "pitches", "curvatures", "yaws", "wall_positions"]:
 		var remapped := {}
 		var saved: Dictionary = _normalized_keys(arrangement.get(part, {}))
 		for key: String in saved:
@@ -6125,7 +6440,7 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
 	elif tunable[1] == "stick_mode":
 		return ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
-	elif tunable[1] in ["grid", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "split_handle"]:
+	elif tunable[1] in ["grid", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "wall_tilt_handle", "split_handle"]:
 		return "да" if value >= 0.5 else "нет"
 	elif tunable[1] == "option_lists":
 		return "списком" if value >= 0.5 else "нажатиями"

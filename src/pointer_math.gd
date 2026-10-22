@@ -29,6 +29,8 @@ static func rect_uv(point: Vector3, rect_transform: Transform3D, size: Vector2) 
 ## A curved panel: `size.x` metres of arc on a cylinder of `radius` with a
 ## vertical axis, curving towards the viewer. `panel_transform` is at the middle of
 ## the arc, its +Z towards the viewer, so the cylinder's axis is `radius` in front.
+## A negative `radius` bends it the other way (convex: the axis behind, the
+## middle nearest the viewer; slice l).
 ## Returns (distance along the ray, u, v) with u, v 0..1 from the top-left corner,
 ## or x = -1.0 on a miss.
 static func ray_arc(origin: Vector3, direction: Vector3, panel_transform: Transform3D, size: Vector2, radius: float) -> Vector3:
@@ -44,13 +46,14 @@ static func ray_arc(origin: Vector3, direction: Vector3, panel_transform: Transf
 	var discriminant := b * b - a * c
 	if discriminant < 0.0:
 		return Vector3(-1.0, 0.0, 0.0)
-	var half_angle := size.x * 0.5 / radius
+	var side := signf(radius)
+	var half_angle := size.x * 0.5 / absf(radius)
 	for t: float in [(-b - sqrt(discriminant)) / a, (-b + sqrt(discriminant)) / a]:
 		if t < 0.0:
 			continue
 		var point := o + d * t
-		var angle := atan2(point.x, -point.z)
-		if point.z < 0.0 and absf(angle) <= half_angle and absf(point.y) <= size.y * 0.5:
+		var angle := atan2(point.x, -side * point.z)
+		if side * point.z < 0.0 and absf(angle) <= half_angle and absf(point.y) <= size.y * 0.5:
 			return Vector3(t, angle / (2.0 * half_angle) + 0.5, 0.5 - point.y / size.y)
 	return Vector3(-1.0, 0.0, 0.0)
 

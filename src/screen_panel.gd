@@ -54,6 +54,12 @@ const GRIP_HOVER_COLOR := Color(1.0, 1.0, 1.0, 0.95)
 const GRIP_ACTIVE_COLOR := Color(0.35, 0.8, 1.0, 1.0)
 
 var _viewport: SubViewport
+## A convex panel's picture: a curved mesh in the scene with the panel's own
+## viewport texture (slice l, 22.10.2026: Quest Link does not draw a cylinder
+## layer seen from outside — the picture was not there). Not the capture texture
+## itself (that on a 3D material removed the D3D12 device), the viewport's.
+var _surface: MeshInstance3D
+var _surface_shape := ""
 var _origin: XROrigin3D
 var _hole_punch := false
 var _rendered_frame := 0
@@ -120,6 +126,14 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel._back.material_override = back_material
 	panel._back.visible = false
 	panel.add_child(panel._back)
+	var surface_material := StandardMaterial3D.new()
+	surface_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	surface_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	surface_material.albedo_texture = panel._viewport.get_texture()
+	panel._surface = MeshInstance3D.new()
+	panel._surface.material_override = surface_material
+	panel._surface.visible = false
+	panel.add_child(panel._surface)
 	return panel
 
 
@@ -129,30 +143,44 @@ func update_back(head: Vector3, shown: bool) -> void:
 	if _back == null or placement == null:
 		return
 	_back.visible = shown and (head - placement.transform.origin).dot(placement.transform.basis.z) < 0.0
+	_surface.visible = shown and placement.curvature < 0.0
 
 
 ## The back plate's mesh in the panel's own frame (+Z towards the viewer): flat,
-## or the same arc as a curved panel, BACK_GAP behind it.
-static func back_mesh(size: Vector2, curvature: float, distance: float) -> ArrayMesh:
-	var columns := 1 if curvature <= 0.0 else 24
+## or the same arc as a curved panel, `gap` behind it (0: on the panel itself,
+## with `uv` the picture's coordinates, left to right and top to bottom).
+static func back_mesh(size: Vector2, curvature: float, distance: float, gap := BACK_GAP, uv := false) -> ArrayMesh:
+	var columns := 1 if curvature == 0.0 else 24
 	var radius := PanelLayout.curve_radius(curvature, distance)
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var points: Array[Vector3] = []
 	for i in columns + 1:
 		var share := float(i) / columns
-		var at := Vector3((share - 0.5) * size.x, 0.0, -BACK_GAP)
-		if columns > 1:
+		var at := Vector3((share - 0.5) * size.x, 0.0, -gap)
+		if columns > 1 and radius > 0.0:
 			# On the arc (edges bend towards the viewer), moved out by the gap.
 			var angle := (share - 0.5) * size.x / radius
-			at = Vector3((radius + BACK_GAP) * sin(angle), 0.0, radius - (radius + BACK_GAP) * cos(angle))
+			at = Vector3((radius + gap) * sin(angle), 0.0, radius - (radius + gap) * cos(angle))
+		elif columns > 1:
+			# Convex: the edges bend away, the axis behind; the gap is towards it.
+			var bulge := -radius
+			var angle := (share - 0.5) * size.x / bulge
+			at = Vector3((bulge - gap) * sin(angle), 0.0, -bulge + (bulge - gap) * cos(angle))
 		points.append(at)
 	for i in columns:
 		var a := points[i]
 		var b := points[i + 1]
 		var half := Vector3(0.0, size.y * 0.5, 0.0)
-		for corner: Vector3 in [a - half, b - half, b + half, a - half, b + half, a + half]:
-			surface.add_vertex(corner)
+		var left := float(i) / columns
+		var right := float(i + 1) / columns
+		var corners: Array[Vector3] = [a - half, b - half, b + half, a - half, b + half, a + half]
+		var coords: Array[Vector2] = [Vector2(left, 1.0), Vector2(right, 1.0), Vector2(right, 0.0),
+				Vector2(left, 1.0), Vector2(right, 0.0), Vector2(left, 0.0)]
+		for k in corners.size():
+			if uv:
+				surface.set_uv(coords[k])
+			surface.add_vertex(corners[k])
 	surface.generate_normals()
 	return surface.commit()
 
@@ -225,6 +253,12 @@ func place(new_placement: PanelLayout.Placement) -> void:
 	var curved := placement.curvature > 0.0
 	if curved != (layer is OpenXRCompositionLayerCylinder):
 		_make_layer(curved)
+	# Convex (on a wall or a column, slice l): drawn as a mesh (_surface); its quad
+	# layer stays, empty and without a hole, so the panel keeps its place in the list.
+	var convex := placement.curvature < 0.0
+	if convex == (layer.layer_viewport != null):
+		layer.layer_viewport = null if convex else _viewport
+		layer.enable_hole_punch = _hole_punch and not convex
 	# The shape only when it changed: each change may rebuild the layer's mesh (its
 	# hole punch), and a wall being bent changes it every frame (21.10.2026: the
 	# bend handle dropped the frame rate to ~20).
@@ -249,6 +283,13 @@ func place(new_placement: PanelLayout.Placement) -> void:
 			_back_shape = shape
 			_back.mesh = back_mesh(placement.size, placement.curvature, distance)
 		_back.global_transform = placement.transform
+	if convex:
+		if _surface_shape != _back_shape:
+			_surface_shape = _back_shape
+			_surface.mesh = back_mesh(placement.size, placement.curvature, distance, 0.0, true)
+		_surface.global_transform = placement.transform
+	elif _surface.visible:
+		_surface.visible = false
 	for grip: int in _grips:
 		(_grips[grip] as Node3D).global_transform = _grip_transform(grip)
 
@@ -274,17 +315,20 @@ func _grip_transform(grip: int) -> Transform3D:
 
 ## The right (side = 1) or left edge in the panel's own frame: (x, z towards the viewer).
 func _edge(side: float) -> Vector2:
-	if placement.curvature <= 0.0:
+	if placement.curvature == 0.0:
 		return Vector2(side * placement.size.x * 0.5, 0.0)
 	var radius := PanelLayout.curve_radius(placement.curvature, distance)
-	var angle := placement.size.x * 0.5 / radius
-	return Vector2(side * radius * sin(angle), radius * (1.0 - cos(angle)))
+	var angle := placement.size.x * 0.5 / absf(radius)
+	# Concave: the edges come towards the viewer; convex: they go away.
+	return Vector2(side * absf(radius) * sin(angle), radius * (1.0 - cos(angle)))
 
 
 ## The grip a ray points at, and how far along the ray: Vector2(grip, distance).
 ## Only grips in `allowed` count.
 func grip_at(origin: Vector3, direction: Vector3, allowed: Array) -> Vector2:
 	var best := Vector2(Grip.NONE, INF)
+	if not _in_front(origin):
+		return best
 	for grip: int in allowed:
 		var distance_along := PointerMath.ray_rect_distance(origin, direction, _grip_transform(grip), GRIP_HITS[grip])
 		if distance_along >= 0.0 and distance_along < best.y:
@@ -292,9 +336,16 @@ func grip_at(origin: Vector3, direction: Vector3, allowed: Array) -> Vector2:
 	return best
 
 
+## Whether a ray from `origin` can reach the panel's face: not from behind a flat
+## one (on a column a ray between the near screens went on to the backs of the
+## far ones, slice l).
+func _in_front(origin: Vector3) -> bool:
+	return placement.curvature > 0.0 or (placement.transform.affine_inverse() * origin).z > 0.0
+
+
 ## The ray passes over the panel or close around it (where the grips are).
 func is_near(origin: Vector3, direction: Vector3) -> bool:
-	return PointerMath.ray_rect_distance(origin, direction, placement.transform,
+	return _in_front(origin) and PointerMath.ray_rect_distance(origin, direction, placement.transform,
 			placement.size + Vector2(0.2, 0.25)) >= 0.0
 
 
@@ -341,7 +392,9 @@ func is_redrawing() -> bool:
 
 ## Distance along the ray to this panel, or -1.0 on a miss.
 func hit_distance(origin: Vector3, direction: Vector3) -> float:
-	if placement.curvature > 0.0:
+	if not _in_front(origin):
+		return -1.0
+	if placement.curvature != 0.0:
 		return PointerMath.ray_arc(origin, direction, placement.transform, placement.size,
 				PanelLayout.curve_radius(placement.curvature, distance)).x
 	return PointerMath.ray_rect_distance(origin, direction, placement.transform, placement.size)
@@ -349,10 +402,10 @@ func hit_distance(origin: Vector3, direction: Vector3) -> float:
 
 ## Where a world point on the panel lies: 0..1 from its top-left corner.
 func uv_at(point: Vector3) -> Vector2:
-	if placement.curvature > 0.0:
+	if placement.curvature != 0.0:
 		var radius := PanelLayout.curve_radius(placement.curvature, distance)
 		var local := placement.transform.affine_inverse() * point - Vector3(0.0, 0.0, radius)
-		return Vector2(atan2(local.x, -local.z) * radius / placement.size.x + 0.5, 0.5 - local.y / placement.size.y)
+		return Vector2(atan2(local.x, -signf(radius) * local.z) * absf(radius) / placement.size.x + 0.5, 0.5 - local.y / placement.size.y)
 	return PointerMath.rect_uv(point, placement.transform, placement.size)
 
 

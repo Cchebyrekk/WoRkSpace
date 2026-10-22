@@ -85,6 +85,19 @@ static func read() -> Array[Vector2i]:
 	return parse_resolutions(FileAccess.get_file_as_string(PATH))
 
 
+## The driver's list in the order it is written: 1920×1080 first. When Windows
+## sets the screens up afresh it takes the first mode (22.10.2026: 960×1080, a
+## wall's half cell, stood first, and every screen came back at 960×1080).
+static func ordered(resolutions: Array[Vector2i]) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if resolutions.has(Vector2i(1920, 1080)):
+		result.append(Vector2i(1920, 1080))
+	for size in resolutions:
+		if not result.has(size):
+			result.append(size)
+	return result
+
+
 ## Writes the list; the first time a copy of the original file is kept next to it.
 ## Returns an empty string or what went wrong.
 static func write(wanted: Array[Vector2i]) -> String:
@@ -94,6 +107,7 @@ static func write(wanted: Array[Vector2i]) -> String:
 			resolutions.append(size)
 	if resolutions.is_empty():
 		return "нужно хотя бы одно разрешение"
+	resolutions = ordered(resolutions)
 	var text := FileAccess.get_file_as_string(PATH)
 	if text.is_empty() or _block.search(text) == null:
 		return "не удалось прочитать %s" % PATH

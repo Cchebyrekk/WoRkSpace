@@ -30,6 +30,7 @@ func _init() -> void:
 	_test_lookups_and_helpers()
 	_test_wall_layout()
 	_test_wall_split()
+	_test_column_and_lean()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -796,13 +797,11 @@ func _test_world_layout() -> void:
 	_check(head_world.origin.is_equal_approx(second.centre), "сел: голова в центре шара")
 	_check((-head_world.basis.z).is_equal_approx(second.frame().basis * Vector3.FORWARD), "сел: лицом к середине шара")
 
-	_check(is_equal_approx(WorldLayout.dragged_radius(1.1, 0.5, 0.6), 1.3), "ручка от себя на 10 см — радиус +20 см")
 	var handle := WorldLayout.radius_handle(second)
 	_check(is_equal_approx(handle.distance_to(second.centre), second.radius) and handle.y < second.centre.y - 0.9 * second.radius,
 			"ручка радиуса — на шаре, низко")
 	var handle_ahead := second.frame().affine_inverse() * handle
 	_check(handle_ahead.z < 0.0 and absf(handle_ahead.x) < 0.001, "ручка — спереди по середине шара")
-	_check(WorldLayout.dragged_radius(1.1, 0.5, -3.0) == WorldLayout.MIN_RADIUS, "радиус не меньше минимума")
 
 	var stored := WorldLayout.Fixture.from_dictionary(second.to_dictionary())
 	_check(stored.id == 2 and stored.centre == second.centre and stored.monitors == second.monitors and is_equal_approx(stored.yaw, 0.5),
@@ -1427,9 +1426,6 @@ func _test_wall_layout() -> void:
 	_check((rig * head).origin.is_equal_approx(eyes.origin) and (rig.basis * -head.basis.z).is_equal_approx(Vector3.RIGHT), "место: голова в точку, взгляд вдоль")
 	var left := WallLayout.bend_handle_point(one)
 	_check(is_equal_approx(left.x, WallLayout.area(one).get_center().x) and left.y < corner.y, "стена: ручка изгиба под серединой")
-	var step_one := WallLayout.pitch(0.06)
-	_check(WallLayout.dragged_grid(Rect2i(0, 0, 3, 2), [], -1.6 * step_one.x, 1.4 * step_one.y, 0.06, Vector2i(-1, -1)) == Rect2i(-1, -1, 4, 3),
-			"стена: размер с левого верхнего угла")
 	_check(WallLayout.size_handle_point(one, 0.06, Vector2i(-1, -1)).x < 0.0 and WallLayout.size_handle_point(one, 0.06, Vector2i(-1, -1)).y > 0.0,
 			"стена: ручка размера у левого верхнего угла")
 	_check(is_equal_approx(WallLayout.bend_from_degrees(36.0, 3.0), 0.1) and is_equal_approx(WallLayout.bend_from_degrees(46.8, 3.0), 45.0 / 360.0)
@@ -1440,10 +1436,6 @@ func _test_wall_layout() -> void:
 	var screens: Array[Rect2i] = [one, Rect2i(1, 0, 2, 2)]
 	_check(WallLayout.settle_grid(Rect2i(), screens) == Rect2i(0, 0, 3, 2) and WallLayout.settle_grid(Rect2i(), [] as Array[Rect2i]) == one
 			and WallLayout.settle_grid(Rect2i(-1, -1, 2, 2), screens) == Rect2i(-1, -1, 4, 3), "стена: размер — не меньше экранов")
-	var step := WallLayout.pitch(0.1)
-	var grown_grid := WallLayout.dragged_grid(Rect2i(0, 0, 3, 2), screens, 4.6 * step.x, -3.6 * step.y, 0.1)
-	_check(grown_grid == Rect2i(0, 0, 5, 4), "стена: угол тянут — шире и выше: %s" % grown_grid)
-	_check(WallLayout.dragged_grid(Rect2i(0, 0, 5, 4), screens, -9.0, 9.0, 0.1) == Rect2i(0, 0, 3, 2), "стена: меньше экранов не сжимается")
 	_check(is_equal_approx(WallLayout.cell_centre(Rect2i(1, 0, 1, 1), 0.2).x, WallLayout.CELL.x + 0.2)
 			and is_equal_approx(WallLayout.cell_size(Rect2i(0, 0, 2, 1), 0.0).x, WallLayout.CELL.x * 2.0), "стена: зазор между клетками настраивается")
 	var lines := WallLayout.outline(Rect2i(0, 0, 3, 2), 0.06, WallLayout.shape_of(Rect2i(0, 0, 3, 2), 0.06, 1.5, 0.0))
@@ -1751,3 +1743,141 @@ func _test_wall_split() -> void:
 	var split_lines := WallLayout.outline(Rect2i(0, 0, 1, 1), 0.06, WallLayout.shape_of(Rect2i(0, 0, 1, 1), 0.06, 1.5, 0.0), _split_wall({"0,0": "c3"}))
 	_check(split_lines.size() == WallLayout.outline(Rect2i(0, 0, 1, 1), 0.06, WallLayout.shape_of(Rect2i(0, 0, 1, 1), 0.06, 1.5, 0.0)).size() * 3,
 			"контур: линии вокруг каждой части разделённой клетки")
+
+
+## Slice l: a column is a wall bent outwards; walls and columns lean (a cone);
+## screens on them bend either way.
+func _test_column_and_lean() -> void:
+	var grid := Rect2i(0, 0, 3, 1)
+	var gap := 0.06
+	var column := WallLayout.shape_of(grid, gap, 1.5, 1.0, true)
+	var length := WallLayout.area(grid, gap).size.x + gap
+	_check(is_equal_approx(column.radius(), length / TAU), "столб: радиус — длина по кругу (со швом в зазор)")
+	_check(column.axis().is_equal_approx(Vector3(column.middle, 0.0, -1.5 - column.radius())), "столб: ось за стеной")
+	var front := WallLayout.surface(column.middle, 0.0, 0.0, column)
+	_check(front.origin.is_equal_approx(Vector3(column.middle, 0.0, -1.5)), "столб: середина на расстоянии")
+	_check(front.basis.z.is_equal_approx(Vector3.BACK), "столб: смотрит на место")
+	var right := WallLayout.surface(column.middle + column.radius() * PI * 0.5, 0.0, 0.0, column)
+	_check(right.origin.is_equal_approx(column.axis() + Vector3.RIGHT * column.radius()), "столб: четверть круга вправо — справа от оси")
+	_check(right.basis.z.is_equal_approx(Vector3.RIGHT), "столб: и смотрит наружу")
+	# Hits from outside, the near side; from inside none.
+	var seen := WallLayout.hit(Vector3(column.middle + 0.2, 0.3, 0.0), Vector3.FORWARD, column)
+	var back := WallLayout.surface(seen.x, seen.y, 0.0, column).origin
+	_check(absf(seen.y - 0.3) < 0.0001 and back.z > column.axis().z, "столб: луч спереди — ближняя сторона")
+	_check(is_nan(WallLayout.hit(column.axis(), Vector3.FORWARD, column).x), "столб: изнутри — промах")
+	var eye := WallLayout.eye(Vector2(seen.x, 0.0), column)
+	_check(is_equal_approx(WallLayout.project(eye.origin, column).z, 1.5), "столб: место на расстоянии, не упирается в ось")
+	_check(WallLayout.max_distance(column, 6.0) == 6.0, "столб: отходить можно сколько угодно")
+	var wrapped := WallLayout.wrapped(column.middle + length * 0.75, column.middle, column)
+	_check(is_equal_approx(wrapped, column.middle - length * 0.25), "столб: по кругу — ближним путём")
+	_check(WallLayout.wrapped(9.0, 0.0, WallLayout.shape_of(grid, gap, 1.5, 0.5)) == 9.0, "незамкнутая — без перехода")
+
+	# A lean: upright walls are as before; leaning, the face looks up and v goes up the slope.
+	var flat := WallLayout.shape_of(grid, gap, 1.5, 0.0, false, deg_to_rad(30.0))
+	var top := WallLayout.surface(0.5, 1.0, 0.0, flat)
+	_check(top.origin.is_equal_approx(Vector3(0.5, cos(deg_to_rad(30.0)), -1.5 - sin(deg_to_rad(30.0)))), "наклон: верх уходит от места")
+	_check(top.basis.z.y > 0.4, "наклон: смотрит вверх")
+	var on_flat := WallLayout.hit(Vector3(0.5, 0.2, 0.0), (top.origin - Vector3(0.5, 0.2, 0.0)).normalized(), flat)
+	_check(on_flat.distance_to(Vector2(0.5, 1.0)) < 0.0001, "наклон: луч в точку — та же точка")
+	for outside: bool in [false, true]:
+		for lean: float in [-0.4, 0.4]:
+			var cone := WallLayout.shape_of(grid, gap, 1.5, 0.6, outside, lean)
+			var point := WallLayout.surface(cone.middle + 0.3, 0.5, 0.0, cone).origin
+			var from := Vector3(cone.middle, 0.0, 0.0) if not outside else Vector3(cone.middle + 0.1, 0.1, 0.5)
+			var found := WallLayout.hit(from, (point - from).normalized(), cone)
+			_check(found.distance_to(Vector2(cone.middle + 0.3, 0.5)) < 0.001, "конус %s %+.1f: луч в точку — та же точка (%s)" % ["столб" if outside else "стена", lean, found])
+			_check(absf(WallLayout.project(point, cone).z) < 0.001, "конус %s %+.1f: точка на поверхности" % ["столб" if outside else "стена", lean])
+	var upright := WallLayout.shape_of(grid, gap, 1.5, 0.6)
+	var narrowing := WallLayout.shape_of(grid, gap, 1.5, 0.6, true, 0.4)
+	var high := WallLayout.surface(narrowing.middle, 1.0, 0.0, narrowing).origin
+	_check(Vector2(high.x - narrowing.axis().x, high.z - narrowing.axis().z).length() < narrowing.radius(), "столб, лицом вверх: сужается кверху")
+	_check(WallLayout.surface(upright.middle, 0.7, 0.0, upright).origin.is_equal_approx(Vector3(upright.middle, 0.7, -1.5)), "без наклона — как раньше")
+	_check(is_equal_approx(WallLayout.tilt_from_degrees(31.0, 3.0), deg_to_rad(30.0)) and is_equal_approx(WallLayout.tilt_from_degrees(-99.0, 3.0), -WallLayout.MAX_TILT), "наклон: магнит и предел")
+
+	# Convex panels: hit from outside, u left to right.
+	_check(PanelLayout.curve_radius(-0.5, 1.0) == -2.0, "выпуклый: радиус отрицательный")
+	var panel := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, -1.0))
+	var size := Vector2(1.0, 0.5)
+	var middle := PointerMath.ray_arc(Vector3.ZERO, Vector3.FORWARD, panel, size, -1.0)
+	_check(is_equal_approx(middle.x, 1.0) and is_equal_approx(middle.y, 0.5), "выпуклый: середина ближе всего")
+	var edge := PointerMath.ray_arc(Vector3(0.4, 0.0, 0.0), Vector3.FORWARD, panel, size, -1.0)
+	_check(edge.x > 1.0 and edge.y > 0.5, "выпуклый: правее — дальше и правее по u")
+	var concave := PointerMath.ray_arc(Vector3(0.4, 0.0, 0.0), Vector3.FORWARD, panel, size, 1.0)
+	_check(concave.x > 0.0 and concave.x < 1.0 and concave.y > 0.5, "вогнутый — как раньше")
+
+	# Screens never into the wall: lifted by what would go behind it.
+	var cell := WallLayout.CELL
+	var on_column := WallLayout.shape_of(grid, gap, 1.5, 1.0, true)
+	var reach := on_column.radius()
+	_check(WallLayout.lift(on_column, reach, cell, 0.0, 0.0, 0.0) == 0.0, "на столбе плоский — края уходят от столба, не поднимать")
+	_check(is_zero_approx(WallLayout.lift(on_column, reach, cell, -1.0, 0.0, 0.0)), "на столбе выпуклый как столб — по поверхности")
+	var concave_wall := WallLayout.shape_of(grid, gap, 1.5, 0.5)
+	var wall_reach := concave_wall.radius()
+	_check(WallLayout.lift(concave_wall, wall_reach, cell, 0.0, 0.0, 0.0) > 0.01, "в вогнутой стене плоский — края вошли бы в стену")
+	_check(is_zero_approx(WallLayout.lift(concave_wall, wall_reach, cell, 1.0, 0.0, 0.0)), "вогнутый как стена — по поверхности")
+	var leaning := WallLayout.lift(flat, 1.5, cell, 0.0, deg_to_rad(30.0), 0.0)
+	_check(is_equal_approx(leaning, cell.y * 0.25), "наклон 30° — поднят на полвысоты · sin")
+	_check(is_equal_approx(WallLayout.lift(flat, 1.5, cell, 0.0, 0.0, deg_to_rad(-30.0)), cell.x * 0.25), "поворот 30° — на полширины · sin")
+	_check(WallLayout.lift(flat, 1.5, cell, -1.0, 0.0, 0.0) > 0.0, "на плоской выпуклый — середина вперёд")
+
+	# Free placement on a wall: the magnet.
+	var others: Array[Rect2] = [Rect2(0.0, 0.0, 1.0, 0.5)]
+	var beside := WallLayout.snap_free(Vector2(1.58, 0.27), Rect2(-0.5, -0.25, 1.0, 0.5), others, 0.06, 0.05)
+	_check(beside.is_equal_approx(Vector2(1.56, 0.25)), "свободно: вплотную через зазор и в линию (%s)" % beside)
+	var above := WallLayout.snap_free(Vector2(0.52, 0.83), Rect2(-0.5, -0.25, 1.0, 0.5), others, 0.06, 0.05)
+	_check(above.is_equal_approx(Vector2(0.5, 0.81)), "свободно: над соседом, середины в линию (%s)" % above)
+	var far := WallLayout.snap_free(Vector2(3.3, 2.2), Rect2(-0.5, -0.25, 1.0, 0.5), others, 0.06, 0.05)
+	_check(far == Vector2(3.3, 2.2), "свободно: далеко — без магнита")
+	var cells := WallLayout.snap_free(Vector2(2.68, -0.75), Rect2(-0.5, -0.25, 1.0, 0.5), [] as Array[Rect2], 0.06, 0.05, WallLayout.pitch(0.06))
+	_check(cells.is_equal_approx(Vector2(2.0 * WallLayout.pitch(0.06).x, -WallLayout.pitch(0.06).y)), "свободно: к середине клетки (%s)" % cells)
+
+	# What a screen covers of the wall, for the magnet.
+	var flat_on_column := WallLayout.footprint(on_column, reach, cell, 0.0, 0.0, 0.0)
+	_check(flat_on_column.size.x < cell.x and is_equal_approx(flat_on_column.size.x, 2.0 * reach * atan(cell.x * 0.5 / reach)),
+			"столб: плоский занимает дугу меньше ширины")
+	_check(is_equal_approx(WallLayout.footprint(on_column, reach, cell, -1.0, 0.0, 0.0).size.x, cell.x), "столб: выпуклый как столб — во всю ширину")
+	_check(WallLayout.footprint(upright, 1.5, cell, 0.0, 0.0, 0.0).size.x < cell.x + 0.0001, "вогнутая: плоский не шире себя")
+	var on_flat_wall := WallLayout.footprint(flat, 1.5, cell, 0.0, 0.0, 0.0)
+	_check(on_flat_wall.is_equal_approx(Rect2(-cell.x * 0.5, -cell.y * 0.5, cell.x, cell.y)), "плоская: во всю ширину и высоту")
+	var turned := WallLayout.footprint(flat, 1.5, cell, 0.0, deg_to_rad(60.0), deg_to_rad(60.0))
+	_check(is_equal_approx(turned.size.x, cell.x * 0.5) and is_equal_approx(turned.size.y, cell.y * 0.5), "повёрнутый и наклонённый — уже и ниже")
+	# Edge to edge by what they cover: a flat one on a column snaps closer than its width.
+	var neighbour := Rect2(flat_on_column.position, flat_on_column.size)
+	var touching := WallLayout.snap_free(Vector2(flat_on_column.size.x + 0.05, 0.0), flat_on_column, [neighbour] as Array[Rect2], 0.06, 0.05)
+	_check(is_equal_approx(touching.x, flat_on_column.size.x + 0.06), "столб: вплотную по занятой дуге")
+
+	# Thinner than its cells: the same angles, a smaller circle.
+	var thin := WallLayout.shape_of(grid, gap, 1.5, 1.0, true, 0.0, 0.5)
+	_check(is_equal_approx(thin.radius(), column.radius() * 0.5) and is_equal_approx(thin.arc_radius(), column.arc_radius()), "тонкий столб: радиус меньше, клетки по тем же углам")
+	var quarter := thin.middle + thin.arc_radius() * PI * 0.5
+	_check(WallLayout.surface(quarter, 0.0, 0.0, thin).basis.z.is_equal_approx(Vector3.RIGHT), "тонкий столб: четверть круга — так же справа")
+	var seen_thin := WallLayout.hit(Vector3(thin.middle + 0.1, 0.2, 0.0), Vector3.FORWARD, thin)
+	var back_thin := WallLayout.project(WallLayout.surface(seen_thin.x, seen_thin.y, 0.0, thin).origin, thin)
+	_check(absf(back_thin.x - seen_thin.x) < 0.0001 and absf(back_thin.z) < 0.0001, "тонкий столб: луч и точка сходятся")
+	_check(WallLayout.shape_of(grid, gap, 1.5, 1.0, true, 0.0, 0.01).squeeze == WallLayout.MIN_SQUEEZE, "тонкий столб: не тоньше предела")
+
+	# Cells taken away are forgotten.
+	var remembered := WallLayout.Wall.new()
+	remembered.splits = {"0,0": "c2", "0,3": "r2", "0,3:1": "c2", "B1": "c2"}
+	remembered.blocks = {"B1": "1,3+2,3", "B2": "1,0+2,0"}
+	remembered.parts = {"a": "0,3:0", "b": "0,0:1", "c": "B1:0"}
+	var cut := WallLayout.pruned(remembered, Rect2i(0, 0, 3, 2))
+	_check(cut.splits.keys() == ["0,0"] and cut.blocks.keys() == ["B2"] and cut.parts.keys() == ["b"], "убранные клетки забыты (%s, %s, %s)" % [cut.splits, cut.blocks, cut.parts])
+
+	# The driver's list: 1920×1080 first (Windows takes the first when it sets up afresh).
+	var listed: Array[Vector2i] = [Vector2i(960, 1080), Vector2i(1920, 544), Vector2i(1920, 1080), Vector2i(2560, 1440)]
+	_check(VddConfig.ordered(listed) == ([Vector2i(1920, 1080), Vector2i(960, 1080), Vector2i(1920, 544), Vector2i(2560, 1440)] as Array[Vector2i]),
+			"драйвер: 1920×1080 первым")
+
+	# The pad: both values from one point.
+	var both := VrPad.values_at(Vector2(0.5, 1.0), Vector2(-75.0, -75.0), Vector2(75.0, 75.0), Vector2(1.0, 1.0),
+			VrSlider.notches_for(-75.0, 75.0, 15.0), VrSlider.notches_for(-75.0, 75.0, 15.0))
+	_check(both == Vector2(0.0, 75.0), "площадка: середина по ширине, верх по высоте")
+
+	# The fixture keeps its kind and tilt.
+	var fixture := WorldLayout.new_fixture(WorldLayout.default_fixtures(PackedStringArray()), "column", Vector3.ZERO, 0.0)
+	_check(fixture.name == "Столб 1" and fixture.bend == 1.0 and fixture.radius == WallLayout.DEFAULT_DISTANCE, "столб: новая заготовка — замкнутая")
+	fixture.tilt = 0.3
+	fixture.squeeze = 0.6
+	var restored := WorldLayout.Fixture.from_dictionary(fixture.to_dictionary())
+	_check(restored.kind == "column" and is_equal_approx(restored.tilt, 0.3) and is_equal_approx(restored.squeeze, 0.6), "столб: наклон и толщина сохраняются")

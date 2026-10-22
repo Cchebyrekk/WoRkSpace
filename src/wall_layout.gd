@@ -161,94 +161,173 @@ static func moved(cells: Dictionary, key: String, target: Rect2i) -> Dictionary:
 ## The wall's shape: how far its middle is from the seat's, how much it bends
 ## (a share of a full circle: 0 flat, 0.25 a quarter round, 1 a closed cylinder;
 ## the user's wish, 21.10.2026), and where its middle is and how long it is along
-## u: it bends round its middle, the axis on the seat's side.
+## u: it bends round its middle, the axis on the seat's side, or (`outside`, a
+## column, slice l) on the far side, the screens facing out. `tilt` leans the
+## whole wall (radians; > 0 its face looks up, the top away from the seat): a bent
+## one becomes a cone, either way (the user's wish, 22.10.2026).
 class Shape:
 	var distance := DEFAULT_DISTANCE
 	var bend := 0.0
 	var middle := 0.0
 	var length := 1.0
+	var outside := false
+	var tilt := 0.0
+	## Thinner than its cells (0..1, bent only; the user's wish, 22.10.2026: only
+	## the look — the screens keep their size and order round it, so on a thin
+	## column they meet, e.g. three in a triangle).
+	var squeeze := 1.0
 
 	func bent() -> bool:
 		return bend >= FLAT_BEND
 
-	func radius() -> float:
+	## The radius the cells are laid round by: u along it is the angle.
+	func arc_radius() -> float:
 		return length / (bend * TAU) if bent() else INF
 
+	## The radius at row height 0 (along the wall's middle), as it stands.
+	func radius() -> float:
+		return arc_radius() * squeeze if bent() else INF
+
 	func axis() -> Vector3:
-		return Vector3(middle, 0.0, -distance + radius())
+		return Vector3(middle, 0.0, -distance + (-radius() if outside else radius()))
+
+	## Horizontal, out of the wall towards the seat's side, at `u` (before the tilt).
+	func facing(u: float) -> Vector3:
+		if not bent():
+			return Vector3.BACK
+		var angle := (u - middle) / arc_radius()
+		return Vector3(sin(angle), 0.0, cos(angle)) if outside else Vector3(-sin(angle), 0.0, cos(angle))
+
+	## How the radius grows with height (the cone): metres per metre up.
+	func flare() -> float:
+		var lean := tan(clampf(tilt, -MAX_TILT, MAX_TILT))
+		return -lean if outside else lean
 
 
-static func shape_of(grid: Rect2i, gap: float, distance: float, bend: float) -> Shape:
+## The steepest the whole wall leans (radians).
+const MAX_TILT := deg_to_rad(75.0)
+
+
+static func shape_of(grid: Rect2i, gap: float, distance: float, bend: float, outside := false, tilt := 0.0,
+		squeeze := 1.0) -> Shape:
 	var shape := Shape.new()
 	var wall := area(grid, gap)
 	shape.distance = distance
 	shape.bend = bend
 	shape.middle = wall.get_center().x
 	shape.length = maxf(wall.size.x, 0.01)
+	# Closed, the seam has its gap like the others: the circle is the cells' period.
+	if bend >= 0.999:
+		shape.length += gap
+	shape.outside = outside
+	shape.tilt = clampf(tilt, -MAX_TILT, MAX_TILT)
+	shape.squeeze = clampf(squeeze, MIN_SQUEEZE, 1.0)
 	return shape
 
 
+## How thin a bent wall or column may be made against its cells.
+const MIN_SQUEEZE := 0.2
+
+
 ## The point (u, v) of the wall, `depth` metres in front of it, in the fixture's
-## space (the seat's middle at the origin, the wall ahead along -Z); its -Z looks
-## into the wall, so a panel placed there faces the inside of the bend.
+## space (the seat's middle at the origin, the wall ahead along -Z); its +Z is the
+## wall's face (towards the seat's side), its +Y up the wall, so a panel placed
+## there faces the inside of a bend, or out of a column. u is along the arc at
+## row height 0; leaning, v goes up the slope.
 static func surface(u: float, v: float, depth: float, shape: Shape) -> Transform3D:
-	if not shape.bent():
-		return Transform3D(Basis.IDENTITY, Vector3(u, v, -shape.distance + depth))
-	var radius := shape.radius()
-	var angle := (u - shape.middle) / radius
-	var into := Vector3(sin(angle), 0.0, -cos(angle))
-	return Transform3D(Basis.looking_at(into, Vector3.UP), shape.axis() + into * (radius - depth) + Vector3.UP * v)
+	var out := shape.facing(u)
+	var c := cos(shape.tilt)
+	var s := sin(shape.tilt)
+	var face := out * c + Vector3.UP * s
+	var up := -out * s + Vector3.UP * c
+	var base := Vector3(u, 0.0, -shape.distance)
+	if shape.bent():
+		base = shape.axis() + Vector3(-out.x, 0.0, -out.z) * shape.radius() if not shape.outside else shape.axis() + out * shape.radius()
+	return Transform3D(Basis(up.cross(face), up, face), base + up * v + face * depth)
 
 
 ## Where a ray (in the fixture's space) meets the wall, as (u, v); NAN if it does
 ## not. Bent: from inside the bend the far side (the screens face inwards), from
-## outside the near one.
+## outside the near one; a column only from outside.
 static func hit(origin: Vector3, direction: Vector3, shape: Shape) -> Vector2:
 	var none := Vector2(NAN, NAN)
+	var c := cos(shape.tilt)
 	if not shape.bent():
-		if absf(direction.z) < 0.00001:
+		var face := Vector3(0.0, sin(shape.tilt), c)
+		var up := Vector3(0.0, c, -sin(shape.tilt))
+		var at := Vector3(0.0, 0.0, -shape.distance)
+		var towards := direction.dot(face)
+		if absf(towards) < 0.00001:
 			return none
-		var along := (-shape.distance - origin.z) / direction.z
+		var along := (at - origin).dot(face) / towards
 		if along <= 0.0:
 			return none
 		var point := origin + direction * along
-		return Vector2(point.x, point.y)
+		return Vector2(point.x, (point - at).dot(up))
+	# A cone round the axis (a cylinder when upright): radius R + flare·v at height v·cos(tilt).
 	var radius := shape.radius()
 	var axis := shape.axis()
-	var flat_origin := Vector2(origin.x - axis.x, origin.z - axis.z)
-	var flat_direction := Vector2(direction.x, direction.z)
-	var a := flat_direction.length_squared()
-	var b := 2.0 * flat_origin.dot(flat_direction)
-	var c := flat_origin.length_squared() - radius * radius
-	var discriminant := b * b - 4.0 * a * c
-	if a < 0.000000001 or discriminant < 0.0:
+	var per_height := shape.flare()
+	var q := Vector2(origin.x - axis.x, origin.z - axis.z)
+	var e := Vector2(direction.x, direction.z)
+	var r0 := radius + per_height * origin.y
+	var r1 := per_height * direction.y
+	var a := e.length_squared() - r1 * r1
+	var b := 2.0 * (q.dot(e) - r0 * r1)
+	var k := q.length_squared() - r0 * r0
+	var roots: Array[float] = []
+	if absf(a) < 0.000000001:
+		if absf(b) > 0.000000001:
+			roots.append(-k / b)
+	else:
+		var discriminant := b * b - 4.0 * a * k
+		if discriminant < 0.0:
+			return none
+		roots.append((-b - sqrt(discriminant)) / (2.0 * a))
+		roots.append((-b + sqrt(discriminant)) / (2.0 * a))
+	roots.sort()
+	var inside := k < 0.0
+	if shape.outside and inside:
 		return none
-	var inside := c < 0.0
-	var along := (-b + sqrt(discriminant)) / (2.0 * a) if inside else (-b - sqrt(discriminant)) / (2.0 * a)
-	if along <= 0.0:
+	var along := NAN
+	for root in roots:
+		if root > 0.0 and r0 + r1 * root > 0.0:
+			along = root
+			if not inside:
+				break
+	if is_nan(along):
 		return none
 	var point := origin + direction * along
-	var angle := atan2(point.x - axis.x, -(point.z - axis.z))
-	return Vector2(shape.middle + angle * radius, point.y)
+	var angle := atan2(point.x - axis.x, point.z - axis.z) if shape.outside else atan2(point.x - axis.x, -(point.z - axis.z))
+	return Vector2(shape.middle + angle * shape.arc_radius(), point.y / c)
 
 
 ## The eyes of a user seated at (u, v) of the slide: the wall's distance in front
-## of that point, looking straight at it (along a bend too). On a bent wall never
-## farther than its axis, the middle of the cylinder (the user's wish, 21.10.2026:
-## past it the seat went behind the axis and sliding ran backwards).
+## of that point, level, looking straight at it (along a bend too). On a bent wall
+## never farther than its axis, the middle of the cylinder (the user's wish,
+## 21.10.2026: past it the seat went behind the axis and sliding ran backwards).
 static func eye(slide: Vector2, shape: Shape) -> Transform3D:
-	return surface(slide.x, slide.y, seat_depth(shape), shape)
+	var out := shape.facing(slide.x)
+	var at := surface(slide.x, slide.y, 0.0, shape).origin + out * seat_depth(shape)
+	return Transform3D(Basis.looking_at(-out, Vector3.UP), at)
 
 
 ## A point (the fixture's space) seen from the wall: x, y = u, v of the wall
 ## straight in front of it, z = how far in front of the wall it is (negative behind).
 static func project(point: Vector3, shape: Shape) -> Vector3:
+	var c := cos(shape.tilt)
 	if not shape.bent():
-		return Vector3(point.x, point.y, point.z + shape.distance)
+		var at := Vector3(0.0, 0.0, -shape.distance)
+		var face := Vector3(0.0, sin(shape.tilt), c)
+		var up := Vector3(0.0, c, -sin(shape.tilt))
+		return Vector3(point.x, (point - at).dot(up), (point - at).dot(face))
 	var radius := shape.radius()
 	var axis := shape.axis()
 	var off := Vector2(point.x - axis.x, point.z - axis.z)
-	return Vector3(shape.middle + atan2(off.x, -off.y) * radius, point.y, radius - off.length())
+	var here := radius + shape.flare() * point.y
+	if shape.outside:
+		return Vector3(shape.middle + atan2(off.x, off.y) * shape.arc_radius(), point.y / c, (off.length() - here) * c)
+	return Vector3(shape.middle + atan2(off.x, -off.y) * shape.arc_radius(), point.y / c, (here - off.length()) * c)
 
 
 ## Middle of the screen nearest to (u, v), or (u, v) itself on a wall with no screens.
@@ -264,14 +343,15 @@ static func nearest_screen(cells: Array[Rect2i], u: float, v: float, gap := DEFA
 	return best
 
 
-## How far in front of the wall the seat is: its distance, at most the bend's radius.
+## How far in front of the wall the seat is: its distance, at most the bend's
+## radius (a column's seat goes as far as it likes).
 static func seat_depth(shape: Shape) -> float:
-	return minf(shape.distance, shape.radius()) if shape.bent() else shape.distance
+	return minf(shape.distance, shape.radius()) if shape.bent() and not shape.outside else shape.distance
 
 
 ## The farthest a seat may be from the wall (a bent one's axis).
 static func max_distance(shape: Shape, limit: float) -> float:
-	return minf(limit, shape.radius()) if shape.bent() else limit
+	return minf(limit, shape.radius()) if shape.bent() and not shape.outside else limit
 
 
 ## A cell rectangle on the wall in metres: u, v of its lower left corner, and its size.
@@ -289,31 +369,6 @@ static func settle_grid(grid: Rect2i, cells: Array[Rect2i]) -> Rect2i:
 	return result if result.size != Vector2i.ZERO else Rect2i(0, 0, 1, 1)
 
 
-## The wall's size dragged by a corner (`corner`: (1, 1) lower right, (-1, 1)
-## lower left, (-1, -1) upper left, (1, -1) upper right; the user's wish,
-## 22.10.2026: not only the lower right) to (u, v): that corner's two edges go to
-## the cell boundary nearest the point (mid-gap); never smaller than its screens
-## nor than one cell. The other two edges stay.
-static func dragged_grid(grid: Rect2i, cells: Array[Rect2i], u: float, v: float, gap := DEFAULT_GAP,
-		corner := Vector2i(1, 1)) -> Rect2i:
-	var step := pitch(gap)
-	var edge := Vector2i(roundi(u / step.x + 0.5), roundi(-v / step.y + 0.5))
-	var start := grid.position
-	var end := grid.end
-	if corner.x > 0:
-		end.x = maxi(edge.x, start.x + 1)
-	else:
-		start.x = mini(edge.x, end.x - 1)
-	if corner.y > 0:
-		end.y = maxi(edge.y, start.y + 1)
-	else:
-		start.y = mini(edge.y, end.y - 1)
-	var result := Rect2i(start, end - start)
-	for cell in cells:
-		result = result.merge(cell)
-	return result
-
-
 ## Where a size handle is: past that corner of the wall.
 static func size_handle_point(grid: Rect2i, gap := DEFAULT_GAP, corner := Vector2i(1, 1)) -> Vector2:
 	var wall := area(grid, gap)
@@ -326,6 +381,101 @@ static func size_handle_point(grid: Rect2i, gap := DEFAULT_GAP, corner := Vector
 static func bend_handle_point(grid: Rect2i, gap := DEFAULT_GAP) -> Vector2:
 	var wall := area(grid, gap)
 	return Vector2(wall.get_center().x, wall.position.y - HANDLE_MARGIN.y - BEND_HANDLE_DROP)
+
+
+## Where the tilt handle is: over the middle of the wall's top edge.
+static func tilt_handle_point(grid: Rect2i, gap := DEFAULT_GAP) -> Vector2:
+	var wall := area(grid, gap)
+	return Vector2(wall.get_center().x, wall.end.y + HANDLE_MARGIN.y + BEND_HANDLE_DROP)
+
+
+## A tilt from the slider (degrees): sticks to every BEND_MAGNET_STEP_DEG within
+## `magnet_deg`; radians.
+static func tilt_from_degrees(degrees: float, magnet_deg: float) -> float:
+	degrees = clampf(degrees, -rad_to_deg(MAX_TILT), rad_to_deg(MAX_TILT))
+	var nearest := snappedf(degrees, BEND_MAGNET_STEP_DEG)
+	if absf(degrees - nearest) < magnet_deg:
+		degrees = nearest
+	return deg_to_rad(degrees)
+
+
+## How far out from the wall (or column) a screen of `size` stands so that no
+## part of it is behind the surface (the user's wish, 22.10.2026: a tilted screen
+## went through the column): where its edges come forward or go back — its own
+## bend (`curvature`, ±1 = `reach`, see main.gd) against the wall's — and what its
+## lean and turn (radians) take back behind its middle.
+static func lift(shape: Shape, reach: float, size: Vector2, curvature: float, pitch: float, yaw: float) -> float:
+	var sag := func(radius: float) -> float:
+		return radius * (1.0 - cos(minf(size.x * 0.5 / radius, PI)))
+	var wall := 0.0
+	if shape.bent():
+		wall = -sag.call(reach) if shape.outside else sag.call(reach)
+	var own := 0.0
+	if curvature != 0.0:
+		own = signf(curvature) * sag.call(reach / absf(curvature))
+	return maxf(wall - own, 0.0) + size.y * 0.5 * absf(sin(pitch)) + size.x * 0.5 * absf(sin(yaw))
+
+
+## What part of the wall a screen covers, as seen along it (u, v round its
+## middle; the user's wish, 22.10.2026: the magnet left gaps): a flat screen on a
+## column covers less of the arc than its width, a turned one less again and
+## lopsided; its bend, lean (`pitch`) and `lift` (WallLayout.lift) count too.
+## `reach` is the wall's radius at its height (bent) as in `lift`.
+static func footprint(shape: Shape, reach: float, size: Vector2, curvature: float, pitch: float, yaw: float, lift := 0.0) -> Rect2:
+	var edge := Vector2(size.x * 0.5, 0.0)
+	if curvature != 0.0:
+		var own := reach / absf(curvature)
+		var angle := minf(size.x * 0.5 / own, PI)
+		# Concave: the edges come forward; convex: they go back.
+		edge = Vector2(own * sin(angle), signf(curvature) * own * (1.0 - cos(angle)))
+	var sides: Array[float] = []
+	for side: float in [-1.0, 1.0]:
+		var x := side * edge.x
+		var out := edge.y
+		# Turned about the screen's up axis.
+		var turned := Vector2(x * cos(yaw) + out * sin(yaw), -x * sin(yaw) + out * cos(yaw))
+		turned.y += lift
+		if not shape.bent():
+			sides.append(turned.x)
+		elif shape.outside:
+			sides.append(reach / shape.squeeze * atan2(turned.x, reach + turned.y))
+		else:
+			sides.append(reach / shape.squeeze * atan2(turned.x, reach - turned.y))
+	var half_height := size.y * 0.5 * cos(pitch)
+	return Rect2(sides[0], -half_height, sides[1] - sides[0], half_height * 2.0)
+
+
+## A screen placed freely on a wall (the "only VR" mode, slice l, the user's wish
+## 22.10.2026: as on a sphere): its middle snaps, each way on its own, within
+## `reach` (m) to edge to edge with another screen (a gap apart), edges and
+## middles in line with it, and to the middles of the cells (`step`, 0 = not).
+## `own` is what it covers round its middle, `others` what they cover (footprint).
+static func snap_free(middle: Vector2, own: Rect2, others: Array[Rect2], gap: float, reach: float,
+		step := Vector2.ZERO) -> Vector2:
+	var result := middle
+	for axis in 2:
+		var low := own.position[axis]
+		var high := own.end[axis]
+		var candidates: Array[float] = []
+		for other in others:
+			candidates.append_array([other.end[axis] + gap - low, other.position[axis] - gap - high,
+					other.position[axis] - low, other.end[axis] - high, other.get_center()[axis] - (low + high) * 0.5])
+		if step[axis] > 0.0:
+			candidates.append(roundf(middle[axis] / step[axis]) * step[axis])
+		var best := reach
+		for candidate in candidates:
+			if absf(candidate - middle[axis]) < best:
+				best = absf(candidate - middle[axis])
+				result[axis] = candidate
+	return result
+
+
+## A u along a closed wall (a full circle) brought within half its length of
+## `around`: the same place on the circle, the nearest way round.
+static func wrapped(u: float, around: float, shape: Shape) -> float:
+	if shape.bend < 0.999:
+		return u
+	return around + wrapf(u - around, -shape.length * 0.5, shape.length * 0.5)
 
 
 ## The wall's outline for drawing as lines (pairs of points, the fixture's space):
@@ -567,6 +717,31 @@ static func best_resolution(box: Vector2, available: Array[Vector2i]) -> Vector2
 			best = size
 			best_score = score
 	return best
+
+
+## The wall without anything outside `grid` (the user's wish, 22.10.2026: no
+## memory of cells taken away — their splits and joined cells were still drawn
+## on top of a column made smaller): splits of cells outside, joined cells
+## reaching outside, and screens' places in them go (those screens find a cell anew).
+static func pruned(wall: Wall, grid: Rect2i) -> Wall:
+	var result := wall.copy()
+	for id: String in wall.blocks:
+		for member in (wall.blocks[id] as String).split("+", false):
+			if not grid.has_point(_cell_of(wall, member)):
+				result.blocks.erase(id)
+				break
+	var kept := func(slot: String) -> bool:
+		var head := slot.get_slice(":", 0)
+		return result.blocks.has(head) if head.begins_with("B") else grid.has_point(cell_of(head))
+	for slot: String in wall.splits:
+		if not kept.call(slot):
+			result.splits.erase(slot)
+	for key: String in wall.parts:
+		for place in (wall.parts[key] as String).split("+", false):
+			if not kept.call(place):
+				result.parts.erase(key)
+				break
+	return result
 
 
 static func slot_of(cell: Vector2i) -> String:

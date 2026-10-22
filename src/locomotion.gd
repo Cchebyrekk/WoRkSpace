@@ -47,6 +47,8 @@ class Options:
 	var sphere_handle := 1
 	var wall_size_handle := 1
 	var wall_bend_handle := 1
+	## A wall's or column's tilt ball over its top (slice l).
+	var wall_tilt_handle := 1
 	var split_handle := 1
 	## Handles always (0) or only in the editing mode (1; the radial menu's
 	## «Редактирование» switches it, the user's wish 22.10.2026).

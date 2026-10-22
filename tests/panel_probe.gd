@@ -52,6 +52,30 @@ func _initialize() -> void:
 	_check(int(grip.x) == ScreenPanel.Grip.MOVE, "ручка переноса под серединой")
 	grip = panel.grip_at(eye, (grip_point - eye).normalized(), [ScreenPanel.Grip.TILT])
 	_check(int(grip.x) == ScreenPanel.Grip.NONE, "запрещённая ручка не ловится")
+	# Bent the other way (slice l): a mesh with the viewport's picture, the layer
+	# empty and without a hole; hit from the front, not from behind.
+	var convex := PanelLayout.placement_at(0.0, 0.0, placements[0].size, eye, 1.1, NAN, -0.8)
+	panel.place(convex)
+	panel.update_back(eye, true)
+	_check(panel.layer is OpenXRCompositionLayerQuad and panel.layer.layer_viewport == null, "выпуклая: слой пустой")
+	_check(not panel.layer.enable_hole_punch, "выпуклая: без дыры в сцене")
+	var surface := panel._surface
+	_check(surface.visible and surface.mesh != null and surface.transform.is_equal_approx(convex.transform), "выпуклая: сетка с картинкой на месте")
+	var arrays := (surface.mesh as ArrayMesh).surface_get_arrays(0)
+	_check(arrays[Mesh.ARRAY_TEX_UV] != null and (arrays[Mesh.ARRAY_TEX_UV] as PackedVector2Array).size() == (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size(),
+			"выпуклая: у сетки есть координаты картинки")
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	_check(verts[0].x < 0.0 and verts[0].z < 0.0, "выпуклая: левый край уходит назад")
+	hit = panel.hit_distance(eye, Vector3.FORWARD)
+	_check(is_equal_approx(hit, 1.1), "выпуклая: середина на месте (%.3f)" % hit)
+	var side := panel.hit_distance(eye, Vector3(sin(0.2), 0.0, -cos(0.2)))
+	_check(side > 1.1 / cos(0.2), "выпуклая: край дальше, чем у плоской")
+	_check(panel.uv_at(eye + Vector3(sin(0.2), 0.0, -cos(0.2)) * side).x > 0.5, "выпуклая: u справа от середины")
+	_check(panel.hit_distance(eye + Vector3.FORWARD * 3.0, Vector3.BACK) < 0.0, "выпуклая: сзади не ловится")
+	panel.place(placements[0])
+	_check(panel.layer is OpenXRCompositionLayerQuad and panel.layer.layer_viewport != null and not panel._surface.visible,
+			"снова плоская: картинка в слое")
+
 	panel.show_grips(true, [ScreenPanel.Grip.MOVE], ScreenPanel.Grip.MOVE, ScreenPanel.Grip.NONE)
 	panel.close()
 

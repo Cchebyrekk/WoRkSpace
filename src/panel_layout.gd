@@ -155,8 +155,9 @@ static func visible_half(size: Vector2, elevation: float, curvature: float, dist
 
 
 ## Radius of a curved panel's cylinder; 0 for a flat one.
+## Negative for a panel bent the other way (convex, on a wall or a column, slice l).
 static func curve_radius(curvature: float, distance: float) -> float:
-	return distance / curvature if curvature > 0.0 else 0.0
+	return distance / curvature if curvature != 0.0 else 0.0
 
 
 ## A panel of `size` metres centred at `heading` / `elevation` (radians) on the

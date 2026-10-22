@@ -1,7 +1,7 @@
 class_name WorldLayout
 extends RefCounted
 ## The world's fixtures: things that hold screen panels (slice j: spheres; slice
-## k: walls, see WallLayout; pillars follow). Each has its place in the world, its own monitors (a
+## k: walls, see WallLayout; slice l: columns — walls bent outwards). Each has its place in the world, its own monitors (a
 ## monitor hangs on exactly one fixture) and its seat. Pure logic, covered by
 ## tests/run_tests.gd. Decided with the user on 20.10.2026.
 
@@ -23,12 +23,17 @@ class Fixture:
 	var centre := Vector3(0.0, 1.45, 0.0)
 	## Which way its middle is, as seen from the centre (radians about up; 0 = -Z).
 	var yaw := 0.0
-	## A sphere's radius; a wall's distance from the seat.
+	## A sphere's radius; a wall's (or a column's) distance from the seat.
 	var radius := DEFAULT_RADIUS
 	## Keys of the monitors on it (ScreenPanel.monitor_key).
 	var monitors := PackedStringArray()
 	## A wall's bend: a share of a full circle, 0 = flat .. 1 = a closed cylinder (WallLayout.Shape).
+	## A column (kind "column", slice l) is a wall bent the other way: its screens face out.
 	var bend := 0.0
+	## A wall's lean (radians; > 0 its face looks up): bent, a cone (WallLayout.Shape.tilt).
+	var tilt := 0.0
+	## Thinner than its cells (WallLayout.Shape.squeeze, 1 = as its cells).
+	var squeeze := 1.0
 	## A wall's screens: monitor key -> Rect2i of cells (WallLayout).
 	var cells := {}
 	## A wall's size in cells (empty = as big as its screens) and the gap between cells (m).
@@ -52,7 +57,7 @@ class Fixture:
 			stored[key] = [cell.position.x, cell.position.y, cell.size.x, cell.size.y]
 		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors,
 				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y],
-				"parts": parts, "splits": splits, "blocks": blocks}
+				"parts": parts, "splits": splits, "blocks": blocks, "tilt": tilt, "squeeze": squeeze}
 
 	static func from_dictionary(data: Dictionary) -> Fixture:
 		var fixture := Fixture.new()
@@ -64,6 +69,8 @@ class Fixture:
 		fixture.radius = clampf(float(data.get("radius", DEFAULT_RADIUS)), MIN_RADIUS, MAX_RADIUS)
 		fixture.monitors = PackedStringArray(data.get("monitors", PackedStringArray()))
 		fixture.bend = clampf(float(data.get("bend", 0.0)), 0.0, 1.0)
+		fixture.tilt = clampf(float(data.get("tilt", 0.0)), -WallLayout.MAX_TILT, WallLayout.MAX_TILT)
+		fixture.squeeze = clampf(float(data.get("squeeze", 1.0)), WallLayout.MIN_SQUEEZE, 1.0)
 		var stored: Variant = data.get("cells", {})
 		if stored is Dictionary:
 			for key: Variant in stored:
@@ -206,11 +213,13 @@ static func new_fixture(fixtures: Array[Fixture], kind: String, centre: Vector3,
 	for other in fixtures:
 		if other.kind == kind:
 			count += 1
-	fixture.name = "%s %d" % [{"sphere": "Шар", "wall": "Стена"}.get(kind, kind), count]
+	fixture.name = "%s %d" % [{"sphere": "Шар", "wall": "Стена", "column": "Столб"}.get(kind, kind), count]
 	fixture.centre = centre
 	fixture.yaw = yaw
-	if kind == "wall":
+	if kind == "wall" or kind == "column":
 		fixture.radius = WallLayout.DEFAULT_DISTANCE
+	if kind == "column":
+		fixture.bend = 1.0
 	return fixture
 
 
@@ -269,9 +278,3 @@ const HANDLE_ELEVATION_DEG := -70.0
 
 static func radius_handle(fixture: Fixture) -> Vector3:
 	return fixture.frame() * (PanelLayout.direction_of(0.0, deg_to_rad(HANDLE_ELEVATION_DEG)) * fixture.radius)
-
-
-## A radius dragged by a grip: the hand's distance from the centre now against
-## when the grip was taken, times `gain`, kept within MIN_RADIUS..MAX_RADIUS.
-static func dragged_radius(start_radius: float, start_distance: float, distance: float, gain := 2.0) -> float:
-	return clampf(start_radius + (distance - start_distance) * gain, MIN_RADIUS, MAX_RADIUS)
