@@ -18,6 +18,12 @@ func _initialize() -> void:
 	for i in monitors.size():
 		if monitors[i]["primary"]:
 			monitor_index = i
+	# WORKPLACE_PROBE_MONITOR=<name, e.g. DISPLAY46>: that monitor instead of the primary.
+	var wanted := OS.get_environment("WORKPLACE_PROBE_MONITOR")
+	for i in monitors.size():
+		if wanted != "" and str(monitors[i]["name"]).ends_with(wanted):
+			monitor_index = i
+	print("probe: снимаю ", monitors[monitor_index])
 
 	# Mouse injection round trip: "moving" the cursor to where it already is must
 	# leave it there, which checks the pixel-to-SendInput mapping without disturbing the user.

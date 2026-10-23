@@ -36,6 +36,10 @@ class Options:
 	## What a controller's thumbstick does: 0 = scroll while its ray is on a
 	## screen, move otherwise; 1 = always scroll; 2 = always move.
 	var stick_mode := 0
+	## The network of places (slice m): how long the flight to a place takes (s,
+	## 0 = at once) and how many nearest places each one links to by itself.
+	var flight_sec := 0.5
+	var auto_links := 2
 	## Seated at a wall: which hand (and stick) slides along it, 0 = left, 1 = right;
 	## the other brings the wall closer or farther (the user's choice, 21.10.2026).
 	var wall_slide_hand := 1

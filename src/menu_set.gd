@@ -30,6 +30,8 @@ const ACTIONS := {
 	"stand_up": ["Встать", []],
 	"quit": ["Выход", []],
 	"edit": ["Редактирование", []],
+	"places": ["Сеть мест", []],
+	"groups": ["Группы экранов", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.
@@ -78,7 +80,7 @@ static func default_menus() -> Array:
 	return [
 		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all"]},
 		{"name": "Окна", "items": ["alt_tab", "desktop", "minimize", "maximize", "close", "snap_left", "snap_right"]},
-		{"name": "Мир и система", "items": ["center", "stand_up", "start", "save", "explorer", "task_manager", "quit"]},
+		{"name": "Мир и система", "items": ["center", "stand_up", "places", "start", "save", "explorer", "task_manager", "quit"]},
 	]
 
 

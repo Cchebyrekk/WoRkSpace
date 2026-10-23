@@ -31,6 +31,8 @@ func _init() -> void:
 	_test_wall_layout()
 	_test_wall_split()
 	_test_column_and_lean()
+	_test_place_network()
+	_test_desktop_groups()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -1881,3 +1883,88 @@ func _test_column_and_lean() -> void:
 	fixture.squeeze = 0.6
 	var restored := WorldLayout.Fixture.from_dictionary(fixture.to_dictionary())
 	_check(restored.kind == "column" and is_equal_approx(restored.tilt, 0.3) and is_equal_approx(restored.squeeze, 0.6), "столб: наклон и толщина сохраняются")
+
+
+## Slice m: the network of places.
+func _test_place_network() -> void:
+	var points := {1: Vector3(0, 0, 0), 2: Vector3(1, 0, 0), 3: Vector3(5, 0, 0), 4: Vector3(5, 0, 1)}
+	var auto := PlaceNetwork.auto_links(points, 1)
+	_check(auto.has(Vector2i(1, 2)) and auto.has(Vector2i(3, 4)) and auto.size() == 2, "сеть: каждое место с ближайшим (%s)" % [auto])
+	_check(PlaceNetwork.auto_links(points, 2).has(Vector2i(2, 3)), "сеть: по два ближайших — мостик между кучками")
+	_check(PlaceNetwork.auto_links(points, 0).is_empty(), "сеть: связи с ближайшими выключены")
+	var none: Array[Vector2i] = []
+	var drawn := PlaceNetwork.toggled(1, 3, points, 1, none, none)
+	_check((drawn["added"] as Array).has(Vector2i(1, 3)), "сеть: своя связь добавлена")
+	var undrawn := PlaceNetwork.toggled(3, 1, points, 1, drawn["added"], drawn["removed"])
+	_check((undrawn["added"] as Array).is_empty(), "сеть: своя связь убрана тем же жестом")
+	var cut := PlaceNetwork.toggled(2, 1, points, 1, none, none)
+	_check((cut["removed"] as Array).has(Vector2i(1, 2)), "сеть: автосвязь убрана")
+	var all := PlaceNetwork.links(points, 1, drawn["added"], cut["removed"])
+	_check(all.has(Vector2i(1, 3)) and all.has(Vector2i(3, 4)) and not all.has(Vector2i(1, 2)), "сеть: связи — авто без убранных и свои")
+	var gone: Array[Vector2i] = [Vector2i(1, 9)]
+	_check(not PlaceNetwork.links(points, 1, gone, none).has(Vector2i(1, 9)), "сеть: связь с пропавшим местом не считается")
+	var frame := PlaceNetwork.map_frame([Vector3(-5, 0, 0), Vector3(5, 2, 0)], 0.6)
+	_check((frame[0] as Vector3).is_equal_approx(Vector3(0, 1, 0)) and is_equal_approx(frame[1], 0.06), "сеть: карта вмещает мир")
+	_check(is_equal_approx(PlaceNetwork.map_frame([Vector3.ZERO, Vector3(0.1, 0, 0)], 0.6)[1], 0.6), "сеть: маленький мир не раздувается")
+	var bubble := PlaceNetwork.cloud([Vector3(0, 0, 0), Vector3(2, 0, 0)], 0.1)
+	_check((bubble[0] as Vector3).is_equal_approx(Vector3(1, 0, 0)) and is_equal_approx(bubble[1], 1.1), "сеть: облако группы")
+	var from := Transform3D(Basis.IDENTITY, Vector3.ZERO)
+	var to := Transform3D(Basis(Vector3.UP, PI * 0.5), Vector3(4, 0, 0))
+	_check(PlaceNetwork.flight(from, to, 0.0).is_equal_approx(from) and PlaceNetwork.flight(from, to, 1.0).is_equal_approx(to), "сеть: перелёт — от и до")
+	_check(PlaceNetwork.flight(from, to, 0.5).origin.is_equal_approx(Vector3(2, 0, 0)), "сеть: середина пути — посередине")
+	_check(PlaceNetwork.links_from(PlaceNetwork.links_to([Vector2i(2, 5)] as Array[Vector2i])) == ([Vector2i(2, 5)] as Array[Vector2i]), "сеть: связи сохраняются")
+	var fixture := WorldLayout.Fixture.new()
+	fixture.group = 3
+	fixture.placement = 2
+	var stored := WorldLayout.Fixture.from_dictionary(fixture.to_dictionary())
+	_check(stored.group == 3 and stored.placement == 2, "сеть: группа и расстановка заготовки сохраняются")
+
+
+## The Windows layout by groups (one fixture = one group, slice n).
+func _test_desktop_groups() -> void:
+	var a: Array[Rect2i] = [Rect2i(100, 50, 1920, 1080), Rect2i(2020, 50, 1920, 1080)]
+	var b: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080)]
+	var na := DesktopGroups.normalized(a)
+	_check(na[0].position == Vector2i.ZERO and na[1].position == Vector2i(1920, 0), "группы: группа с нуля")
+	var placed := DesktopGroups.compose([na, DesktopGroups.normalized(b)], [1, 2], {})
+	_check((placed[1] as Array)[0].position == Vector2i(3840, 0), "группы: по умолчанию друг за другом")
+	var moved := DesktopGroups.compose([na, DesktopGroups.normalized(b)], [1, 2], {2: Vector2i(0, 1080)})
+	_check((moved[1] as Array)[0].position == Vector2i(0, 1080) and (moved[0] as Array)[0].position == Vector2i(1920, 0),
+			"группы: перетащенная на своём месте, остальные после неё")
+	var others: Array[Rect2i] = [Rect2i(0, 0, 3840, 1080)]
+	_check(DesktopGroups.snapped(Vector2i(3900, 40), Vector2i(1920, 1080), others, 288) == Vector2i(3840, 0), "группы: прилипает вплотную и в линию")
+	_check(DesktopGroups.snapped(Vector2i(6000, 3000), Vector2i(1920, 1080), others, 288) == Vector2i(6000, 3000), "группы: далеко — не прилипает")
+	_check(DesktopGroups.offsets_from(DesktopGroups.offsets_to({3: Vector2i(5, -7)})) == {3: Vector2i(5, -7)}, "группы: места сохраняются")
+	# Dropped: never on another screen, touching one; screens stick corner to corner.
+	var one: Array[Rect2i] = [Rect2i(0, 0, 3840, 1080)]
+	var single: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080)]
+	var off_it := DesktopGroups.placed(Vector2i(1000, 200), single, one, 288)
+	_check(off_it == Vector2i(1000, 1080), "группы: на другую не ложится, съезжает к ближнему краю (%s)" % off_it)
+	var corner := DesktopGroups.placed(Vector2i(1800, 1150), single, one, 288)
+	_check(corner == Vector2i(1920, 1080), "группы: угол к углу (%s)" % corner)
+	var far := DesktopGroups.placed(Vector2i(9000, 300), single, one, 288)
+	_check(DesktopGroups.fits(DesktopGroups.shifted(single, far), one) and far.x == 3840, "группы: далёкая притягивается вплотную (%s)" % far)
+	_check(not DesktopGroups.touches(Rect2i(3840, 1080, 100, 100), one[0]), "группы: только углом — не касание")
+	# A group of two screens of different size: the corner is a screen's, not the frame's.
+	var uneven: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 300, 2560, 1440)]
+	var by_screen := DesktopGroups.placed(Vector2i(4400, 380), single, uneven, 288)
+	_check(by_screen == Vector2i(4480, 300), "группы: угол к углу экрана, а не рамки группы (%s)" % by_screen)
+	# Dropped on another group: that one moves aside, whole; the dropped one stays.
+	var on_top := {1: [Rect2i(1000, 0, 1920, 1080)] as Array[Rect2i], 2: [Rect2i(1920, 0, 1920, 1080)] as Array[Rect2i]}
+	var pushed := DesktopGroups.pushed(on_top, 1)
+	_check((pushed[1] as Array)[0] == Rect2i(1000, 0, 1920, 1080), "группы: брошенная остаётся")
+	_check((pushed[2] as Array)[0] == Rect2i(2920, 0, 1920, 1080), "группы: та, на которую бросили, отодвинута (%s)" % (pushed[2] as Array)[0])
+	# Two rows of three: slightly on the row below, it goes above it, in line.
+	var row: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080), Rect2i(3840, 0, 1920, 1080)]
+	var above := DesktopGroups.placed(Vector2i(150, 80), row, DesktopGroups.shifted(row, Vector2i(0, 1080)), 288)
+	_check(above == Vector2i(0, 0), "группы: ряд над рядом ровно (%s)" % above)
+	_check(DesktopGroups.covered(DesktopGroups.shifted(row, Vector2i(150, 80)), DesktopGroups.shifted(row, Vector2i(0, 1080))) < 0.5, "группы: случайное перекрытие — не половина")
+	_check(DesktopGroups.covered(single, [Rect2i(0, 0, 3840, 1080)] as Array[Rect2i]) == 1.0, "группы: маленькая целиком на большой — перекрыта")
+	# Joined: touching ones stay, a group cut off moves whole to touch the rest.
+	var groups := {1: [Rect2i(0, 0, 1920, 1080)] as Array[Rect2i], 2: [Rect2i(1920, 0, 1920, 1080)] as Array[Rect2i],
+			3: [Rect2i(9000, 5000, 1920, 1080), Rect2i(10920, 5000, 1920, 1080)] as Array[Rect2i]}
+	var joined := DesktopGroups.joined(groups, 1)
+	_check(joined[1] == groups[1] and joined[2] == groups[2], "группы: касающиеся остаются")
+	var two_boxes: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080)]
+	var cut_off: Array[Rect2i] = joined[3]
+	_check(DesktopGroups.fits(cut_off, two_boxes) and cut_off[1].position - cut_off[0].position == Vector2i(1920, 0), "группы: оторванная приставлена целиком (%s)" % [cut_off])

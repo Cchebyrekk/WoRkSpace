@@ -59,6 +59,9 @@ var _viewport: SubViewport
 ## layer seen from outside — the picture was not there). Not the capture texture
 ## itself (that on a 3D material removed the D3D12 device), the viewport's.
 var _surface: MeshInstance3D
+## The thumbnail's own viewport (see thumbnail()).
+var _thumb: SubViewport
+const THUMB_WIDTH := 480
 var _surface_shape := ""
 var _origin: XROrigin3D
 var _hole_punch := false
@@ -98,6 +101,10 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	var picture := TextureRect.new()
 	picture.texture = new_capture.get_texture()
 	picture.stretch_mode = TextureRect.STRETCH_SCALE
+	# Not at least the texture's own size: a monitor over MAX_LAYER_SIDE gets a smaller
+	# viewport (layer_size), and a picture keeping its size spilled past it — the
+	# right and lower parts were cut off and the cursor missed (23.10.2026, 4632×3576).
+	picture.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	picture.set_anchors_preset(Control.PRESET_FULL_RECT)
 	panel._viewport = SubViewport.new()
 	panel._viewport.size = layer_size(panel.monitor_rect.size)
@@ -412,6 +419,31 @@ func uv_at(point: Vector3) -> Vector2:
 ## The pixel on the Windows virtual desktop under a point of the panel.
 func pixel_at(uv: Vector2) -> Vector2:
 	return Vector2(monitor_rect.position) + uv * Vector2(monitor_rect.size - Vector2i.ONE)
+
+
+## A small picture of the monitor for the plane of groups (slice n): a viewport of
+## its own, not the panel's one (that draws into its OpenXR layer, and its texture
+## was black on the plane, 23.10.2026), nor the capture texture itself (which must
+## not go on a 3D material). Drawn only while `set_thumbnail_live(true)`.
+func thumbnail() -> Texture2D:
+	if _thumb == null:
+		_thumb = SubViewport.new()
+		_thumb.size = Vector2i(THUMB_WIDTH, maxi(roundi(THUMB_WIDTH * float(monitor_rect.size.y) / maxf(monitor_rect.size.x, 1.0)), 1))
+		_thumb.disable_3d = true
+		_thumb.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		var small := TextureRect.new()
+		small.texture = capture.get_texture()
+		small.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		small.stretch_mode = TextureRect.STRETCH_SCALE
+		small.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_thumb.add_child(small)
+		add_child(_thumb)
+	return _thumb.get_texture()
+
+
+func set_thumbnail_live(live: bool) -> void:
+	if _thumb != null:
+		_thumb.render_target_update_mode = SubViewport.UPDATE_ALWAYS if live else SubViewport.UPDATE_DISABLED
 
 
 func close() -> void:

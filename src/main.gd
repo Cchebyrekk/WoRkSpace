@@ -170,6 +170,8 @@ const TUNABLES := [
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
+	["world", "flight_sec", "Перелёт к месту", 1.0, "с", 0.1, 0.0, 2.0],
+	["world", "auto_links", "Связи с ближайшими", 1.0, "", 1.0, 0.0, 4.0],
 ]
 
 const EXIT_BUTTON_HOLD_SEC := 1.0
@@ -210,7 +212,7 @@ const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауз
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
 	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
-	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики"}
+	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики", "flight_sec": "Сеть мест"}
 ## The value between − and + is at most this wide; longer text gets a smaller font (m).
 const SETTINGS_VALUE_WIDTH := 0.24
 const TUNABLE_TABS := {
@@ -219,7 +221,7 @@ const TUNABLE_TABS := {
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
 	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
-	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7,
+	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -738,6 +740,59 @@ var _wall_positions := {}
 ## of the wall (WallLayout.footprint), for the magnet.
 var _wall_middles := {}
 var _wall_spots := {}
+## The network of places (slice m): the map shown in front of the user, what each
+## hand points at on it (fixture id, -1 none), a link being drawn from a place,
+## the map being turned, the user's own links and the automatic ones taken away
+## ([world] links_added, links_removed), and a flight under way.
+var _map_open := false
+var _map_root: Node3D
+var _map_pivot: Node3D
+var _map_dots := {}
+var _map_lines: MeshInstance3D
+var _map_drag: MeshInstance3D
+var _map_me: MeshInstance3D
+var _map_clouds: Array[MeshInstance3D] = []
+var _map_label: Label3D
+var _map_local := {}
+var _map_hover: Array[int] = [-1, -1]
+var _map_link_from: Array[int] = [-1, -1]
+var _map_turning: Array[float] = [NAN, NAN]
+var _map_yaw := 0.0
+var _links_added: Array[Vector2i] = []
+## Where each fixture's group stands in the Windows layout, by fixture id (top left,
+## px; [world] group_offsets; none = one after another), and the plane of groups
+## (slice n): open, its root, a group being dragged, the miniatures by fixture id.
+var _group_offsets := {}
+var _groups_open := false
+var _groups_root: Node3D
+var _groups_drag := {}
+var _groups_tiles := {}
+var _groups_frame := {}
+## The plane's zoom and pan (two hands pinching, one on empty space), and the
+## group the others are joined to (the one dragged last).
+var _groups_zoom := 1.0
+var _groups_pan := Vector2.ZERO
+var _groups_two := {}
+var _groups_anchor := -1
+const GROUPS_PLANE := Vector2(0.9, 0.5)
+const GROUPS_AHEAD := 0.6
+const GROUPS_DROP := 0.1
+## Dropped groups stick to others within this share of a 1920-wide screen, or
+## within GROUPS_SNAP_M on the plane if that is more (at small zoom 15 % was 2 cm).
+const GROUPS_SNAP_SHARE := 0.15
+const GROUPS_SNAP_M := 0.04
+## A group dropped on another pushes it aside from this share covered.
+const GROUPS_PUSH_SHARE := 0.5
+var _links_removed: Array[Vector2i] = []
+var _flight := {}
+const MAP_SIZE := 0.6
+const MAP_AHEAD := 0.55
+const MAP_DROP := 0.15
+const MAP_DOT := 0.012
+## A place is pointed at by a fingertip this near (m), or by a ray passing this near.
+const MAP_HAND_REACH := 0.05
+const MAP_RAY_REACH := 0.025
+const MAP_HOVER_SCALE := 2.2
 ## Each column's axis in the world as last placed: the column stays there while
 ## its distance, size, thickness or bend change, and the user is carried instead
 ## (22.10.2026: changing the distance moved the column the user went round).
@@ -811,7 +866,8 @@ const FIXTURE_ROWS := 6
 const HANDLE_SIZE := 0
 const HANDLE_BEND := 1
 const HANDLE_TILT := 5
-const HANDLE_KINDS := [0, 1, 2, 3, 4, 5]
+const HANDLE_RESET := 6
+const HANDLE_KINDS := [0, 1, 2, 3, 4, 5, 6]
 ## A screen's grips, set on sliders like the fixtures' handles (not drawn as balls).
 const HANDLE_PANEL_TILT := 10
 const HANDLE_PANEL_CURVE := 11
@@ -820,13 +876,15 @@ const PANEL_GRIP_HANDLES := {ScreenPanel.Grip.TILT: HANDLE_PANEL_TILT, ScreenPan
 		ScreenPanel.Grip.RESIZE: HANDLE_PANEL_SIZE}
 ## The pad of two values (m).
 const PAD_SIZE := Vector2(0.5, 0.32)
+## «Как в Windows» sits this far left of a wall's tilt ball (m).
+const RESET_HANDLE_SHIFT := 0.3
 ## Making a column thinner sticks to every 5 % within 1.5 %.
 const SQUEEZE_MAGNET_STEP := 0.05
 const SQUEEZE_MAGNET_REACH := 0.015
 ## The magnet of screens placed freely on a wall (m).
 const FREE_MAGNET_REACH := 0.06
 ## The corner whose sides each size handle moves (_slider_apply); the bend's and the tilt's are unused.
-const HANDLE_CORNERS: Array[Vector2i] = [Vector2i(1, 1), Vector2i(0, 0), Vector2i(-1, 1), Vector2i(-1, -1), Vector2i(1, -1), Vector2i(0, 0)]
+const HANDLE_CORNERS: Array[Vector2i] = [Vector2i(1, 1), Vector2i(0, 0), Vector2i(-1, 1), Vector2i(-1, -1), Vector2i(1, -1), Vector2i(0, 0), Vector2i(0, 0)]
 const FIXTURE_MONITOR_ROWS := 8
 const FIXTURE_RADIUS_STEP := 0.1
 var _fixture_rows: Array[Node3D] = []
@@ -1044,7 +1102,9 @@ func _process(delta: float) -> void:
 	_update_shader_warm_up()
 	_probe_mark(-1)
 	# The rig moves first, so this frame's rays and panels start from where the user is.
-	_update_locomotion(delta)
+	# A flight to a place carries the user on its own; no moving meanwhile.
+	if not _update_flight(delta):
+		_update_locomotion(delta)
 	_update_world_visuals()
 	_update_panels(delta)
 	_probe_mark(0)
@@ -1084,6 +1144,8 @@ func _process(delta: float) -> void:
 	_update_pose_recording()
 	_update_grabs(delta)
 	_update_radius_handles(delta)
+	_update_map()
+	_update_groups_plane()
 	_place_monitor_menu()
 	_update_buttons(delta)
 	_update_sliders()
@@ -1593,8 +1655,14 @@ func _sit() -> void:
 		var seen := WallLayout.project(fixture.frame().affine_inverse() * _camera.global_position, _wall_shape(fixture))
 		_seat_slide = WallLayout.nearest_screen(_wall_cell_list(fixture), seen.x, seen.y, fixture.gap)
 	_origin.global_transform = _seat_rig(fixture)
+	_arrive(fixture)
+
+
+## Seated at `fixture` (by «Сесть» or at the end of a flight): Windows follows a
+## wall or column, moving starts afresh, the world stays in place, it is saved.
+func _arrive(fixture: WorldLayout.Fixture) -> void:
 	if _walled(fixture):
-		_apply_wall_windows(fixture)
+		_apply_group_windows()
 	for pointer in _pointers:
 		pointer.travel_anchors.clear()
 	_keep_world_in_place()
@@ -1635,6 +1703,14 @@ func _build_fixture_section(tab: Node3D) -> void:
 		tab.add_child(row)
 		var name_label := _settings_label("", Vector3(-0.8, 0.0, 0.0), 24, row)
 		name_label.name = "Name"
+		# Its place's group in the network of places (slice m): pressed, the next one.
+		var group := _add_button_to(row, "", Vector3(-1.04, 0.0, 0.0), Vector2(0.13, 0.052), 0.25)
+		group.name = "Group"
+		group.activated.connect(_on_fixture_group.bind(r))
+		# Its screens' placement (23.10.2026): as everywhere, by cells / layout, freely.
+		var placing := _add_button_to(row, "", Vector3(0.47, 0.0, 0.0), Vector2(0.2, 0.052), 0.25)
+		placing.name = "Placement"
+		placing.activated.connect(_on_fixture_placement.bind(r))
 		_add_button_to(row, "−", Vector3(-0.6, 0.0, 0.0), Vector2(0.07, 0.052), 0.25).activated.connect(_on_fixture_radius.bind(r, -1.0))
 		var radius_label := _settings_label("", Vector3(-0.5, 0.0, 0.0), 24, row)
 		radius_label.name = "Radius"
@@ -1662,10 +1738,10 @@ func _build_fixture_section(tab: Node3D) -> void:
 		var row := Node3D.new()
 		row.position = Vector3(0.0, 0.45 - m * 0.07, 0.0)
 		tab.add_child(row)
-		var label := _settings_label("", Vector3(0.62, 0.0, 0.0), 22, row)
+		var label := _settings_label("", Vector3(0.8, 0.0, 0.0), 22, row)
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 		label.name = "Monitor"
-		var button := _add_button_to(row, "", Vector3(0.8, 0.0, 0.0), Vector2(0.28, 0.055), 0.25)
+		var button := _add_button_to(row, "", Vector3(0.98, 0.0, 0.0), Vector2(0.28, 0.055), 0.25)
 		button.name = "Fixture"
 		button.activated.connect(_on_monitor_fixture.bind(m))
 		_fixture_monitor_rows.append(row)
@@ -1681,6 +1757,8 @@ func _refresh_fixture_section() -> void:
 		if row.visible:
 			var fixture := _fixtures[r]
 			(row.get_node("Name") as Label3D).text = fixture.name + (" (сижу)" if fixture.id == _seated else "")
+			(row.get_node("Group") as VrButton).set_text("гр. %d" % fixture.group if fixture.group > 0 else "без гр.")
+			(row.get_node("Placement") as VrButton).set_text(_placement_name(fixture))
 			(row.get_node("Radius") as Label3D).text = "%.1f м" % fixture.radius
 			var wall := _walled(fixture)
 			for part: String in ["GapLess", "Gap", "GapMore"]:
@@ -1758,6 +1836,7 @@ func _on_monitor_fixture(m: int) -> void:
 	var next := _fixtures[(_fixtures.find(_fixture_of(panel)) + 1) % _fixtures.size()]
 	WorldLayout.assign(_fixtures, panel.monitor_key, next.id)
 	_wall_positions.erase(panel.monitor_key)
+	_apply_group_windows()
 	_fixture_changed("%s — на «%s»" % [panel.monitor_name, next.name])
 
 
@@ -1774,6 +1853,8 @@ func _fixture_changed(message: String) -> void:
 ## it — smaller; the screens follow live, the radius is saved on letting go.
 func _update_radius_handles(delta: float) -> void:
 	_update_outlines()
+	if _map_open or _groups_open:
+		return
 	_update_split_grips()
 	# Handle h: the fixture h % FIXTURE_ROWS, of kind h / FIXTURE_ROWS (HANDLE_*).
 	for h in _radius_handles.size():
@@ -1810,7 +1891,7 @@ func _update_radius_handles(delta: float) -> void:
 				_fixture_changed(_handle_text(fixture, pointer.radius_kind, panel))
 				if _walled(fixture):
 					if _seated == fixture.id:
-						_apply_wall_windows(fixture)
+						_apply_group_windows()
 					_apply_wall_resolutions()
 			continue
 		if not pointer.active or pointer.grab_panel != null:
@@ -1827,7 +1908,10 @@ func _update_radius_handles(delta: float) -> void:
 				pointer.hit_distance = minf(pointer.hit_distance, along)
 				_show_radius_handle(fixture, ScreenPanel.GRIP_HOVER_COLOR, kind)
 				if pointer.just_pressed:
-					_open_sliders(pointer, fixture, kind, null)
+					if kind == HANDLE_RESET:
+						_reset_fixture_places(fixture)
+					else:
+						_open_sliders(pointer, fixture, kind, null)
 				found = true
 				break
 			if found:
@@ -1849,6 +1933,9 @@ func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, kind: int) 
 ## Whether a fixture has a handle of `kind` (HANDLE_*) and it is switched on in
 ## the settings (tab «Мир»): a sphere only its radius ball.
 func _handle_on(fixture: WorldLayout.Fixture, kind: int) -> bool:
+	if kind == HANDLE_RESET:
+		# «Как в Windows»: in the editing mode only, on every fixture.
+		return _editing
 	if not _handles_shown():
 		return false
 	if not _walled(fixture):
@@ -2121,7 +2208,7 @@ func _run_grip_item(fixture: WorldLayout.Fixture, slot: String, id: String, coun
 	var what := ("%d частей" % count) if id in ["rows", "columns"] else id
 	_fixture_changed("%s: %s — %s %s" % [fixture.name, ("выделено %d" % leaves.size()) if not leaves.is_empty() else slot, id, what])
 	if _seated == fixture.id:
-		_apply_wall_windows(fixture)
+		_apply_group_windows()
 	_apply_wall_resolutions()
 
 
@@ -2390,52 +2477,43 @@ func _apply_wall_resolutions() -> void:
 	_refresh_driver_section()
 
 
-## Seated at a wall, the Windows layout follows it (slice k2, the user's choice
-## 21.10.2026): screens next to each other on the wall are next to each other on
-## the desktop (two small ones beside a big one lead sideways into it). The
-## primary stays primary (changing it rebuilds every panel); if it hangs on
-## another fixture, the wall's screens go to its right. Monitors of other
-## fixtures go in a row to the right; what Windows would not take, LayoutEdit puts right.
-func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
-	# As with a sphere: only when carrying changes the Windows layout (the user's
-	# wish, 22.10.2026); in the "only VR" mode Windows stays as it is.
-	if _panel_options.move_mode != 0:
+## The Windows layout by groups (the user's wish, 23.10.2026: screens close in a
+## sphere were not neighbours in Windows — the layout followed only the seat, and
+## the other fixtures' screens went in a row to the right): every fixture's
+## screens are one group laid out as they stand in VR (_fixture_block; on a wall
+## two small ones beside a big one lead sideways into it), the groups one after
+## another or where they were dragged on the plane of groups (_group_offsets). The
+## primary stays primary (the whole layout shifts); what Windows would not take,
+## LayoutEdit puts right.
+func _apply_group_windows(dragged := false) -> void:
+	# Only where carrying changes the Windows layout; one fixture alone that is
+	# carried by the layout itself (LayoutEdit) is left to it.
+	if _windows_moves():
 		return
-	var state := _saved_wall(wall)
-	var shape := _wall_shape(wall)
-	# Closed (a column above all): unrolled round where the user sits, the seam
-	# behind them (the user's choice, 22.10.2026).
-	var around := _seat_slide.x if _seated == wall.id else shape.middle
-	var on_wall: Array[int] = []
-	var areas: Array[Rect2] = []
-	var pixels: Array[Vector2i] = []
-	for i in _panels.size():
-		if _fixture_of(_panels[i]) == wall and state.has(_panels[i].monitor_key):
-			on_wall.append(i)
-			var spot := WallLayout.screen_area(state, _panels[i].monitor_key, wall.gap)
-			spot.position.x = WallLayout.wrapped(spot.get_center().x, around, shape) - spot.size.x * 0.5
-			areas.append(spot)
-			pixels.append(_panels[i].monitor_rect.size)
-	if on_wall.is_empty():
+	var any_fixed := dragged
+	for fixture in _fixtures:
+		any_fixed = any_fixed or not _fixture_free(fixture)
+	if not any_fixed:
 		return
 	var primary := _primary_index()
-	var local_primary := on_wall.find(primary)
-	var group := WallLayout.desktop(areas, pixels, maxi(local_primary, 0), wall.gap + WALL_TOUCH_REACH)
-	var rects := _current_rects()
-	var shift := Vector2i.ZERO
-	if local_primary < 0:
-		var low := group[0].position
-		for rect in group:
-			low = low.min(rect.position)
-		shift = Vector2i(rects[primary].end.x, 0) - low
-	var right := rects[primary].end.x
-	for k in on_wall.size():
-		rects[on_wall[k]] = Rect2i(group[k].position + shift, group[k].size)
-		right = maxi(right, rects[on_wall[k]].end.x)
-	for i in _panels.size():
-		if i != primary and not on_wall.has(i):
-			rects[i] = Rect2i(Vector2i(right, 0), rects[i].size)
-			right += rects[i].size.x
+	var blocks := []
+	var ids := []
+	var members := []
+	for fixture in _fixtures:
+		var on: Array[int] = []
+		for i in _panels.size():
+			if _fixture_of(_panels[i]) == fixture:
+				on.append(i)
+		if on.is_empty():
+			continue
+		blocks.append(DesktopGroups.normalized(_fixture_block(fixture, on, primary)))
+		ids.append(fixture.id)
+		members.append(on)
+	var rects := _group_layout(blocks, ids, members)
+	# Windows makes primary the monitor at (0, 0): everything shifts so the primary is there.
+	var shift: Vector2i = -rects[primary].position
+	for i in rects.size():
+		rects[i] = Rect2i(rects[i].position + shift, rects[i].size)
 	for i in rects.size():
 		if LayoutEdit.is_valid(rects, primary):
 			break
@@ -2447,16 +2525,96 @@ func _apply_wall_windows(wall: WorldLayout.Fixture) -> void:
 	for i in _panels.size():
 		positions[_panels[i].monitor_name] = rects[i].position
 	_layout_pending = rects
-	print("[world] раскладка Windows — как %s «%s»: %s" % ["у" if wall.kind == "column" else "на", wall.name, positions])
+	print("[world] раскладка Windows по группам: %s" % positions)
 	if _topology.busy:
 		_queued_positions = positions
-		_vdd_message = "раскладка по стене: жду предыдущее изменение…"
+		_vdd_message = "раскладка по группам: жду предыдущее изменение…"
 	else:
-		_vdd_message = "раскладка Windows — как на стене…"
+		_vdd_message = "раскладка Windows — по группам…"
 		_topology.arrange(positions)
 
 
+## The groups put together (before the primary is shifted to (0, 0)): each where
+## it was dragged or one after another, then every one joined to the rest whole
+## (a group cut off was set right by LayoutEdit screen by screen, which moved
+## other groups and broke this one up — 23.10.2026).
+func _group_layout(blocks: Array, ids: Array, members: Array) -> Array[Rect2i]:
+	var placed := DesktopGroups.compose(blocks, ids, _group_offsets)
+	var groups := {}
+	for k in ids.size():
+		groups[ids[k]] = placed[k]
+	var anchor: int = _groups_anchor if groups.has(_groups_anchor) else (ids[0] if not ids.is_empty() else -1)
+	groups = DesktopGroups.joined(groups, anchor)
+	var rects := _current_rects()
+	for k in members.size():
+		var on: Array = members[k]
+		var mine: Array[Rect2i] = groups[ids[k]]
+		for j in on.size():
+			rects[on[j]] = mine[j]
+	return rects
+
+
+## Each fixture's group as it will stand (for the plane): fixture id -> [panel indices, rects].
+func _group_parts() -> Dictionary:
+	var primary := _primary_index()
+	var blocks := []
+	var ids := []
+	var members := []
+	for fixture in _fixtures:
+		var on: Array[int] = []
+		for i in _panels.size():
+			if _fixture_of(_panels[i]) == fixture:
+				on.append(i)
+		if on.is_empty():
+			continue
+		blocks.append(DesktopGroups.normalized(_fixture_block(fixture, on, primary)))
+		ids.append(fixture.id)
+		members.append(on)
+	var rects := _group_layout(blocks, ids, members)
+	var parts := {}
+	for k in ids.size():
+		var mine: Array[Rect2i] = []
+		for i: int in members[k]:
+			mine.append(rects[i])
+		parts[ids[k]] = [members[k], mine]
+	return parts
+
+
+## One fixture's screens laid out as they stand in VR (desktop pixels, any
+## origin): a wall's or column's cells (a closed one unrolled round the seat), a
+## sphere's arc; a fixture placing freely keeps its screens as they are in Windows.
+func _fixture_block(fixture: WorldLayout.Fixture, on: Array[int], primary: int) -> Array[Rect2i]:
+	var rects: Array[Rect2i] = []
+	if _fixture_free(fixture):
+		for i in on:
+			rects.append(_panels[i].monitor_rect)
+		return rects
+	var areas: Array[Rect2] = []
+	var pixels: Array[Vector2i] = []
+	var reach := ROW_GAP + WALL_TOUCH_REACH
+	if _walled(fixture):
+		var state := _wall_state(fixture)
+		var shape := _wall_shape(fixture)
+		var around := _seat_slide.x if _seated == fixture.id else shape.middle
+		reach = fixture.gap + WALL_TOUCH_REACH
+		for i in on:
+			var spot := WallLayout.screen_area(state, _panels[i].monitor_key, fixture.gap)
+			spot.position.x = WallLayout.wrapped(spot.get_center().x, around, shape) - spot.size.x * 0.5
+			areas.append(spot)
+			pixels.append(_panels[i].monitor_rect.size)
+	else:
+		# On the sphere: arcs round its centre, as they are seen.
+		for i in on:
+			var placement := _panels[i].placement
+			var middle := Vector2(placement.heading, placement.elevation) * fixture.radius
+			areas.append(Rect2(middle - placement.size * 0.5, placement.size))
+			pixels.append(_panels[i].monitor_rect.size)
+	return WallLayout.desktop(areas, pixels, maxi(on.find(primary), 0), reach)
+
+
 func _handle_text(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel = null) -> String:
+	if kind == HANDLE_RESET:
+		return "%s: вернуть экраны как в Windows" % fixture.name
 	if panel != null and kind >= HANDLE_PANEL_TILT:
 		var parts := PackedStringArray()
 		for k in _slider_specs(fixture, kind, panel).size():
@@ -2475,7 +2633,14 @@ func _handle_text(fixture: WorldLayout.Fixture, kind: int, panel: ScreenPanel = 
 ## right) and its bend ball under its middle (the distance is set by the buttons).
 func _handle_position(fixture: WorldLayout.Fixture, kind := HANDLE_SIZE) -> Vector3:
 	if not _walled(fixture):
+		if kind == HANDLE_RESET:
+			# Beside the radius ball.
+			return fixture.frame() * (PanelLayout.direction_of(deg_to_rad(14.0), deg_to_rad(WorldLayout.HANDLE_ELEVATION_DEG)) * fixture.radius)
 		return WorldLayout.radius_handle(fixture)
+	if kind == HANDLE_RESET:
+		# Left of the tilt ball over the wall's top.
+		var top := WallLayout.tilt_handle_point(_wall_grid(fixture), fixture.gap) + Vector2(-RESET_HANDLE_SHIFT, 0.0)
+		return (fixture.frame() * WallLayout.surface(top.x, top.y, 0.04, _wall_shape(fixture))).origin
 	var grid := _wall_grid(fixture)
 	var point := WallLayout.size_handle_point(grid, fixture.gap, HANDLE_CORNERS[kind])
 	if kind == HANDLE_BEND:
@@ -2536,7 +2701,7 @@ func _hide_sliders() -> void:
 ## A screen on a wall sized by cells (the Windows layout's mode, on whole cells),
 ## not by a scale.
 func _wall_cells_sized(fixture: WorldLayout.Fixture, panel: ScreenPanel) -> bool:
-	return _walled(fixture) and _panel_options.move_mode == 0 and panel != null and not fixture.parts.has(panel.monitor_key)
+	return _walled(fixture) and not _fixture_free(fixture) and panel != null and not fixture.parts.has(panel.monitor_key)
 
 
 ## What slider `index` shows now.
@@ -2749,6 +2914,7 @@ func _drag_sliders(pointer: Pointer, fixture: WorldLayout.Fixture, delta: float)
 
 
 func _build_bend_slider() -> void:
+	_build_map_nodes()
 	_bend_slider = VrSlider.new(BEND_SLIDER_WIDTH)
 	_bend_slider.visible = false
 	add_child(_bend_slider)
@@ -3418,8 +3584,9 @@ func _log_tremor() -> void:
 ## Drives the Windows cursor from the pointer aimed at a screen panel: the ray's
 ## hit point becomes a pixel on that monitor, a pinch or trigger the left button.
 func _update_cursor() -> void:
-	# While the secure desktop is shown, _update_secure_cursor drives the cursor.
-	if _secure_shown:
+	# While the secure desktop is shown, _update_secure_cursor drives the cursor;
+	# while the map of places is open, the hands work the map.
+	if _secure_shown or _map_open or _groups_open:
 		return
 	if _panels.is_empty():
 		return
@@ -3559,7 +3726,7 @@ func _update_two_hand_gestures() -> void:
 	else:
 		_pause.reset()
 
-	var zooming := left.mode == "рука" and right.mode == "рука" \
+	var zooming := not _groups_open and not _map_open and left.mode == "рука" and right.mode == "рука" \
 			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT \
 			and left.grab_panel == null and right.grab_panel == null and not _editing
 	if zooming:
@@ -3796,12 +3963,9 @@ func _rebuild_panels() -> void:
 				print("[world] %s: забыты клетки за краем" % fixture.name)
 	_refresh_fixture_section()
 	_place_panels([], true)
-	# Seated at a wall, Windows follows it again (22.10.2026: after a start or a
-	# resolution change the positions stayed as they were; sizes change with
-	# resolutions, so the layout is worked out anew).
-	var seat := WorldLayout.find(_fixtures, _seated)
-	if seat != null and _walled(seat):
-		_apply_wall_windows(seat)
+	# The Windows layout by groups again (sizes change with resolutions; at start
+	# the groups come together as they stand in VR, 23.10.2026).
+	_apply_group_windows()
 	# «Разрешение по клетке» goes one screen at a time: the next after each rebuild.
 	_apply_wall_resolutions()
 
@@ -3860,7 +4024,8 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 				WorldLayout.degrees_per_1920(fixture.radius), PANEL_MAX_ARC_DEG, sub_scales, ROW_GAP, sub_pitches, sub_curvatures)
 		for k in members.size():
 			var i := members[k]
-			var free_at: Variant = _panel_positions.get(_panels[i].monitor_key)
+			# Freely placed unless this sphere is set to the Windows layout only.
+			var free_at: Variant = _panel_positions.get(_panels[i].monitor_key) if fixture.placement != 1 else null
 			var placement := arranged[k]
 			if free_at is Vector2:
 				placement = PanelLayout.placement_at(free_at.x, free_at.y, placement.size, Vector3.ZERO, fixture.radius,
@@ -3869,7 +4034,7 @@ func _place_panels(layout: Array[Rect2i] = [], log_it := false) -> void:
 			placements[i] = placement
 			_panels[i].distance = fixture.radius
 	for i in _panels.size():
-		var free_at: Variant = _panel_positions.get(_panels[i].monitor_key)
+		var free_at: Variant = _panel_positions.get(_panels[i].monitor_key) if _fixture_of(_panels[i]).placement != 1 else null
 		_panels[i].place(placements[i])
 		if log_it:
 			print("[layout] %s%s %s в %s -> курс %+.0f°, возвышение %+.0f°, наклон %+.0f°, изгиб %.2f, %.2f x %.2f м%s" % [
@@ -3894,7 +4059,7 @@ func _place_wall(fixture: WorldLayout.Fixture, members: Array[int], rects: Array
 	_hold_column_axis(fixture)
 	var wall := _wall_state(fixture)
 	var shape := _wall_shape(fixture)
-	var free := _panel_options.move_mode == 1
+	var free := _fixture_free(fixture)
 	for k in members.size():
 		var i := members[k]
 		var spot := WallLayout.screen_area(wall, keys[k], fixture.gap)
@@ -3939,6 +4104,552 @@ func _place_wall(fixture: WorldLayout.Fixture, members: Array[int], rects: Array
 		placements[i] = placement
 		_panels[i].vr_scale = scale
 		_panels[i].distance = reach
+
+
+## A fixture's place in the network: where its seat puts the eyes (a sphere's
+## centre; a wall's or column's seat in front of its middle).
+func _place_point(fixture: WorldLayout.Fixture) -> Vector3:
+	if _walled(fixture):
+		var shape := _wall_shape(fixture)
+		return WorldLayout.wall_eyes(fixture, Vector2(shape.middle, 0.0), shape).origin
+	return fixture.centre
+
+
+func _place_points() -> Dictionary:
+	var points := {}
+	for fixture in _fixtures:
+		points[fixture.id] = _place_point(fixture)
+	return points
+
+
+func _place_links(points: Dictionary) -> Array[Vector2i]:
+	return PlaceNetwork.links(points, _world.auto_links, _links_added, _links_removed)
+
+
+## The map of places comes up in front of the user (radial menu «Сеть мест»).
+func _open_map() -> void:
+	_release_cursor_button()
+	var head := _camera.global_transform
+	var ahead := Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
+	_map_root.global_transform = Transform3D(Basis.looking_at(ahead, Vector3.UP), head.origin + ahead * MAP_AHEAD + Vector3.DOWN * MAP_DROP)
+	_map_yaw = 0.0
+	_map_open = true
+	_map_root.visible = true
+	_build_map()
+	print("[world] сеть мест: %d мест" % _fixtures.size())
+
+
+func _close_map() -> void:
+	_map_open = false
+	_map_root.visible = false
+	for i in 2:
+		_map_hover[i] = -1
+		_map_link_from[i] = -1
+		_map_turning[i] = NAN
+
+
+## The map's dots, links, group clouds and the user's mark, from the world as it is.
+## Turned as the world is seen from here: what is ahead in the world is ahead on the map.
+func _build_map() -> void:
+	var points := _place_points()
+	var frame := PlaceNetwork.map_frame(points.values() + [_camera.global_position], MAP_SIZE)
+	var middle: Vector3 = frame[0]
+	var scale: float = frame[1]
+	var view := Basis(Vector3.UP, -_map_root.global_basis.get_euler().y)
+	var to_map := func(point: Vector3) -> Vector3:
+		return view * ((point - middle) * scale)
+	for dot: MeshInstance3D in _map_dots.values():
+		dot.queue_free()
+	_map_dots.clear()
+	_map_local.clear()
+	for fixture in _fixtures:
+		var at: Vector3 = to_map.call(points[fixture.id])
+		_map_local[fixture.id] = at
+		var dot := MeshInstance3D.new()
+		var ball := SphereMesh.new()
+		ball.radius = MAP_DOT
+		ball.height = MAP_DOT * 2.0
+		dot.mesh = ball
+		dot.material_override = _map_material(PlaceNetwork.group_color(fixture.group), false)
+		dot.position = at
+		_map_pivot.add_child(dot)
+		_map_dots[fixture.id] = dot
+	var lines := PackedVector3Array()
+	for link in _place_links(points):
+		lines.append(_map_local[link.x])
+		lines.append(_map_local[link.y])
+	_map_lines.mesh = _line_mesh(lines, Mesh.PRIMITIVE_LINES)
+	_map_me.position = to_map.call(_camera.global_position)
+	for cloud in _map_clouds:
+		cloud.queue_free()
+	_map_clouds.clear()
+	for group in range(1, PlaceNetwork.MAX_GROUPS + 1):
+		var members := []
+		for fixture in _fixtures:
+			if fixture.group == group:
+				members.append(_map_local[fixture.id])
+		if members.is_empty():
+			continue
+		var bubble := PlaceNetwork.cloud(members, MAP_DOT * 3.0)
+		var cloud := MeshInstance3D.new()
+		var ball := SphereMesh.new()
+		ball.radius = bubble[1]
+		ball.height = (bubble[1] as float) * 2.0
+		cloud.mesh = ball
+		cloud.material_override = _map_material(PlaceNetwork.group_color(group), true)
+		cloud.position = bubble[0]
+		_map_pivot.add_child(cloud)
+		_map_clouds.append(cloud)
+	_map_pivot.basis = Basis(Vector3.UP, _map_yaw)
+
+
+func _map_material(color: Color, cloud: bool) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = Color(color, 0.12) if cloud else color
+	if cloud:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		material.no_depth_test = true
+	return material
+
+
+## The map at work: a place near a fingertip or under a ray grows and shows its
+## kind and name; a fist (or grip) on it flies there; a pinch (or trigger) from
+## one place to another draws or takes away a link; elsewhere on the map it
+## turns the map.
+func _update_map() -> void:
+	if not _map_open:
+		return
+	var pivot := _map_pivot.global_transform
+	var shown := -1
+	for i in 2:
+		var pointer := _pointers[i]
+		_map_hover[i] = -1
+		if not pointer.active:
+			continue
+		var tip := pointer.origin
+		if pointer.mode == "рука" and pointer.hand_joints.size() == HandPose.JOINT_COUNT:
+			tip = _origin.global_transform * pointer.hand_joints[HandPose.FINGERS[1][3]]
+		var best := INF
+		for id: int in _map_local:
+			var at: Vector3 = pivot * (_map_local[id] as Vector3)
+			var near := tip.distance_to(at)
+			if near < MAP_HAND_REACH and near < best:
+				best = near
+				_map_hover[i] = id
+		if _map_hover[i] < 0:
+			for id: int in _map_local:
+				var at: Vector3 = pivot * (_map_local[id] as Vector3)
+				var along := (at - pointer.origin).dot(pointer.direction)
+				var off := (pointer.origin + pointer.direction * along).distance_to(at)
+				if along > 0.0 and off < MAP_RAY_REACH and along < best:
+					best = along
+					_map_hover[i] = id
+		var hovered := _map_hover[i]
+		if hovered >= 0:
+			shown = hovered
+			pointer.hit_distance = minf(pointer.hit_distance, ((pivot * (_map_local[hovered] as Vector3)) - pointer.origin).length())
+		# Fly: a fist with the hand, the grip with a controller.
+		var flies := pointer.fist_started if pointer.mode == "рука" else (pointer.just_pressed and pointer.button == HandGestures.Click.RIGHT)
+		if flies and hovered >= 0:
+			var target := WorldLayout.find(_fixtures, hovered)
+			if target != null:
+				_fly_to(target)
+				return
+		var pinching := pointer.pressed and pointer.button == HandGestures.Click.LEFT
+		if pointer.just_pressed and pointer.button == HandGestures.Click.LEFT:
+			if hovered >= 0:
+				_map_link_from[i] = hovered
+			else:
+				_map_turning[i] = _map_angle(pointer)
+		if _map_link_from[i] >= 0 and not pinching:
+			if hovered >= 0 and hovered != _map_link_from[i]:
+				_toggle_link(_map_link_from[i], hovered)
+			_map_link_from[i] = -1
+		if not is_nan(_map_turning[i]):
+			if pinching:
+				var angle := _map_angle(pointer)
+				if not is_nan(angle):
+					_map_yaw += angle_difference(_map_turning[i], angle)
+					_map_turning[i] = angle
+					_map_pivot.basis = Basis(Vector3.UP, _map_yaw)
+			else:
+				_map_turning[i] = NAN
+	# The places pointed at grow, the one shown is named.
+	for id: int in _map_dots:
+		var big := id == _map_hover[0] or id == _map_hover[1]
+		(_map_dots[id] as MeshInstance3D).scale = Vector3.ONE * (MAP_HOVER_SCALE if big else 1.0)
+	_map_label.visible = shown >= 0
+	if shown >= 0:
+		var fixture := WorldLayout.find(_fixtures, shown)
+		if fixture != null:
+			var kind: String = {"sphere": "Шар", "wall": "Стена", "column": "Столб"}.get(fixture.kind, fixture.kind)
+			var group := PlaceNetwork.group_name(fixture.group)
+			_map_label.text = "%s: %s%s%s" % [kind, fixture.name, (" — " + group) if group != "" else "", " (сижу)" if fixture.id == _seated else ""]
+			_map_label.global_position = pivot * (_map_local[shown] as Vector3) + Vector3.UP * 0.05
+	# A link being drawn: from its place to the ray.
+	var drag := PackedVector3Array()
+	for i in 2:
+		if _map_link_from[i] >= 0 and _map_local.has(_map_link_from[i]):
+			var pointer := _pointers[i]
+			var from: Vector3 = _map_local[_map_link_from[i]]
+			var to: Vector3 = _map_local[_map_hover[i]] if _map_hover[i] >= 0 else pivot.affine_inverse() * (pointer.origin + pointer.direction * MAP_AHEAD)
+			drag.append(from)
+			drag.append(to)
+	_map_drag.mesh = _line_mesh(drag, Mesh.PRIMITIVE_LINES)
+
+
+## Where a ray passes round the map's upright axis, as an angle (NAN if it does not come near).
+func _map_angle(pointer: Pointer) -> float:
+	var centre := _map_root.global_position
+	var along := (centre - pointer.origin).dot(pointer.direction)
+	if along <= 0.0:
+		return NAN
+	var nearest := pointer.origin + pointer.direction * along
+	var off := _map_root.global_transform.affine_inverse() * nearest
+	if off.length() > MAP_SIZE:
+		return NAN
+	return atan2(off.x, off.z)
+
+
+func _toggle_link(a: int, b: int) -> void:
+	var changed := PlaceNetwork.toggled(a, b, _place_points(), _world.auto_links, _links_added, _links_removed)
+	_links_added = changed["added"]
+	_links_removed = changed["removed"]
+	_save_settings()
+	_build_map()
+	var first := WorldLayout.find(_fixtures, a)
+	var second := WorldLayout.find(_fixtures, b)
+	print("[world] связь «%s» — «%s» %s" % [first.name if first else str(a), second.name if second else str(b),
+			"есть" if _place_links(_place_points()).has(PlaceNetwork.pair(a, b)) else "убрана"])
+
+
+## A quick flight to a place (slice m): the rig goes from here to the seat in
+## flight_sec, eased, the edges dimmed; there the user is seated.
+func _fly_to(fixture: WorldLayout.Fixture) -> void:
+	_close_map()
+	var from := _origin.global_transform
+	_seated = fixture.id
+	_seat_slide = Vector2.ZERO
+	if _walled(fixture):
+		var shape := _wall_shape(fixture)
+		_seat_slide = WallLayout.nearest_screen(_wall_cell_list(fixture), shape.middle, 0.0, fixture.gap)
+	var to := _seat_rig(fixture)
+	print("[world] перелёт к «%s» (%.1f м, %.1f с)" % [fixture.name, from.origin.distance_to(to.origin), _world.flight_sec])
+	if _world.flight_sec <= 0.0:
+		_origin.global_transform = to
+		_arrive(fixture)
+		return
+	_flight = {"from": from, "to": to, "time": 0.0, "fixture": fixture.id}
+
+
+## Carries the user along a flight under way; false when there is none.
+func _update_flight(delta: float) -> bool:
+	if _flight.is_empty():
+		return false
+	_flight["time"] += delta
+	var share := clampf(float(_flight["time"]) / maxf(_world.flight_sec, 0.01), 0.0, 1.0)
+	_origin.global_transform = PlaceNetwork.flight(_flight["from"], _flight["to"], share)
+	_keep_world_in_place()
+	_set_vignette(_world.vignette * sin(PI * share))
+	if share >= 1.0:
+		var fixture := WorldLayout.find(_fixtures, _flight["fixture"])
+		_flight = {}
+		_set_vignette(0.0)
+		if fixture != null:
+			_arrive(fixture)
+	return true
+
+
+## The plane of groups (slice n, the user's wish 23.10.2026): the Windows layout
+## in front of the user, each monitor a miniature of its picture, each fixture's
+## group framed in its colour and named; a pinch (trigger) on a group drags it,
+## letting go sticks it to the others and Windows follows.
+func _open_groups_plane() -> void:
+	_close_map()
+	_release_cursor_button()
+	var head := _camera.global_transform
+	var ahead := Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
+	_groups_root.global_transform = Transform3D(Basis.looking_at(ahead, Vector3.UP), head.origin + ahead * GROUPS_AHEAD + Vector3.DOWN * GROUPS_DROP)
+	_groups_open = true
+	_groups_root.visible = true
+	_groups_zoom = 1.0
+	_groups_pan = Vector2.ZERO
+	_groups_frame = {}
+	_build_groups_plane()
+	print("[world] группы экранов: %d" % _groups_tiles.size())
+
+
+func _close_groups_plane() -> void:
+	_groups_open = false
+	_groups_root.visible = false
+	_groups_drag = {}
+	_groups_two = {}
+	for panel in _panels:
+		panel.set_thumbnail_live(false)
+
+
+## The miniatures from the layout as it will be (_group_parts), on a plate of its
+## own size; the first build fits the layout in it, zoom and pan go from there.
+func _build_groups_plane() -> void:
+	for child in _groups_root.get_children():
+		child.queue_free()
+	_groups_tiles.clear()
+	var parts := _group_parts()
+	var all_rects: Array[Rect2i] = []
+	for id: int in parts:
+		all_rects.append_array((parts[id] as Array)[1])
+	var all := DesktopGroups.bounds(all_rects)
+	if all.size.x <= 0 or all.size.y <= 0:
+		return
+	if _groups_frame.is_empty():
+		_groups_frame = {"origin": Vector2(all.get_center()), "scale": minf(GROUPS_PLANE.x / all.size.x, GROUPS_PLANE.y / all.size.y) * 0.9}
+	var plate := MeshInstance3D.new()
+	var plate_mesh := QuadMesh.new()
+	plate_mesh.size = GROUPS_PLANE + Vector2(0.06, 0.06)
+	plate.mesh = plate_mesh
+	plate.material_override = _map_material(Color(0.1, 0.11, 0.14), false)
+	plate.position.z = -0.004
+	_groups_root.add_child(plate)
+	for fixture in _fixtures:
+		if not parts.has(fixture.id):
+			continue
+		var indices: Array = (parts[fixture.id] as Array)[0]
+		var rects: Array[Rect2i] = (parts[fixture.id] as Array)[1]
+		var tile := Node3D.new()
+		_groups_root.add_child(tile)
+		var minis := []
+		for j in indices.size():
+			var mini := MeshInstance3D.new()
+			mini.mesh = QuadMesh.new()
+			var material := StandardMaterial3D.new()
+			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			material.albedo_texture = _panels[indices[j]].thumbnail()
+			_panels[indices[j]].set_thumbnail_live(true)
+			mini.material_override = material
+			tile.add_child(mini)
+			minis.append([mini, rects[j]])
+		var box := DesktopGroups.bounds(rects)
+		var frame := MeshInstance3D.new()
+		frame.mesh = QuadMesh.new()
+		frame.material_override = _map_material(PlaceNetwork.group_color(fixture.group if fixture.group > 0 else 1 + fixture.id % PlaceNetwork.MAX_GROUPS), false)
+		tile.add_child(frame)
+		var label := Label3D.new()
+		label.text = fixture.name
+		label.pixel_size = 0.0008
+		label.font_size = 26
+		label.outline_size = 8
+		tile.add_child(label)
+		_groups_tiles[fixture.id] = {"node": tile, "box": box, "rects": rects, "minis": minis, "frame": frame, "label": label}
+	_lay_out_groups_plane()
+
+
+## The tiles at the plane's zoom and pan; what falls off the plate is hidden.
+func _lay_out_groups_plane() -> void:
+	var half := GROUPS_PLANE * 0.5
+	var scale := float(_groups_frame["scale"]) * _groups_zoom
+	for id: int in _groups_tiles:
+		var tile: Dictionary = _groups_tiles[id]
+		var box: Rect2i = tile["box"]
+		for entry: Array in tile["minis"]:
+			var mini: MeshInstance3D = entry[0]
+			var rect: Rect2i = entry[1]
+			(mini.mesh as QuadMesh).size = Vector2(rect.size) * scale * 0.97
+			mini.position = _groups_point(Vector2(rect.get_center()))
+			mini.visible = absf(mini.position.x) < half.x and absf(mini.position.y) < half.y
+		var frame: MeshInstance3D = tile["frame"]
+		# Inside its group's own bounds, so the frames of touching groups do not overlap.
+		(frame.mesh as QuadMesh).size = Vector2(box.size) * scale * 0.995
+		frame.position = _groups_point(Vector2(box.get_center())) + Vector3(0.0, 0.0, -0.002)
+		frame.visible = absf(frame.position.x) < half.x and absf(frame.position.y) < half.y
+		var label: Label3D = tile["label"]
+		label.position = _groups_point(Vector2(box.get_center().x, box.position.y)) + Vector3(0.0, 0.025, 0.004)
+		label.visible = frame.visible
+
+
+## A desktop pixel on the plane (its local space: x right, y up), zoomed and panned.
+func _groups_point(pixel: Vector2) -> Vector3:
+	var at := (pixel - (_groups_frame["origin"] as Vector2)) * float(_groups_frame["scale"]) * _groups_zoom + _groups_pan
+	return Vector3(at.x, -at.y, 0.0)
+
+
+## Where the ray crosses the plane, in its local metres, y down (NAN if it does not).
+func _groups_local(pointer: Pointer) -> Vector2:
+	var frame := _groups_root.global_transform
+	var normal := frame.basis.z.normalized()
+	var towards := pointer.direction.dot(normal)
+	if absf(towards) < 0.0001:
+		return Vector2(NAN, NAN)
+	var along := (frame.origin - pointer.origin).dot(normal) / towards
+	if along <= 0.0:
+		return Vector2(NAN, NAN)
+	pointer.hit_distance = minf(pointer.hit_distance, along)
+	var local := frame.affine_inverse() * (pointer.origin + pointer.direction * along)
+	return Vector2(local.x, -local.y)
+
+
+## Plane metres back to a desktop pixel.
+func _groups_pixel_at(local: Vector2) -> Vector2:
+	return (local - _groups_pan) / (float(_groups_frame["scale"]) * _groups_zoom) + (_groups_frame["origin"] as Vector2)
+
+
+func _update_groups_plane() -> void:
+	if not _groups_open or _groups_frame.is_empty():
+		return
+	var pinch: Array[bool] = []
+	for i in 2:
+		pinch.append(_pointers[i].active and _pointers[i].pressed and _pointers[i].button == HandGestures.Click.LEFT)
+	# Both hands pinching: closer or farther apart zooms (as Ctrl+wheel does for the computer).
+	if pinch[0] and pinch[1] and (_groups_drag.is_empty() or _groups_drag["id"] < 0):
+		_groups_drag = {}
+		var gap := _pointers[0].origin.distance_to(_pointers[1].origin)
+		if _groups_two.is_empty():
+			_groups_two = {"gap": maxf(gap, 0.01), "zoom": _groups_zoom}
+		else:
+			_groups_zoom = clampf(float(_groups_two["zoom"]) * gap / float(_groups_two["gap"]), 0.3, 6.0)
+			_lay_out_groups_plane()
+		return
+	_groups_two = {}
+	for i in 2:
+		var pointer := _pointers[i]
+		if not pointer.active:
+			continue
+		var local := _groups_local(pointer)
+		if not _groups_drag.is_empty() and _groups_drag["pointer"] == i:
+			if not is_nan(local.x):
+				_groups_drag["now"] = local
+			var moved: Vector2 = (_groups_drag["now"] as Vector2) - (_groups_drag["from"] as Vector2)
+			var id: int = _groups_drag["id"]
+			if id < 0:
+				# A pinch on empty plate pans it.
+				_groups_pan = (_groups_drag["pan"] as Vector2) + moved
+				_lay_out_groups_plane()
+			elif _groups_tiles.has(id):
+				(_groups_tiles[id]["node"] as Node3D).position = Vector3(moved.x, -moved.y, 0.01)
+			if not pinch[i]:
+				_groups_drag = {}
+				if _groups_tiles.has(id):
+					_drop_group(id, Vector2i((moved / (float(_groups_frame["scale"]) * _groups_zoom)).round()))
+			continue
+		if pointer.just_pressed and pointer.button == HandGestures.Click.LEFT and _groups_drag.is_empty() and not is_nan(local.x) \
+				and absf(local.x) < GROUPS_PLANE.x * 0.5 + 0.03 and absf(local.y) < GROUPS_PLANE.y * 0.5 + 0.03:
+			var pixel := Vector2i(_groups_pixel_at(local))
+			var hit := -1
+			for id: int in _groups_tiles:
+				if (_groups_tiles[id]["box"] as Rect2i).has_point(pixel):
+					hit = id
+			_groups_drag = {"pointer": i, "id": hit, "from": local, "now": local, "pan": _groups_pan}
+
+
+## A group let go. Lying on another by half or more (GROUPS_PUSH_SHARE) it stays
+## (its edges stuck to the screens near) and pushes that one aside; else it goes,
+## whole, to the nearest place on no screen touching another (slid along an edge,
+## its screens corner to corner within reach).
+## The other groups keep their places, Windows follows.
+func _drop_group(id: int, shift: Vector2i) -> void:
+	var groups := {}
+	for other: int in _groups_tiles:
+		groups[other] = _groups_tiles[other]["rects"]
+	var block := DesktopGroups.normalized(groups[id])
+	var others: Array[Rect2i] = []
+	for other: int in groups:
+		if other != id:
+			others.append_array(groups[other])
+	var reach := maxi(roundi(1920 * GROUPS_SNAP_SHARE), roundi(GROUPS_SNAP_M / (float(_groups_frame["scale"]) * _groups_zoom)))
+	var at: Vector2i = (_groups_tiles[id]["box"] as Rect2i).position + shift
+	var on_top := false
+	for other: int in groups:
+		on_top = on_top or (other != id and DesktopGroups.covered(DesktopGroups.shifted(block, at), groups[other]) >= GROUPS_PUSH_SHARE)
+	if on_top:
+		groups[id] = DesktopGroups.shifted(block, DesktopGroups.magnet(at, block, others, reach))
+		groups = DesktopGroups.pushed(groups, id)
+	else:
+		groups[id] = DesktopGroups.shifted(block, DesktopGroups.placed(at, block, others, reach))
+	for other: int in groups:
+		_group_offsets[other] = DesktopGroups.bounds(groups[other]).position
+	_groups_anchor = id
+	var fixture := WorldLayout.find(_fixtures, id)
+	print("[world] группа «%s» — на %s" % [fixture.name if fixture != null else str(id), _group_offsets[id]])
+	_save_settings()
+	_apply_group_windows(true)
+	_build_groups_plane()
+
+
+func _build_map_nodes() -> void:
+	_groups_root = Node3D.new()
+	_groups_root.visible = false
+	add_child(_groups_root)
+	_map_root = Node3D.new()
+	_map_root.visible = false
+	add_child(_map_root)
+	_map_pivot = Node3D.new()
+	_map_root.add_child(_map_pivot)
+	_map_lines = MeshInstance3D.new()
+	_map_lines.material_override = _map_material(Color(0.7, 0.85, 1.0), false)
+	_map_pivot.add_child(_map_lines)
+	_map_drag = MeshInstance3D.new()
+	_map_drag.material_override = _map_material(Color(1.0, 1.0, 1.0), false)
+	_map_pivot.add_child(_map_drag)
+	_map_me = MeshInstance3D.new()
+	var mark := SphereMesh.new()
+	mark.radius = MAP_DOT * 0.6
+	mark.height = MAP_DOT * 1.2
+	_map_me.mesh = mark
+	_map_me.material_override = _map_material(Color(1.0, 1.0, 1.0), false)
+	_map_pivot.add_child(_map_me)
+	_map_label = Label3D.new()
+	_map_label.pixel_size = 0.0008
+	_map_label.font_size = 28
+	_map_label.outline_size = 8
+	_map_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_map_label.no_depth_test = true
+	_map_label.visible = false
+	_map_root.add_child(_map_label)
+
+
+func _placement_name(fixture: WorldLayout.Fixture) -> String:
+	match fixture.placement:
+		1:
+			return "по клеткам" if _walled(fixture) else "по раскладке"
+		2:
+			return "свободно"
+	return "как везде"
+
+
+## A fixture's screens: as everywhere → by cells (layout) → freely → as everywhere.
+func _on_fixture_placement(row: int) -> void:
+	if row >= _fixtures.size():
+		return
+	var fixture := _fixtures[row]
+	fixture.placement = (fixture.placement + 1) % 3
+	_fixture_changed("%s: расстановка — %s" % [fixture.name, _placement_name(fixture)])
+	if _walled(fixture) and _seated == fixture.id:
+		_apply_group_windows()
+
+
+## «Как в Windows» (in the editing mode, 23.10.2026): the fixture's screens leave
+## where they were put freely and go back to their cells (a sphere's: to the
+## Windows layout); tilt, bend and size stay.
+func _reset_fixture_places(fixture: WorldLayout.Fixture) -> void:
+	var moved := 0
+	for key in fixture.monitors:
+		if _wall_positions.erase(key):
+			moved += 1
+		if _panel_positions.erase(key):
+			moved += 1
+	_fixture_changed("%s: экраны на исходных местах (%d)" % [fixture.name, moved])
+
+
+## A fixture's place goes to the next group (none, 1 … MAX_GROUPS).
+func _on_fixture_group(row: int) -> void:
+	if row >= _fixtures.size():
+		return
+	var fixture := _fixtures[row]
+	fixture.group = (fixture.group + 1) % (PlaceNetwork.MAX_GROUPS + 1)
+	_fixture_changed("%s: %s" % [fixture.name, PlaceNetwork.group_name(fixture.group) if fixture.group > 0 else "без группы"])
+	if _map_open:
+		_build_map()
 
 
 ## A column keeps its axis where it was in the world: whatever changed its shape,
@@ -4061,7 +4772,7 @@ func _allowed_grips(panel: ScreenPanel) -> Array:
 			# turned and bent as set (slice l). A screen in a part of a split cell has
 			# the part's size, unless sized in VR.
 			grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
-			if not fixture.parts.has(panel.monitor_key) or _panel_options.move_mode == 1:
+			if not fixture.parts.has(panel.monitor_key) or _fixture_free(fixture):
 				grips.append(ScreenPanel.Grip.RESIZE)
 		if not panel.primary:
 			grips.append(ScreenPanel.Grip.PRIMARY)
@@ -4075,6 +4786,8 @@ func _allowed_grips(panel: ScreenPanel) -> Array:
 ## changes the Windows layout (the others make room the way Windows will, see
 ## LayoutEdit) or, if so set, only the place in VR.
 func _update_grabs(delta: float) -> void:
+	if _map_open or _groups_open:
+		return
 	var carrying := _any_panel_carried()
 	for pointer in _pointers:
 		if pointer.grab_panel != null:
@@ -4189,14 +4902,27 @@ func _any_panel_carried() -> bool:
 ## Whether carrying a panel rearranges the Windows layout: the setting says so and
 ## all monitors hang on one fixture (with several, panels move in VR only until
 ## the Windows layout follows the seat the user is on).
-func _windows_moves() -> bool:
-	return _panel_options.move_mode == 0 and _fixtures.size() == 1
+func _windows_moves(fixture: WorldLayout.Fixture = null) -> bool:
+	return not _fixture_free(fixture) and _fixtures.size() == 1
+
+
+## Whether a fixture's screens go freely where they are put (as on a sphere in
+## VR), not by its cells or the Windows layout: its own setting, else «Перенос меняет».
+func _fixture_free(fixture: WorldLayout.Fixture) -> bool:
+	if fixture == null or fixture.placement == 0:
+		return _panel_options.move_mode == 1
+	return fixture.placement == 2
 
 
 func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool) -> bool:
 	var fixture := _fixture_of(panel)
 	if _walled(fixture):
 		return _start_wall_grab(pointer, panel, kind, by_fist, fixture)
+	if fixture.placement == 1 and not _windows_moves(fixture):
+		# Set to the Windows layout, but the layout follows carrying only with one
+		# fixture. ("As everywhere" with several fixtures carries freely in VR, as it did.)
+		_vdd_message = "«%s» — по раскладке Windows: перенос меняет её, когда заготовка одна" % fixture.name
+		return false
 	var angles := _fixture_angles(pointer, fixture)
 	if is_nan(angles.x):
 		return false
@@ -4213,12 +4939,12 @@ func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool)
 		_drag_rects = _layout_pending.duplicate() if _layout_pending.size() == _panels.size() else _current_rects()
 		_drag_primary = _primary_index()
 		_drag_preview = _drag_rects.duplicate()
-		if _windows_moves() and _panel_positions.erase(panel.monitor_key):
+		if _windows_moves(fixture) and _panel_positions.erase(panel.monitor_key):
 			# Moved in the layout: it is part of the layout again at once.
 			_save_settings()
 			_place_panels(_drag_rects)
 	print("[panels] %s: %s (%s%s)" % [panel.monitor_name, ScreenPanel.GRIP_NAMES[kind], "кулак" if by_fist else pointer.mode,
-			", только VR" if kind == ScreenPanel.Grip.MOVE and not _windows_moves() else ""])
+			", только VR" if kind == ScreenPanel.Grip.MOVE and not _windows_moves(fixture) else ""])
 	return true
 
 
@@ -4234,7 +4960,7 @@ func _drag(pointer: Pointer) -> void:
 	var magnet := _panel_options.magnet != 0
 	var at := angles - pointer.grab_offset
 	at.y = clampf(at.y, -1.2, 1.2)
-	if not _windows_moves():
+	if not _windows_moves(fixture):
 		# Only in VR: wherever it is put on its sphere, with the magnet to the other
 		# panels of the same sphere.
 		if magnet:
@@ -4280,8 +5006,8 @@ func _start_wall_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: 
 	pointer.grab_start = at
 	pointer.grab_cell = WallLayout.screen_cells(saved, panel.monitor_key)
 	pointer.grab_centre = WallLayout.screen_area(saved, panel.monitor_key, fixture.gap).get_center()
-	if _panel_options.move_mode == 1:
-		# Only VR: from where it stands now, freely placed or in its cells.
+	if _fixture_free(fixture):
+		# Freely: from where it stands now, freely placed or in its cells.
 		pointer.grab_centre = _wall_middles.get(panel.monitor_key, pointer.grab_centre)
 	_wall_preview = saved.copy()
 	_wall_preview_fixture = fixture.id
@@ -4302,8 +5028,8 @@ func _drag_wall(pointer: Pointer, fixture: WorldLayout.Fixture) -> void:
 	var shift := at - pointer.grab_start
 	var key := pointer.grab_panel.monitor_key
 	var middle := pointer.grab_centre + shift
-	if _panel_options.move_mode == 1:
-		# Only VR (the user's wish, 22.10.2026: as on a sphere): wherever it is put,
+	if _fixture_free(fixture):
+		# Freely (the user's wish, 22.10.2026: as on a sphere): wherever it is put,
 		# with the magnet to the other screens on it and to the cells.
 		if _panel_options.magnet != 0:
 			var others: Array[Rect2] = []
@@ -4351,7 +5077,7 @@ func _end_wall_grab(panel: ScreenPanel) -> void:
 	_wall_preview_fixture = -1
 	_save_settings()
 	_place_panels([], true)
-	if fixture != null and panel != null and _panel_options.move_mode == 1:
+	if fixture != null and panel != null and _fixture_free(fixture):
 		var free: Vector2 = _wall_positions.get(panel.monitor_key, Vector2.ZERO)
 		print("[panels] %s: свободно на «%s», %+.2f м, %+.2f м" % [panel.monitor_name, fixture.name, free.x, free.y])
 		return
@@ -4362,7 +5088,7 @@ func _end_wall_grab(panel: ScreenPanel) -> void:
 			var cell: Rect2i = fixture.cells.get(panel.monitor_key, Rect2i())
 			print("[panels] %s: на «%s» с клетки %s, %d×%d" % [panel.monitor_name, fixture.name, cell.position, cell.size.x, cell.size.y])
 		if _seated == fixture.id:
-			_apply_wall_windows(fixture)
+			_apply_group_windows()
 		_apply_wall_resolutions()
 
 
@@ -4395,9 +5121,11 @@ func _end_grab(pointer: Pointer) -> void:
 		return
 	if not is_instance_valid(panel):
 		return
-	if not _windows_moves():
+	if not _windows_moves(_fixture_of(panel)):
 		_panel_positions[panel.monitor_key] = Vector2(panel.placement.heading, panel.placement.elevation)
 		_save_settings()
+		# The sphere's group in Windows follows what is seen in VR.
+		_apply_group_windows()
 		print("[panels] %s: свободно в VR, курс %+.1f°, возвышение %+.1f°" % [panel.monitor_name,
 				rad_to_deg(panel.placement.heading), rad_to_deg(panel.placement.elevation)])
 		return
@@ -4603,6 +5331,9 @@ func _load_settings() -> void:
 			if data is Dictionary:
 				_fixtures.append(WorldLayout.Fixture.from_dictionary(data))
 	_seated = int(config.get_value("world", "seated", -1))
+	_links_added = PlaceNetwork.links_from(config.get_value("world", "links_added", []))
+	_links_removed = PlaceNetwork.links_from(config.get_value("world", "links_removed", []))
+	_group_offsets = DesktopGroups.offsets_from(config.get_value("world", "group_offsets", {}))
 	var slide: Variant = config.get_value("world", "seat_slide", Vector2.ZERO)
 	_seat_slide = slide if slide is Vector2 else Vector2.ZERO
 	_apply_bindings()
@@ -4633,6 +5364,9 @@ func _save_settings() -> void:
 	config.set_value("menus", "custom", MenuSet.custom)
 	config.set_value("world", "fixtures", _fixtures.map(func(f: WorldLayout.Fixture) -> Dictionary: return f.to_dictionary()))
 	config.set_value("world", "seated", _seated)
+	config.set_value("world", "links_added", PlaceNetwork.links_to(_links_added))
+	config.set_value("world", "links_removed", PlaceNetwork.links_to(_links_removed))
+	config.set_value("world", "group_offsets", DesktopGroups.offsets_to(_group_offsets))
 	config.set_value("world", "seat_slide", _seat_slide)
 	if not _slot_loading.is_empty():
 		config.set_value("layouts", "pending", _slot_loading)
@@ -4820,6 +5554,16 @@ func _run_menu_action(id: String) -> void:
 	elif id == "stand_up":
 		if _seated >= 0:
 			_stand_up()
+	elif id == "places":
+		if _map_open:
+			_close_map()
+		else:
+			_open_map()
+	elif id == "groups":
+		if _groups_open:
+			_close_groups_plane()
+		else:
+			_open_groups_plane()
 	elif id == "edit":
 		_editing = not _editing
 		_release_cursor_button()
@@ -6436,6 +7180,10 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "только в режиме редактирования" if value >= 0.5 else "всегда"
 	elif tunable[1] == "wall_slide_hand":
 		return "правая рука" if value >= 0.5 else "левая рука"
+	elif tunable[1] == "flight_sec":
+		return "мгновенно" if value <= 0.0 else "%.1f с" % value
+	elif tunable[1] == "auto_links":
+		return "выключены" if value < 0.5 else "по %d" % roundi(value)
 	elif tunable[1] == "turn_mode":
 		return ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
 	elif tunable[1] == "stick_mode":

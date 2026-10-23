@@ -34,6 +34,12 @@ class Fixture:
 	var tilt := 0.0
 	## Thinner than its cells (WallLayout.Shape.squeeze, 1 = as its cells).
 	var squeeze := 1.0
+	## Its place's group in the network of places (PlaceNetwork; 0 = none).
+	var group := 0
+	## How its screens are placed (the user's wish, 23.10.2026, each fixture its
+	## own): 0 = as everywhere (the setting «Перенос меняет»), 1 = by its cells (a
+	## sphere: by the Windows layout), 2 = freely.
+	var placement := 0
 	## A wall's screens: monitor key -> Rect2i of cells (WallLayout).
 	var cells := {}
 	## A wall's size in cells (empty = as big as its screens) and the gap between cells (m).
@@ -57,7 +63,7 @@ class Fixture:
 			stored[key] = [cell.position.x, cell.position.y, cell.size.x, cell.size.y]
 		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors,
 				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y],
-				"parts": parts, "splits": splits, "blocks": blocks, "tilt": tilt, "squeeze": squeeze}
+				"parts": parts, "splits": splits, "blocks": blocks, "tilt": tilt, "squeeze": squeeze, "group": group, "placement": placement}
 
 	static func from_dictionary(data: Dictionary) -> Fixture:
 		var fixture := Fixture.new()
@@ -71,6 +77,8 @@ class Fixture:
 		fixture.bend = clampf(float(data.get("bend", 0.0)), 0.0, 1.0)
 		fixture.tilt = clampf(float(data.get("tilt", 0.0)), -WallLayout.MAX_TILT, WallLayout.MAX_TILT)
 		fixture.squeeze = clampf(float(data.get("squeeze", 1.0)), WallLayout.MIN_SQUEEZE, 1.0)
+		fixture.group = clampi(int(data.get("group", 0)), 0, PlaceNetwork.MAX_GROUPS)
+		fixture.placement = clampi(int(data.get("placement", 0)), 0, 2)
 		var stored: Variant = data.get("cells", {})
 		if stored is Dictionary:
 			for key: Variant in stored:
