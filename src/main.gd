@@ -235,7 +235,7 @@ const SETTINGS_ROWS_PER_COLUMN := 11
 const SETTINGS_TAB_COLUMN_X := -1.25
 ## Saved arrangements on the "Раскладки" tab.
 const LAYOUT_SLOTS := 4
-const DRIVER_MAX_INSTANCES := 8
+const DRIVER_MAX_INSTANCES := 16
 const DRIVER_APPLY_HOLD_SEC := 2.0
 ## Room between rows of panels for the handles under them (metres).
 const ROW_GAP := 0.07
@@ -961,6 +961,9 @@ const FIXTURE_MONITOR_ROWS := 8
 const FIXTURE_RADIUS_STEP := 0.1
 var _fixture_rows: Array[Node3D] = []
 var _fixture_monitor_rows: Array[Node3D] = []
+var _monitor_page := 0
+var _monitor_page_nodes: Array[Node3D] = []
+var _monitor_page_label: Label3D
 var _fixture_status: Label3D
 ## Each sphere's radius handle (one per sphere, pooled) and its label.
 var _radius_handles: Array[MeshInstance3D] = []
@@ -1819,7 +1822,14 @@ func _build_fixture_section(tab: Node3D) -> void:
 	_fixture_status = _settings_label("«Сюда» — место заготовки в вашу голову, лицом туда, куда смотрите.\nШар: радиус — и шарик внизу перед местом. Стена и столб: кнопки — расстояние и зазор между клетками,\nшарики у углов — размер (наведите, куда встанет угол), под серединой — изгиб (столб — охват), над ней — наклон.",
 			Vector3(-0.45, -0.17, 0.0), 20, tab)
 
-	_settings_label("Мониторы", Vector3(0.72, 0.53, 0.0), 28, tab)
+	_settings_label("Мониторы", Vector3(0.62, 0.53, 0.0), 28, tab)
+	# More monitors than rows (up to 16 driver instances, 24.10.2026): by pages.
+	var monitors_back := _add_button_to(tab, "◀", Vector3(0.8, 0.53, 0.0), Vector2(0.07, 0.052), 0.25)
+	monitors_back.activated.connect(_on_monitor_page.bind(-1))
+	_monitor_page_label = _settings_label("", Vector3(0.93, 0.53, 0.0), 22, tab)
+	var monitors_next := _add_button_to(tab, "▶", Vector3(1.06, 0.53, 0.0), Vector2(0.07, 0.052), 0.25)
+	monitors_next.activated.connect(_on_monitor_page.bind(1))
+	_monitor_page_nodes.assign([monitors_back, _monitor_page_label, monitors_next])
 	for m in FIXTURE_MONITOR_ROWS:
 		var row := Node3D.new()
 		row.position = Vector3(0.0, 0.45 - m * 0.07, 0.0)
@@ -1862,11 +1872,18 @@ func _refresh_fixture_section() -> void:
 			for part: String in ["GapLess", "Gap", "GapMore"]:
 				(row.get_node(part) as Node3D).visible = wall
 			(row.get_node("Gap") as Label3D).text = "зазор %d см" % roundi(fixture.gap * 100.0)
+	var monitor_pages := maxi(ceili(_panels.size() / float(FIXTURE_MONITOR_ROWS)), 1)
+	_monitor_page = clampi(_monitor_page, 0, monitor_pages - 1)
+	for node in _monitor_page_nodes:
+		node.visible = monitor_pages > 1
+	if _monitor_page_label != null:
+		_monitor_page_label.text = "%d/%d" % [_monitor_page + 1, monitor_pages]
 	for m in FIXTURE_MONITOR_ROWS:
 		var row := _fixture_monitor_rows[m]
-		row.visible = m < _panels.size()
+		var index := _monitor_page * FIXTURE_MONITOR_ROWS + m
+		row.visible = index < _panels.size()
 		if row.visible:
-			var panel := _panels[m]
+			var panel := _panels[index]
 			(row.get_node("Monitor") as Label3D).text = "%s %d×%d" % [panel.monitor_name.trim_prefix("\\\\.\\"),
 					panel.monitor_rect.size.x, panel.monitor_rect.size.y]
 			(row.get_node("Fixture") as VrButton).set_text(_fixture_of(panel).name)
@@ -1932,7 +1949,13 @@ func _on_fixture_add(kind: String) -> void:
 
 
 ## The monitor in row `m` goes to the next sphere in the list.
+func _on_monitor_page(direction: int) -> void:
+	_monitor_page += direction
+	_refresh_fixture_section()
+
+
 func _on_monitor_fixture(m: int) -> void:
+	m += _monitor_page * FIXTURE_MONITOR_ROWS
 	if m >= _panels.size() or _fixtures.size() < 2:
 		return
 	var panel := _panels[m]

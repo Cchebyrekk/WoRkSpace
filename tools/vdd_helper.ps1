@@ -23,9 +23,9 @@ $env:PSModulePath = Join-Path $PSHOME 'Modules'
 Import-Module (Join-Path $PSHOME 'Modules\PnpDevice') -ErrorAction Stop
 $Pnputil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
 $HardwareId = 'Root\MttVDD'
-$MaxScreens = 8
+$MaxScreens = 16
 # Raised whenever the commands change; the app warns when the installed copy is older.
-$HelperVersion = 6
+$HelperVersion = 7
 $Nefconc = 'C:\ProgramData\scoop\shims\nefconc.exe'
 # The log lives in a folder only administrators can write (install_vdd_helper.ps1);
 # the exchange folder is writable by users, and an elevated write there could be
