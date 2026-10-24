@@ -15,3 +15,6 @@
 /bin/*.exp
 /bin/*.pdb
 /bin/*.ilk
+
+# Personal Claude Code settings of this machine
+.claude/settings.local.json

@@ -39,6 +39,9 @@ class Options:
 	## The network of places (slice m): how long the flight to a place takes (s,
 	## 0 = at once) and how many nearest places each one links to by itself.
 	var flight_sec := 0.5
+	## The world editor (slice n2): its grid's step (m) and the turn's step (°; 0 = free).
+	var edit_step := 0.25
+	var edit_turn_degrees := 15.0
 	var auto_links := 2
 	## Seated at a wall: which hand (and stick) slides along it, 0 = left, 1 = right;
 	## the other brings the wall closer or farther (the user's choice, 21.10.2026).

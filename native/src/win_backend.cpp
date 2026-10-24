@@ -603,6 +603,62 @@ bool record_ctrl = false, record_alt = false, record_shift = false, record_win =
 bool record_done = false;
 std::vector<uint16_t> record_keys;
 std::atomic<int> record_seen{ 0 };
+// Text mode (slice n2): the characters typed so far and how it ended (0 typing,
+// 1 Enter, 2 Esc).
+bool record_text_mode = false;
+std::wstring record_text;
+int record_end = 0;
+const size_t RECORD_TEXT_MAX = 40;
+
+bool key_down_now(int key);
+
+// One key typed in text mode (record_mutex held): Enter, Esc and Backspace
+// steer, the rest become characters in the focused window's keyboard layout.
+// `hooked`: from the hook, which swallows the modifiers too, so Windows never
+// sees them down and their state is the hook's own.
+void add_text_key(UINT vk, UINT scan, bool hooked) {
+	if (vk == VK_RETURN || vk == VK_ESCAPE) {
+		record_end = vk == VK_RETURN ? 1 : 2;
+		record_done = true;
+		return;
+	}
+	if (vk == VK_BACK) {
+		if (!record_text.empty()) {
+			record_text.pop_back();
+		}
+		return;
+	}
+	if (vk == VK_PACKET) {
+		// A character sent as itself (SendInput with KEYEVENTF_UNICODE): in the scan code.
+		if (scan >= 0x20 && record_text.size() < RECORD_TEXT_MAX) {
+			record_text.push_back(static_cast<wchar_t>(scan));
+		}
+		return;
+	}
+	BYTE state[256] = {};
+	bool shift = hooked ? record_shift : key_down_now(VK_SHIFT);
+	bool ctrl = hooked ? record_ctrl : key_down_now(VK_CONTROL);
+	bool alt = hooked ? record_alt : key_down_now(VK_MENU);
+	if (shift) state[VK_SHIFT] = state[VK_LSHIFT] = 0x80;
+	if (ctrl) state[VK_CONTROL] = state[VK_LCONTROL] = 0x80;
+	if (alt) state[VK_MENU] = state[VK_RMENU] = 0x80;
+	if ((GetKeyState(VK_CAPITAL) & 1) != 0) {
+		state[VK_CAPITAL] = 0x01;
+	}
+	if (state[VK_CONTROL] != 0 && state[VK_MENU] == 0) {
+		return; // Ctrl+key types nothing (AltGr is Ctrl+Alt and does)
+	}
+	HWND focused = GetForegroundWindow();
+	HKL layout = GetKeyboardLayout(focused != nullptr ? GetWindowThreadProcessId(focused, nullptr) : 0);
+	wchar_t chars[8] = {};
+	// 0x4: the keyboard state (dead keys) of the focused program is left alone.
+	int count = ToUnicodeEx(vk, scan, state, chars, 8, 0x4, layout);
+	for (int i = 0; i < count && record_text.size() < RECORD_TEXT_MAX; i++) {
+		if (chars[i] >= 0x20) {
+			record_text.push_back(chars[i]);
+		}
+	}
+}
 
 LRESULT CALLBACK record_proc(int code, WPARAM message, LPARAM data) {
 	if (code != HC_ACTION) {
@@ -629,7 +685,14 @@ LRESULT CALLBACK record_proc(int code, WPARAM message, LPARAM data) {
 			record_win = down;
 			break;
 		default:
-			if (down && !record_done) {
+			if (down && record_text_mode) {
+				if (!record_done) {
+					add_text_key(key->vkCode, key->scanCode, true);
+					if (record_done) {
+						PostThreadMessageW(record_thread_id, WM_QUIT, 0, 0);
+					}
+				}
+			} else if (down && !record_done) {
 				record_keys.clear();
 				if (record_ctrl) record_keys.push_back(VK_CONTROL);
 				if (record_alt) record_keys.push_back(VK_MENU);
@@ -670,6 +733,10 @@ void poll_keys(bool first) {
 		if (record_done) {
 			return;
 		}
+		if (record_text_mode) {
+			add_text_key(key, MapVirtualKeyW(key, MAPVK_VK_TO_VSC), false);
+			continue;
+		}
 		record_keys.clear();
 		if (key_down_now(VK_CONTROL)) record_keys.push_back(VK_CONTROL);
 		if (key_down_now(VK_MENU)) record_keys.push_back(VK_MENU);
@@ -692,13 +759,18 @@ void key_recording_stop() {
 	record_thread_id = 0;
 }
 
-bool key_recording_start() {
+namespace {
+
+bool recording_start(bool text) {
 	key_recording_stop();
 	{
 		std::lock_guard<std::mutex> lock(record_mutex);
 		record_ctrl = record_alt = record_shift = record_win = false;
 		record_done = false;
 		record_keys.clear();
+		record_text_mode = text;
+		record_text.clear();
+		record_end = 0;
 	}
 	record_seen = 0;
 	std::promise<bool> hooked;
@@ -738,6 +810,22 @@ bool key_recording_start() {
 	}
 	record_thread.join();
 	return false;
+}
+
+} // namespace
+
+bool key_recording_start() {
+	return recording_start(false);
+}
+
+bool text_recording_start() {
+	return recording_start(true);
+}
+
+int text_recording_result(std::wstring &text) {
+	std::lock_guard<std::mutex> lock(record_mutex);
+	text = record_text;
+	return record_end;
 }
 
 int key_recording_seen() {

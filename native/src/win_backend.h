@@ -73,6 +73,13 @@ void key_recording_stop();
 bool key_recording_result(std::vector<uint16_t> &keys);
 // How many keyboard events the recording hook has seen (for the log).
 int key_recording_seen();
+// Records text typed on the physical keyboard (slice n2: names of places), in the
+// layout of the focused window; keys are swallowed meanwhile, as above. Enter
+// ends it, Esc cancels, Backspace takes the last character away.
+// key_recording_stop() stops it too.
+bool text_recording_start();
+// The text so far, and how it ended: 0 still typing, 1 Enter, 2 Esc.
+int text_recording_result(std::wstring &text);
 
 // Stops what the module runs in the background (keyboard recording, the agent
 // connection); called when the module is unloaded.

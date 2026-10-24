@@ -138,9 +138,10 @@ const TUNABLES := [
 	["engagement", "drop", "Покой: рука ниже глаз на", 100.0, "см", 0.02, 0.2, 0.9],
 	["engagement", "ray_down_deg", "Покой: луч ниже горизонта на", 1.0, "°", 5.0, 10.0, 80.0],
 	["gestures", "disc_ring_curl", "Диск: безымянный согнут", 1000.0, "мм", 0.01, 0.0, 0.15],
-	["cursor", "drag_threshold", "Перетаскивание: порог", 1.0, "px", 5.0, 5.0, 150.0],
+	["cursor", "drag_threshold", "Перетаскивание: порог (магнит щелчка)", 1.0, "px", 5.0, 0.0, 150.0],
 	["cursor", "drag_delay_sec", "Перетаскивание: задержка", 1000.0, "мс", 0.05, 0.0, 1.0],
-	["cursor", "double_click_sec", "Двойной щелчок: окно", 1000.0, "мс", 0.1, 0.3, 2.0],
+	["cursor", "double_click_sec", "Двойной щелчок: окно", 1000.0, "мс", 0.1, 0.0, 2.0],
+	["cursor", "double_click_radius", "Двойной щелчок: радиус", 1.0, "px", 10.0, 0.0, 200.0],
 	["gestures", "grab_mode", "Перенос панели", 1.0, "", 1.0, 0.0, 3.0],
 	["gestures", "fist_curl", "Кулак: пальцы у ладони", 1000.0, "мм", 0.005, 0.04, 0.11],
 	["panels", "move_mode", "Перенос меняет", 1.0, "", 1.0, 0.0, 1.0],
@@ -172,6 +173,8 @@ const TUNABLES := [
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "flight_sec", "Перелёт к месту", 1.0, "с", 0.1, 0.0, 2.0],
 	["world", "auto_links", "Связи с ближайшими", 1.0, "", 1.0, 0.0, 4.0],
+	["world", "edit_step", "Шаг сетки", 1.0, "м", 0.05, 0.0, 2.0],
+	["world", "edit_turn_degrees", "Поворот по", 1.0, "°", 5.0, 0.0, 90.0],
 ]
 
 const EXIT_BUTTON_HOLD_SEC := 1.0
@@ -181,6 +184,7 @@ const TOPOLOGY_MESSAGES := {
 	"last_screen": "это последний экран, убирать нельзя",
 	"no_free_screen": "свободных экранов нет — добавьте экземпляр на вкладке «Драйвер»",
 	"arranged": "раскладка Windows изменена",
+	"modes_set": "разрешения изменены",
 	"saved": "исходная раскладка запомнена",
 	"restored": "исходная раскладка возвращена",
 	"no_backup": "исходная раскладка не запомнена",
@@ -205,23 +209,23 @@ const MONITOR_MENU_FORWARD := 0.25
 ## "Жесты": everything about recognising the hands — touches, pause, swipe, zoom,
 ## rest, fist, the ring's tilt and the moving hand's reach; 20.10.2026 the user
 ## asked for every setting to sit on the tab it belongs to).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Меню"]
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Миры", "Меню"]
 ## Subheadings over the rows they start (the user's wish, 22.10.2026: to find things at a glance).
 const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауза", "swipe_mode": "Смахивание и масштаб",
 	"drop": "Покой", "fist_curl": "Кулак и движение рукой",
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
 	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
-	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики", "flight_sec": "Сеть мест"}
+	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики", "flight_sec": "Сеть мест", "edit_step": "Редактор мира"}
 ## The value between − and + is at most this wide; longer text gets a smaller font (m).
 const SETTINGS_VALUE_WIDTH := 0.24
 const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
-	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2,
+	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
 	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
-	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7,
+	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7, "edit_step": 7, "edit_turn_degrees": 7,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -502,6 +506,16 @@ class Pointer:
 	var fist_started := false
 	## The farthest fingertip from the palm (mm), for the log: tuning the fist threshold.
 	var fist_mm := 0.0
+	## The fist in any grab mode (the world editor's hold), and the frame it closed.
+	var edit_fist := false
+	var edit_fist_started := false
+	## The fixture this pointer carries in the world editor (-1 none): its frame and
+	## the ray's grip when taken, how far along the ray, how long the hold was lost.
+	var world_fixture := -1
+	var world_start := Transform3D()
+	var world_grip := Transform3D()
+	var world_reach := 0.0
+	var world_lost := 0.0
 	## The panel this pointer moves or resizes, or null; GRAB_MOVE or GRAB_RESIZE.
 	var grab_panel: ScreenPanel
 	var grab_kind := 0
@@ -521,6 +535,9 @@ class Pointer:
 	var grab_value := 0.0
 	## A panel carried on a wall: the cells it had when taken (WallLayout).
 	var grab_cell := Rect2i()
+	## Another fixture the ray is on while a screen is carried (slice n2): let go
+	## there, the screen moves onto it (-1 none).
+	var grab_other := -1
 	## Free placement: what the magnet held last frame (NAN = nothing).
 	var snap_held := Vector2(NAN, NAN)
 
@@ -545,7 +562,8 @@ var _wall_needed_resolutions: Array[Vector2i] = []
 var _wall_marked: Array[Vector2i] = []
 ## «Разрешение по клетке»: the mode being set now ("<monitor key> WxH"), and those
 ## Windows refused (never asked for again in this run).
-var _wall_mode_attempt := ""
+## The modes just sent for the walls (monitor name -> "key WxH"), to know which were refused.
+var _wall_mode_attempts := {}
 var _wall_modes_refused := {}
 ## The last mode sent to each monitor ("<key> WxH"), not sent again.
 var _wall_modes_sent := {}
@@ -764,6 +782,44 @@ var _links_added: Array[Vector2i] = []
 ## (slice n): open, its root, a group being dragged, the miniatures by fixture id.
 var _group_offsets := {}
 var _groups_open := false
+## The world editor (slice n2, the user's wishes 23.10.2026): a mode of its own
+## (the radial menu's «Редактор мира»): screens stay put and nothing reaches the
+## computer; a fist (a controller's grip) with the ray on a fixture carries it whole
+## on the editor's grid; a shelf by the left hand holds new fixtures and a bin.
+var _world_editing := false
+## Several worlds (slice n2, the user's choice 23.10.2026): each keeps everything
+## about the world — the fixtures and the monitors on them, the seat, the links,
+## the groups, the screens' places in VR; the open one is saved with every change
+## (`[worlds] list` of {name, data}, `current`).
+var _worlds: Array = []
+var _world_index := 0
+var _world_rows: Array[Node3D] = []
+var _world_status: Label3D
+## The world whose name is being typed on the keyboard (-1 none).
+var _world_naming := -1
+const WORLD_ROWS := 6
+var _shelf: Node3D
+var _shelf_items: Array[Node3D] = []
+var _edit_grid: MultiMeshInstance3D
+## The shelf's slots: a kind to take, "" the bin.
+const SHELF_KINDS := ["sphere", "wall", "column", ""]
+const SHELF_NAMES := ["Шар", "Стена", "Столб", "Удалить"]
+## The hand takes from a slot within this (m); slots this far apart.
+const SHELF_REACH := 0.08
+const SHELF_SPACING := 0.13
+## The shelf: left of the head at chest height, a little ahead (lower, the hand
+## reaching for it would count as resting); it follows the user once they have
+## turned or walked this far from it (so it does not swim).
+const SHELF_OFFSET := Vector3(-0.35, -0.27, -0.35)
+## The shelf's bar is taken by a pinch with the hand this near it, or with the ray this near.
+const SHELF_BAR_REACH := 0.07
+const SHELF_BAR_RAY := 0.03
+## Placed once (then it stays where it was put), and the pinch carrying it:
+## {"pointer", "reach" (along the ray; -1 by the hand), "offset"}.
+var _shelf_placed := false
+var _shelf_drag := {}
+## The editor's grid around a carried fixture: dots this many steps each way.
+const EDIT_GRID_SPAN := 4
 var _groups_root: Node3D
 var _groups_drag := {}
 var _groups_tiles := {}
@@ -793,6 +849,16 @@ const MAP_DOT := 0.012
 const MAP_HAND_REACH := 0.05
 const MAP_RAY_REACH := 0.025
 const MAP_HOVER_SCALE := 2.2
+## The map's menu on a place (slice n2): a pinch held this long on a place opens
+## a ring round it — its group, a name typed on the keyboard, removing it.
+const MAP_MENU_HOLD := 0.6
+const MAP_MENU_RADIUS := 0.1
+const MAP_MENU_REACH := 0.035
+var _map_menu := {}
+var _map_menu_root: Node3D
+var _map_hold: Array[float] = [NAN, NAN]
+## The place being named from the keyboard (-1 none).
+var _map_naming := -1
 ## Each column's axis in the world as last placed: the column stays there while
 ## its distance, size, thickness or bend change, and the user is carried instead
 ## (22.10.2026: changing the distance moved the column the user went round).
@@ -861,6 +927,12 @@ const BEND_SLIDER_AHEAD := 0.45
 const BEND_SLIDER_DROP := 0.12
 ## The "Заготовки" tab: a row per fixture and a row per monitor (pools, shown as needed).
 const FIXTURE_ROWS := 6
+## How many fixtures the world holds (23.10.2026 the limit was the tab's six rows,
+## and the shelf gave no seventh); the «Заготовки» tab shows them by pages.
+const MAX_FIXTURES := 16
+var _fixture_page := 0
+var _fixture_page_nodes: Array[Node3D] = []
+var _fixture_page_label: Label3D
 ## Kinds of fixture handles: a sphere's radius / a wall's lower right size ball,
 ## the wall's bend ball, and its size balls at the other corners; its tilt ball over the top.
 const HANDLE_SIZE := 0
@@ -1029,6 +1101,7 @@ func _ready() -> void:
 	_sync_menu_editor()
 	_update_ray_info()
 	_refresh_layout_section()
+	_refresh_worlds_section()
 	_refresh_settings_panel()
 	# The layout as it was before this session, for the emergency exit. Not after a
 	# self-restart: by then the layout may already have been changed here.
@@ -1146,6 +1219,7 @@ func _process(delta: float) -> void:
 	_update_radius_handles(delta)
 	_update_map()
 	_update_groups_plane()
+	_update_world_editor(delta)
 	_place_monitor_menu()
 	_update_buttons(delta)
 	_update_sliders()
@@ -1163,6 +1237,8 @@ func _process(delta: float) -> void:
 		lines.append("ЗАЩИЩЁННЫЙ РАБОЧИЙ СТОЛ (запрос администратора / экран блокировки) — виден через агента")
 	if _editing:
 		lines.append("РЕЖИМ РЕДАКТИРОВАНИЯ — выключается тем же пунктом кругового меню")
+	if _world_editing:
+		lines.append("РЕДАКТОР МИРА — кулак (grip) с лучом на заготовке: перенести; полочка слева: взять новую, бросить в «Удалить»; экраны не двигаются")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
@@ -1502,8 +1578,12 @@ func _update_wall_seat(wall: WorldLayout.Fixture, slide_velocity: Vector2, appro
 		_wall_seat_moving = moving
 		if not moving:
 			_save_settings()
-			print("[world] у «%s»: вдоль %+.2f м, вверх %+.2f м, до %s %.2f м" % [wall.name, _seat_slide.x, _seat_slide.y,
-					"столба" if wall.kind == "column" else "стены", wall.radius])
+			# Where the column's axis stands in the world, to see if it ever drifts
+			# (23.10.2026 and 24.10.2026 "the centre I turned round moved").
+			var axis := wall.frame() * _wall_shape(wall).axis()
+			print("[world] у «%s»: вдоль %+.2f м, вверх %+.2f м, до %s %.2f м%s" % [wall.name, _seat_slide.x, _seat_slide.y,
+					"столба" if wall.kind == "column" else "стены", wall.radius,
+					(", ось (%.2f; %.2f)" % [axis.x, axis.z]) if wall.kind == "column" else ""])
 	_set_vignette(Locomotion.vignette_strength(_world.vignette, slide_velocity.length() + absf(approach), _world.move_speed,
 			0.0, deg_to_rad(_world.turn_speed_degrees)))
 
@@ -1532,8 +1612,8 @@ func _stick_moves(index: int) -> bool:
 	if stick.length() <= CONTROLLER_STICK_DEADZONE:
 		_stick_latch[index] = 0
 	elif _stick_latch[index] == 0:
-		_stick_latch[index] = 1 if _editing or not _pointers[index].on_panel else 2
-	return _stick_latch[index] == 1 or (_stick_latch[index] == 0 and (_editing or not _pointers[index].on_panel))
+		_stick_latch[index] = 1 if _computer_locked() or not _pointers[index].on_panel else 2
+	return _stick_latch[index] == 1 or (_stick_latch[index] == 0 and (_computer_locked() or not _pointers[index].on_panel))
 
 
 ## The rig moved: panel layers (they must hang under the rig, but stand in the
@@ -1697,6 +1777,12 @@ func _stand_up() -> void:
 ## move it to the next sphere). Every change is saved at once.
 func _build_fixture_section(tab: Node3D) -> void:
 	_settings_label("Заготовки", Vector3(-0.5, 0.53, 0.0), 28, tab)
+	var back := _add_button_to(tab, "◀", Vector3(-0.08, 0.53, 0.0), Vector2(0.07, 0.052), 0.25)
+	back.activated.connect(_on_fixture_page.bind(-1))
+	_fixture_page_label = _settings_label("", Vector3(0.08, 0.53, 0.0), 22, tab)
+	var next := _add_button_to(tab, "▶", Vector3(0.24, 0.53, 0.0), Vector2(0.07, 0.052), 0.25)
+	next.activated.connect(_on_fixture_page.bind(1))
+	_fixture_page_nodes.assign([back, _fixture_page_label, next])
 	for r in FIXTURE_ROWS:
 		var row := Node3D.new()
 		row.position = Vector3(0.0, 0.45 - r * 0.08, 0.0)
@@ -1748,14 +1834,26 @@ func _build_fixture_section(tab: Node3D) -> void:
 	_refresh_fixture_section()
 
 
+func _on_fixture_page(direction: int) -> void:
+	_fixture_page += direction
+	_refresh_fixture_section()
+
+
 func _refresh_fixture_section() -> void:
 	if _fixture_rows.is_empty():
 		return
+	var pages := maxi(ceili(_fixtures.size() / float(FIXTURE_ROWS)), 1)
+	_fixture_page = clampi(_fixture_page, 0, pages - 1)
+	for node in _fixture_page_nodes:
+		node.visible = pages > 1
+	if _fixture_page_label != null:
+		_fixture_page_label.text = "стр. %d/%d" % [_fixture_page + 1, pages]
 	for r in FIXTURE_ROWS:
 		var row := _fixture_rows[r]
-		row.visible = r < _fixtures.size()
+		var index := _fixture_page * FIXTURE_ROWS + r
+		row.visible = index < _fixtures.size()
 		if row.visible:
-			var fixture := _fixtures[r]
+			var fixture := _fixtures[index]
 			(row.get_node("Name") as Label3D).text = fixture.name + (" (сижу)" if fixture.id == _seated else "")
 			(row.get_node("Group") as VrButton).set_text("гр. %d" % fixture.group if fixture.group > 0 else "без гр.")
 			(row.get_node("Placement") as VrButton).set_text(_placement_name(fixture))
@@ -1775,6 +1873,7 @@ func _refresh_fixture_section() -> void:
 
 
 func _on_fixture_radius(row: int, direction: float) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
@@ -1786,6 +1885,7 @@ func _on_fixture_radius(row: int, direction: float) -> void:
 
 ## A wall's gap between cells, a centimetre per press.
 func _on_fixture_gap(row: int, direction: float) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size() or not _walled(_fixtures[row]):
 		return
 	var fixture := _fixtures[row]
@@ -1796,6 +1896,7 @@ func _on_fixture_gap(row: int, direction: float) -> void:
 
 ## The sphere's centre to the user's head, its middle where the user looks.
 func _on_fixture_here(row: int) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
@@ -1807,6 +1908,7 @@ func _on_fixture_here(row: int) -> void:
 
 
 func _on_fixture_delete(row: int) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
@@ -1819,12 +1921,13 @@ func _on_fixture_delete(row: int) -> void:
 
 
 func _on_fixture_add(kind: String) -> void:
-	if _fixtures.size() >= FIXTURE_ROWS:
-		_fixture_status.text = "Заготовок уже %d — больше на вкладке не поместится." % FIXTURE_ROWS
+	if _fixtures.size() >= MAX_FIXTURES:
+		_fixture_status.text = "Заготовок уже %d — это предел." % MAX_FIXTURES
 		return
 	var head := _camera.global_transform
 	var fixture := WorldLayout.new_fixture(_fixtures, kind, head.origin, atan2(head.basis.z.x, head.basis.z.z))
 	_fixtures.append(fixture)
+	_fixture_page = (_fixtures.size() - 1) / FIXTURE_ROWS
 	_fixture_changed("%s добавлен здесь; назначьте ему мониторы справа" % fixture.name)
 
 
@@ -1856,10 +1959,10 @@ func _update_radius_handles(delta: float) -> void:
 	if _map_open or _groups_open:
 		return
 	_update_split_grips()
-	# Handle h: the fixture h % FIXTURE_ROWS, of kind h / FIXTURE_ROWS (HANDLE_*).
+	# Handle h: the fixture h % MAX_FIXTURES, of kind h / MAX_FIXTURES (HANDLE_*).
 	for h in _radius_handles.size():
-		var fixture: WorldLayout.Fixture = _fixtures[h % FIXTURE_ROWS] if h % FIXTURE_ROWS < _fixtures.size() else null
-		var kind := h / FIXTURE_ROWS
+		var fixture: WorldLayout.Fixture = _fixtures[h % MAX_FIXTURES] if h % MAX_FIXTURES < _fixtures.size() else null
+		var kind := h / MAX_FIXTURES
 		var shown := fixture != null and _handle_on(fixture, kind)
 		_radius_handles[h].visible = shown
 		_radius_labels[h].visible = false
@@ -1920,9 +2023,9 @@ func _update_radius_handles(delta: float) -> void:
 
 func _show_radius_handle(fixture: WorldLayout.Fixture, color: Color, kind: int) -> void:
 	var i := _fixtures.find(fixture)
-	if i < 0 or i >= FIXTURE_ROWS:
+	if i < 0 or i >= MAX_FIXTURES:
 		return
-	var h := i + FIXTURE_ROWS * kind
+	var h := i + MAX_FIXTURES * kind
 	(_radius_handles[h].material_override as StandardMaterial3D).albedo_color = color
 	var label := _radius_labels[h]
 	label.visible = true
@@ -1948,7 +2051,7 @@ func _handle_on(fixture: WorldLayout.Fixture, kind: int) -> bool:
 ## Handles show always, or with «Ручки: только в режиме редактирования» only while
 ## the editing mode is on (the user's wish, 22.10.2026).
 func _handles_shown() -> bool:
-	return _world.handles_mode == 0 or _editing
+	return _world.handles_mode == 0 or _editing or _world_editing
 
 
 ## «÷» grip (slice k2): where a ray is on a wall, one at the part (cell, or joined
@@ -1961,6 +2064,10 @@ func _handles_shown() -> bool:
 ## The ray picks, letting go runs it. Not on cells under a screen that takes
 ## several cells. Switched off in the settings too.
 func _update_split_grips() -> void:
+	if _world_editing:
+		for grip in _split_grips:
+			grip.visible = false
+		return
 	if not _grip_menu_state.is_empty():
 		_update_grip_menu()
 		for grip in _split_grips:
@@ -2426,6 +2533,10 @@ func _apply_wall_resolutions() -> void:
 		return
 	var available := VddConfig.read()
 	var missing: Array[Vector2i] = []
+	# Every screen that wants another mode, sent together (23.10.2026: one at a
+	# time, each with a window watch and a layout step, took three minutes for nine).
+	var batch := {}
+	var attempts := {}
 	# Every wall at once: one at a time, a wall with nothing missing wiped out
 	# what the one before had found (22.10.2026: nothing showed on «Драйвер»).
 	for wall in _fixtures:
@@ -2455,11 +2566,12 @@ func _apply_wall_resolutions() -> void:
 				if _wall_modes_refused.has(attempt) or _wall_modes_sent.get(panel.monitor_key, "") == attempt:
 					continue
 				_wall_modes_sent[panel.monitor_key] = attempt
-				_wall_mode_attempt = attempt
-				print("[world] %s: разрешение по клетке %dx%d" % [panel.monitor_name, want.x, want.y])
-				_mode_change_monitor = panel.monitor_name
-				_topology.set_mode(panel.monitor_name, "%dx%d@60" % [want.x, want.y], 0)
-				return  # one at a time; the next after the panels are rebuilt
+				attempts[panel.monitor_name] = attempt
+				batch[panel.monitor_name] = "%dx%d@60" % [want.x, want.y]
+	if not batch.is_empty():
+		_wall_mode_attempts = attempts
+		print("[world] разрешение по клетке: %s" % batch)
+		_topology.set_modes(batch)
 	# Only what the walls want now (22.10.2026 every shape ever tried piled up,
 	# 15992×8104 among them, and the driver came up with no screen at all).
 	if missing == _wall_needed_resolutions:
@@ -2915,6 +3027,7 @@ func _drag_sliders(pointer: Pointer, fixture: WorldLayout.Fixture, delta: float)
 
 func _build_bend_slider() -> void:
 	_build_map_nodes()
+	_build_world_editor()
 	_bend_slider = VrSlider.new(BEND_SLIDER_WIDTH)
 	_bend_slider.visible = false
 	add_child(_bend_slider)
@@ -3006,7 +3119,7 @@ func _build_outlines() -> void:
 	body.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	body.cull_mode = BaseMaterial3D.CULL_DISABLED
 	body.albedo_color = Color(0.1, 0.11, 0.14)
-	for i in FIXTURE_ROWS:
+	for i in MAX_FIXTURES:
 		var outline := MeshInstance3D.new()
 		outline.material_override = material
 		outline.visible = false
@@ -3025,7 +3138,7 @@ func _build_radius_handles() -> void:
 	var ball := SphereMesh.new()
 	ball.radius = 0.025
 	ball.height = 0.05
-	for i in FIXTURE_ROWS * HANDLE_KINDS.size():
+	for i in MAX_FIXTURES * HANDLE_KINDS.size():
 		var material := StandardMaterial3D.new()
 		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
@@ -3624,7 +3737,7 @@ func _update_cursor() -> void:
 
 	# While editing, nothing reaches the computer (the user's wish, 22.10.2026); the
 	# rays still end on the screens.
-	if _editing:
+	if _computer_locked():
 		_release_cursor_button()
 		_cursor_owner = -1
 		_scroll_remainder = 0.0
@@ -3728,7 +3841,7 @@ func _update_two_hand_gestures() -> void:
 
 	var zooming := not _groups_open and not _map_open and left.mode == "рука" and right.mode == "рука" \
 			and left.button == HandGestures.Click.LEFT and right.button == HandGestures.Click.LEFT \
-			and left.grab_panel == null and right.grab_panel == null and not _editing
+			and left.grab_panel == null and right.grab_panel == null and not _computer_locked()
 	if zooming:
 		var gap := left.pinch_point.distance_to(right.pinch_point)
 		if not _zoom_active:
@@ -4146,6 +4259,11 @@ func _close_map() -> void:
 		_map_hover[i] = -1
 		_map_link_from[i] = -1
 		_map_turning[i] = NAN
+		_map_hold[i] = NAN
+	_close_map_menu()
+	if _map_naming >= 0:
+		MouseInput.stop_key_recording()
+		_map_naming = -1
 
 
 ## The map's dots, links, group clouds and the user's mark, from the world as it is.
@@ -4223,10 +4341,14 @@ func _update_map() -> void:
 		return
 	var pivot := _map_pivot.global_transform
 	var shown := -1
+	var now := Time.get_ticks_msec() / 1000.0
 	for i in 2:
 		var pointer := _pointers[i]
 		_map_hover[i] = -1
 		if not pointer.active:
+			continue
+		if _map_menu.get("pointer", -1) == i:
+			_update_map_menu(pointer)
 			continue
 		var tip := pointer.origin
 		if pointer.mode == "рука" and pointer.hand_joints.size() == HandPose.JOINT_COUNT:
@@ -4261,8 +4383,17 @@ func _update_map() -> void:
 		if pointer.just_pressed and pointer.button == HandGestures.Click.LEFT:
 			if hovered >= 0:
 				_map_link_from[i] = hovered
+				_map_hold[i] = now
 			else:
 				_map_turning[i] = _map_angle(pointer)
+		# Held on the same place: its menu instead of a link.
+		if _map_link_from[i] < 0 or not pinching or hovered != _map_link_from[i]:
+			_map_hold[i] = NAN
+		elif now - _map_hold[i] >= MAP_MENU_HOLD and _map_menu.is_empty():
+			_open_map_menu(i, hovered)
+			_map_link_from[i] = -1
+			_map_hold[i] = NAN
+			continue
 		if _map_link_from[i] >= 0 and not pinching:
 			if hovered >= 0 and hovered != _map_link_from[i]:
 				_toggle_link(_map_link_from[i], hovered)
@@ -4298,6 +4429,139 @@ func _update_map() -> void:
 			drag.append(from)
 			drag.append(to)
 	_map_drag.mesh = _line_mesh(drag, Mesh.PRIMITIVE_LINES)
+	_update_map_naming(pivot)
+
+
+## The ring round a place on the map: no group or one of the groups, «Имя…»
+## (typed on the keyboard), «Удалить».
+func _open_map_menu(index: int, id: int) -> void:
+	var fixture := WorldLayout.find(_fixtures, id)
+	if fixture == null:
+		return
+	if _map_menu_root == null:
+		_map_menu_root = Node3D.new()
+		_map_root.add_child(_map_menu_root)
+	_close_map_menu()
+	_map_menu_root.global_transform = Transform3D(_map_root.global_basis, _map_pivot.global_transform * (_map_local[id] as Vector3))
+	var actions: Array[String] = []
+	for group in range(0, PlaceNetwork.MAX_GROUPS + 1):
+		actions.append("group:%d" % group)
+	actions.append_array(["name", "delete"] as Array[String])
+	var items := []
+	for k in actions.size():
+		var action := actions[k]
+		var label := Label3D.new()
+		if action.begins_with("group:"):
+			var group := int(action.trim_prefix("group:"))
+			label.text = ("• " if group == fixture.group else "") + (PlaceNetwork.group_name(group) if group > 0 else "Без группы")
+			label.modulate = PlaceNetwork.group_color(group).lightened(0.3)
+		else:
+			label.text = {"name": "Имя…", "delete": "Удалить"}[action]
+		label.pixel_size = 0.0007
+		label.font_size = 26
+		label.outline_size = 10
+		var angle := PI / 2.0 - TAU * k / actions.size()
+		label.position = Vector3(cos(angle), sin(angle), 0.0) * MAP_MENU_RADIUS + Vector3(0.0, 0.0, 0.03)
+		_map_menu_root.add_child(label)
+		items.append([label, action])
+	_map_menu = {"id": id, "pointer": index, "items": items, "hover": -1}
+	print("[world] сеть мест: меню «%s»" % fixture.name)
+
+
+func _close_map_menu() -> void:
+	if _map_menu_root != null:
+		for child in _map_menu_root.get_children():
+			child.queue_free()
+	_map_menu = {}
+
+
+## The ring open: the item under the ray (or the fingertip) grows; letting the
+## pinch go runs it, off the items nothing.
+func _update_map_menu(pointer: Pointer) -> void:
+	var tip := pointer.origin
+	if pointer.mode == "рука" and pointer.hand_joints.size() == HandPose.JOINT_COUNT:
+		tip = _origin.global_transform * pointer.hand_joints[HandPose.FINGERS[1][3]]
+	var hover := -1
+	var best := INF
+	var items: Array = _map_menu["items"]
+	for k in items.size():
+		var at: Vector3 = (items[k][0] as Label3D).global_position
+		var along := (at - pointer.origin).dot(pointer.direction)
+		var off := (pointer.origin + pointer.direction * along).distance_to(at)
+		var near := tip.distance_to(at)
+		var score := near if near < MAP_HAND_REACH else (off if along > 0.0 and off < MAP_MENU_REACH else INF)
+		if score < best:
+			best = score
+			hover = k
+	for k in items.size():
+		(items[k][0] as Label3D).scale = Vector3.ONE * (1.35 if k == hover else 1.0)
+	if hover >= 0:
+		pointer.hit_distance = minf(pointer.hit_distance, ((items[hover][0] as Label3D).global_position - pointer.origin).length())
+	if pointer.pressed and pointer.button == HandGestures.Click.LEFT:
+		return
+	var id: int = _map_menu["id"]
+	_close_map_menu()
+	if hover >= 0:
+		_run_map_action(id, items[hover][1])
+
+
+func _run_map_action(id: int, action: String) -> void:
+	var fixture := WorldLayout.find(_fixtures, id)
+	if fixture == null:
+		return
+	if action.begins_with("group:"):
+		fixture.group = int(action.trim_prefix("group:"))
+		_save_settings()
+		_refresh_fixture_section()
+		_build_map()
+		_vdd_message = "«%s» — %s" % [fixture.name, PlaceNetwork.group_name(fixture.group) if fixture.group > 0 else "без группы"]
+	elif action == "name":
+		if MouseInput.start_text_recording():
+			_world_naming = -1
+			_map_naming = id
+			_vdd_message = "«%s»: печатайте имя на клавиатуре, Enter — готово, Esc — отмена" % fixture.name
+		else:
+			_vdd_message = "клавиатуру не получилось слушать"
+	elif action == "delete":
+		if _fixtures.size() <= 1:
+			_vdd_message = "последнюю заготовку удалить нельзя: экранам надо где-то висеть"
+			return
+		if _seated == id:
+			_stand_up()
+		WorldLayout.remove(_fixtures, id)
+		for links: Array[Vector2i] in [_links_added, _links_removed]:
+			for k in range(links.size() - 1, -1, -1):
+				if links[k].x == id or links[k].y == id:
+					links.remove_at(k)
+		_world_changed("«%s» удалена, её экраны — на «%s»" % [fixture.name, _fixtures[0].name])
+		_apply_group_windows()
+		_build_map()
+	print("[world] сеть мест: «%s» — %s" % [fixture.name, action])
+
+
+## A name being typed: shown over its place as it comes; Enter keeps it, Esc not.
+func _update_map_naming(pivot: Transform3D) -> void:
+	if _map_naming < 0:
+		return
+	var fixture := WorldLayout.find(_fixtures, _map_naming)
+	var text := MouseInput.get_recorded_text()
+	var ended := MouseInput.get_text_recording_end()
+	if fixture != null and _map_local.has(_map_naming):
+		_map_label.visible = true
+		_map_label.text = "Имя: %s_\nEnter — готово, Esc — отмена" % text
+		_map_label.global_position = pivot * (_map_local[_map_naming] as Vector3) + Vector3.UP * 0.06
+	if ended == 0 and fixture != null:
+		return
+	MouseInput.stop_key_recording()
+	_map_naming = -1
+	if ended == 1 and fixture != null and text.strip_edges() != "":
+		var old := fixture.name
+		fixture.name = text.strip_edges()
+		_save_settings()
+		_refresh_fixture_section()
+		_build_map()
+		_vdd_message = "«%s» теперь «%s»" % [old, fixture.name]
+		print("[world] сеть мест: ", _vdd_message)
 
 
 ## Where a ray passes round the map's upright axis, as an angle (NAN if it does not come near).
@@ -4576,6 +4840,557 @@ func _drop_group(id: int, shift: Vector2i) -> void:
 	_build_groups_plane()
 
 
+## Whether anything may reach the computer: not in either editing mode.
+func _computer_locked() -> bool:
+	return _editing or _world_editing
+
+
+func _set_world_editing(on: bool) -> void:
+	if on == _world_editing:
+		return
+	_world_editing = on
+	if on:
+		_editing = false
+		_close_map()
+		if _groups_open:
+			_close_groups_plane()
+		for pointer in _pointers:
+			if pointer.grab_panel != null:
+				_end_grab(pointer)
+		_place_shelf()
+	else:
+		for pointer in _pointers:
+			if pointer.world_fixture >= 0:
+				var fixture := WorldLayout.find(_fixtures, pointer.world_fixture)
+				pointer.world_fixture = -1
+				if fixture != null:
+					_world_changed("«%s» поставлена" % fixture.name)
+	_release_cursor_button()
+	print("[world] редактор мира %s" % ("включён" if on else "выключен"))
+
+
+## The shelf with the fixtures to take and the bin, and the dots of the editor's grid.
+func _build_world_editor() -> void:
+	_shelf = Node3D.new()
+	_shelf.visible = false
+	# Under the rig: it stays where it was put and goes along only when the user
+	# moves or turns by gesture or stick (23.10.2026 it followed every head turn).
+	_origin.add_child(_shelf)
+	var bar := MeshInstance3D.new()
+	var plank := BoxMesh.new()
+	plank.size = Vector3((SHELF_KINDS.size() - 1) * SHELF_SPACING + 0.08, 0.012, 0.012)
+	bar.mesh = plank
+	bar.material_override = _map_material(Color(0.75, 0.75, 0.8), false)
+	bar.position = Vector3(0.0, -0.095, 0.0)
+	bar.name = "Bar"
+	_shelf.add_child(bar)
+	var hint := Label3D.new()
+	hint.text = "щипок — переставить"
+	hint.pixel_size = 0.0006
+	hint.font_size = 20
+	hint.outline_size = 6
+	hint.position = Vector3(0.0, -0.115, 0.0)
+	_shelf.add_child(hint)
+	for k in SHELF_KINDS.size():
+		var item := Node3D.new()
+		item.position = Vector3((k - (SHELF_KINDS.size() - 1) * 0.5) * SHELF_SPACING, 0.0, 0.0)
+		_shelf.add_child(item)
+		var model := MeshInstance3D.new()
+		match SHELF_KINDS[k]:
+			"sphere":
+				var ball := SphereMesh.new()
+				ball.radius = 0.035
+				ball.height = 0.07
+				model.mesh = ball
+			"wall":
+				var slab := BoxMesh.new()
+				slab.size = Vector3(0.09, 0.055, 0.01)
+				model.mesh = slab
+			"column":
+				var post := CylinderMesh.new()
+				post.top_radius = 0.025
+				post.bottom_radius = 0.025
+				post.height = 0.08
+				model.mesh = post
+			_:
+				var bin := BoxMesh.new()
+				bin.size = Vector3(0.06, 0.06, 0.06)
+				model.mesh = bin
+		model.material_override = _map_material(Color(0.9, 0.35, 0.3) if SHELF_KINDS[k] == "" else Color(0.55, 0.75, 1.0), false)
+		item.add_child(model)
+		var label := Label3D.new()
+		label.text = SHELF_NAMES[k]
+		label.pixel_size = 0.0007
+		label.font_size = 24
+		label.outline_size = 8
+		label.position = Vector3(0.0, -0.06, 0.0)
+		item.add_child(label)
+		_shelf_items.append(item)
+	_edit_grid = MultiMeshInstance3D.new()
+	var dots := MultiMesh.new()
+	dots.transform_format = MultiMesh.TRANSFORM_3D
+	var dot := SphereMesh.new()
+	dot.radius = 0.012
+	dot.height = 0.024
+	dot.radial_segments = 6
+	dot.rings = 3
+	dots.mesh = dot
+	_edit_grid.multimesh = dots
+	_edit_grid.material_override = _map_material(Color(0.6, 0.85, 1.0), false)
+	_edit_grid.visible = false
+	add_child(_edit_grid)
+
+
+## The shelf left of the user at chest height, a little ahead, facing them — only
+## the first time; then it stays where it was put.
+func _place_shelf() -> void:
+	if _shelf_placed:
+		return
+	_shelf_placed = true
+	var head := _camera.global_transform
+	var basis := Basis(Vector3.UP, WorldEdit.yaw_of(head.basis))
+	_shelf.global_transform = Transform3D(basis, head.origin + basis * SHELF_OFFSET)
+
+
+## A pinch (trigger) on the shelf's bar, with the hand at it or the ray on it,
+## carries the shelf round the user, facing them (the user's wish, 23.10.2026).
+func _update_shelf_drag() -> void:
+	var bar := _shelf.get_node("Bar") as MeshInstance3D
+	var half := Vector3((bar.mesh as BoxMesh).size.x * 0.5, 0.0, 0.0)
+	var from := _shelf.global_transform * (bar.position - half)
+	var to := _shelf.global_transform * (bar.position + half)
+	if not _shelf_drag.is_empty():
+		var pointer := _pointers[_shelf_drag["pointer"]]
+		if not (pointer.active and pointer.pressed and pointer.button == HandGestures.Click.LEFT):
+			_shelf_drag = {}
+			print("[world] редактор: полка переставлена")
+			return
+		var reach: float = _shelf_drag["reach"]
+		var point := _hand_point(pointer) if reach < 0.0 else pointer.origin + pointer.direction * reach
+		var at: Vector3 = point + (_shelf_drag["offset"] as Vector3)
+		var head := _camera.global_position
+		_shelf.global_transform = Transform3D(Basis(Vector3.UP, atan2(head.x - at.x, head.z - at.z)), at)
+		if reach >= 0.0:
+			pointer.hit_distance = minf(pointer.hit_distance, reach)
+		return
+	for i in 2:
+		var pointer := _pointers[i]
+		if not pointer.active or not (pointer.just_pressed and pointer.button == HandGestures.Click.LEFT):
+			continue
+		var point := _hand_point(pointer)
+		var reach := -1.0
+		if point.distance_to(Geometry3D.get_closest_point_to_segment(point, from, to)) > SHELF_BAR_REACH:
+			var closest := Geometry3D.get_closest_points_between_segments(pointer.origin, pointer.origin + pointer.direction * 5.0, from, to)
+			if closest[0].distance_to(closest[1]) > SHELF_BAR_RAY:
+				continue
+			point = closest[0]
+			reach = pointer.origin.distance_to(point)
+		_shelf_drag = {"pointer": i, "reach": reach, "offset": _shelf.global_position - point}
+		print("[world] редактор: полку взял %s" % ("рукой" if reach < 0.0 else "лучом"))
+		return
+
+
+## Where a pointer's hand is: the palm, or the controller.
+func _hand_point(pointer: Pointer) -> Vector3:
+	return pointer.palm_world if pointer.mode == "рука" else pointer.origin
+
+
+## The world editor's hold: a fist with the hand, the grip with a controller.
+func _edit_holding(pointer: Pointer) -> bool:
+	if pointer.mode == "рука":
+		return pointer.edit_fist
+	return pointer.pressed and pointer.button == HandGestures.Click.RIGHT
+
+
+func _edit_hold_started(pointer: Pointer) -> bool:
+	if pointer.mode == "рука":
+		return pointer.edit_fist_started
+	return pointer.just_pressed and pointer.button == HandGestures.Click.RIGHT
+
+
+func _update_world_editor(delta: float) -> void:
+	_update_world_naming()
+	_shelf.visible = _world_editing
+	if not _world_editing:
+		_edit_grid.visible = false
+		return
+	_place_shelf()
+	_update_shelf_drag()
+	var slots := PackedVector3Array()
+	for item in _shelf_items:
+		slots.append(item.global_position)
+	var grid_for: WorldLayout.Fixture = null
+	var near_slots: Array[int] = []
+	for i in 2:
+		var pointer := _pointers[i]
+		near_slots.append(WorldEdit.slot_at(_hand_point(pointer), slots, SHELF_REACH) if pointer.active else -1)
+		if pointer.world_fixture >= 0:
+			var fixture := WorldLayout.find(_fixtures, pointer.world_fixture)
+			if fixture == null:
+				pointer.world_fixture = -1
+				continue
+			if pointer.active and _edit_holding(pointer):
+				pointer.world_lost = 0.0
+				_carry_fixture(pointer, fixture)
+				grid_for = fixture
+			else:
+				# The fist or the tracking may drop out for a moment: wait before letting go.
+				pointer.world_lost += delta
+				if pointer.world_lost >= FIST_GRACE_SEC:
+					_drop_fixture(pointer, fixture, near_slots[i])
+				else:
+					grid_for = fixture
+			continue
+		if not pointer.active or not _edit_hold_started(pointer):
+			continue
+		if near_slots[i] >= 0 and SHELF_KINDS[near_slots[i]] != "":
+			_take_from_shelf(pointer, SHELF_KINDS[near_slots[i]])
+			continue
+		var hit := _fixture_under_ray(pointer)
+		if hit[0] >= 0:
+			_grab_fixture(pointer, hit[0], hit[1])
+	# The slot a hand is at grows: the one it takes from, or the bin it drops into.
+	for k in _shelf_items.size():
+		_shelf_items[k].scale = Vector3.ONE * (1.3 if near_slots.has(k) else 1.0)
+	_show_edit_grid(grid_for)
+
+
+## The nearest fixture the ray meets (a wall's or column's face and backing, a
+## sphere's shell; a sphere the user stands in only behind everything else):
+## [id, distance], id -1 if none.
+func _fixture_under_ray(pointer: Pointer) -> Array:
+	var best := -1
+	var nearest := INF
+	var reach := INF
+	for fixture in _fixtures:
+		var along := _fixture_distance(pointer, fixture)
+		var rank := along
+		if not _walled(fixture) and pointer.origin.distance_to(fixture.centre) < fixture.radius:
+			rank += 1000.0
+		if rank < nearest:
+			nearest = rank
+			reach = along
+			best = fixture.id
+	return [best, reach]
+
+
+## How far along the ray it meets a fixture: a wall's or column's face (with its
+## backing's margin), a sphere's shell; INF if it misses.
+func _fixture_distance(pointer: Pointer, fixture: WorldLayout.Fixture) -> float:
+	if not _walled(fixture):
+		return WorldEdit.sphere_hit(pointer.origin, pointer.direction, fixture.centre, fixture.radius)
+	var uv := _wall_hit(pointer, fixture)
+	if is_nan(uv.x) or not WallLayout.area(_wall_grid(fixture), fixture.gap).grow(WallLayout.BACKING_MARGIN + 0.1).has_point(uv):
+		return INF
+	return (fixture.frame() * WallLayout.surface(uv.x, uv.y, 0.0, _wall_shape(fixture)).origin).distance_to(pointer.origin)
+
+
+## While a screen is carried: another fixture the ray meets nearer than the
+## screen's own (from inside a sphere, only what is inside it), else -1.
+func _carry_target(pointer: Pointer, own: WorldLayout.Fixture) -> int:
+	var best := -1
+	var nearest := INF
+	for fixture in _fixtures:
+		var along := _fixture_distance(pointer, fixture)
+		if along < nearest:
+			nearest = along
+			best = fixture.id
+	return best if own == null or best != own.id else -1
+
+
+## A carried screen let go on another fixture (slice n2): it moves there, where
+## the ray was — into the cells under it (a wall by its cells) or freely there.
+func _move_to_fixture(pointer: Pointer, panel: ScreenPanel, target_id: int) -> void:
+	var target := WorldLayout.find(_fixtures, target_id)
+	if target == null:
+		return
+	var key := panel.monitor_key
+	var from := _fixture_of(panel)
+	var uv := _wall_hit(pointer, target) if _walled(target) else Vector2(NAN, NAN)
+	var angles := _fixture_angles(pointer, target) if not _walled(target) else Vector2(NAN, NAN)
+	WorldLayout.assign(_fixtures, key, target.id)
+	_wall_positions.erase(key)
+	_panel_positions.erase(key)
+	# It settles into the nearest free cells of a wall first.
+	_place_panels()
+	if _walled(target) and not is_nan(uv.x):
+		if _fixture_free(target):
+			_wall_positions[key] = uv
+		else:
+			var moved := WallLayout.dropped(_saved_wall(target), key, uv.x, uv.y, target.gap)
+			target.cells = moved.cells
+			target.parts = moved.parts
+			target.splits = moved.splits
+			target.blocks = moved.blocks
+	elif not _walled(target) and not is_nan(angles.x) and target.placement != 1:
+		_panel_positions[key] = angles
+	_save_settings()
+	_place_panels([], true)
+	_apply_group_windows()
+	_refresh_fixture_section()
+	_vdd_message = "%s — с «%s» на «%s»" % [panel.monitor_name.trim_prefix("\\\\.\\"), from.name if from != null else "?", target.name]
+	print("[world] ", _vdd_message)
+
+
+func _grab_fixture(pointer: Pointer, id: int, reach: float) -> void:
+	var fixture := WorldLayout.find(_fixtures, id)
+	if fixture == null:
+		return
+	for other in _pointers:
+		if other != pointer and other.world_fixture == id:
+			return
+	if _seated == id:
+		_stand_up()
+	pointer.world_fixture = id
+	pointer.world_reach = reach
+	pointer.world_grip = WorldEdit.grip(pointer.origin, pointer.direction, reach)
+	pointer.world_start = fixture.frame()
+	pointer.world_lost = 0.0
+	print("[world] редактор: взята «%s» (%.1f м)" % [fixture.name, reach])
+
+
+## A new fixture from the shelf: it appears along the ray, facing the user, and
+## is carried at once.
+func _take_from_shelf(pointer: Pointer, kind: String) -> void:
+	if _fixtures.size() >= MAX_FIXTURES:
+		_vdd_message = "заготовок уже %d — это предел" % MAX_FIXTURES
+		print("[world] редактор: ", _vdd_message)
+		return
+	var fixture := WorldLayout.new_fixture(_fixtures, kind, Vector3.ZERO, 0.0)
+	var held := WorldEdit.grip(pointer.origin, pointer.direction, WorldEdit.NEW_REACH)
+	var frame := WorldEdit.new_frame(held, WorldEdit.anchor_of(kind, fixture.radius))
+	fixture.centre = frame.origin
+	fixture.yaw = WorldEdit.yaw_of(frame.basis)
+	_fixtures.append(fixture)
+	_fixture_page = (_fixtures.size() - 1) / FIXTURE_ROWS
+	_place_panels()
+	_refresh_fixture_section()
+	_grab_fixture(pointer, fixture.id, WorldEdit.NEW_REACH)
+
+
+## The carried fixture follows the ray's grip, on the editor's grid.
+func _carry_fixture(pointer: Pointer, fixture: WorldLayout.Fixture) -> void:
+	var now := WorldEdit.grip(pointer.origin, pointer.direction, pointer.world_reach)
+	var frame := WorldEdit.on_grid(WorldEdit.carried(pointer.world_start, pointer.world_grip, now),
+			WorldEdit.anchor_of(fixture.kind, fixture.radius), _world.edit_step, deg_to_rad(_world.edit_turn_degrees))
+	pointer.hit_distance = minf(pointer.hit_distance, pointer.world_reach)
+	if frame.is_equal_approx(fixture.frame()):
+		return
+	fixture.centre = frame.origin
+	fixture.yaw = WorldEdit.yaw_of(frame.basis)
+	# A column's axis stands where it is put now.
+	_column_axes.erase(fixture.id)
+	_place_panels()
+
+
+## Let go: it stands where it is; let go at the shelf's bin, it is removed (its
+## screens go to the first fixture), unless it is the last one.
+func _drop_fixture(pointer: Pointer, fixture: WorldLayout.Fixture, slot: int) -> void:
+	pointer.world_fixture = -1
+	if slot >= 0 and SHELF_KINDS[slot] == "":
+		if WorldLayout.remove(_fixtures, fixture.id):
+			if _seated == fixture.id:
+				_seated = -1
+			_world_changed("«%s» удалена, её экраны — на «%s»" % [fixture.name, _fixtures[0].name])
+			_apply_group_windows()
+			return
+		_vdd_message = "последнюю заготовку удалить нельзя: экранам надо где-то висеть"
+	var front := fixture.frame() * WorldEdit.anchor_of(fixture.kind, fixture.radius)
+	_world_changed("«%s» поставлена: (%.2f; %.2f; %.2f), поворот %d°" % [fixture.name, front.x, front.y, front.z,
+			roundi(rad_to_deg(fixture.yaw))])
+
+
+func _world_changed(message: String) -> void:
+	_fixture_changed(message)
+	_vdd_message = message
+
+
+## The editor's grid around the carried fixture: dots on its anchor's level.
+func _show_edit_grid(fixture: WorldLayout.Fixture) -> void:
+	_edit_grid.visible = fixture != null and _world.edit_step > 0.0
+	if not _edit_grid.visible:
+		return
+	var step := _world.edit_step
+	var middle := (fixture.frame() * WorldEdit.anchor_of(fixture.kind, fixture.radius)).snapped(Vector3.ONE * step)
+	var side := EDIT_GRID_SPAN * 2 + 1
+	var dots := _edit_grid.multimesh
+	if dots.instance_count != side * side:
+		dots.instance_count = side * side
+	for x in side:
+		for z in side:
+			dots.set_instance_transform(x * side + z, Transform3D(Basis.IDENTITY,
+					middle + Vector3((x - EDIT_GRID_SPAN) * step, 0.0, (z - EDIT_GRID_SPAN) * step)))
+
+
+## Everything about the world as it is now (a world's data in `[worlds] list`).
+func _world_snapshot() -> Dictionary:
+	_arrangements[_mode_key()] = _own_arrangement()
+	return {"fixtures": _fixtures.map(func(f: WorldLayout.Fixture) -> Dictionary: return f.to_dictionary()),
+		"seated": _seated, "links_added": PlaceNetwork.links_to(_links_added),
+		"links_removed": PlaceNetwork.links_to(_links_removed), "group_offsets": DesktopGroups.offsets_to(_group_offsets),
+		"seat_slide": _seat_slide, "floor_height": _floor_height, "arrangements": _arrangements.duplicate(true)}
+
+
+## Another world opened: its fixtures (none — one sphere with every monitor), its
+## seat, links, groups and the screens' places; the Windows layout follows.
+func _world_restore(data: Dictionary) -> void:
+	for pointer in _pointers:
+		if pointer.grab_panel != null:
+			_end_grab(pointer)
+		pointer.world_fixture = -1
+	_close_map()
+	if _groups_open:
+		_close_groups_plane()
+	var keys := PackedStringArray()
+	for panel in _panels:
+		keys.append(panel.monitor_key)
+	_fixtures.clear()
+	var stored: Variant = data.get("fixtures", [])
+	if stored is Array:
+		for one: Variant in stored:
+			if one is Dictionary:
+				_fixtures.append(WorldLayout.Fixture.from_dictionary(one))
+	if _fixtures.is_empty():
+		_fixtures.append_array(WorldLayout.default_fixtures(keys))
+	_seated = int(data.get("seated", -1))
+	_links_added = PlaceNetwork.links_from(data.get("links_added", []))
+	_links_removed = PlaceNetwork.links_from(data.get("links_removed", []))
+	_group_offsets = DesktopGroups.offsets_from(data.get("group_offsets", {}))
+	var slide: Variant = data.get("seat_slide", Vector2.ZERO)
+	_seat_slide = slide if slide is Vector2 else Vector2.ZERO
+	_floor_height = float(data.get("floor_height", _floor_height))
+	var arrangements: Variant = data.get("arrangements", {})
+	_arrangements = (arrangements as Dictionary).duplicate(true) if arrangements is Dictionary else {"windows": {}, "vr": {}}
+	for mode: String in ["windows", "vr"]:
+		if not _arrangements.has(mode):
+			_arrangements[mode] = {}
+	_apply_arrangement(_arrangements.get(_mode_key(), {}))
+	_column_axes.clear()
+	_seat_eye_known = false
+	_place_panels([], true)
+	var seat := WorldLayout.find(_fixtures, _seated)
+	if seat != null:
+		_origin.global_transform = _seat_rig(seat)
+		_keep_world_in_place()
+	else:
+		_seated = -1
+	_apply_group_windows()
+	_refresh_fixture_section()
+	_refresh_worlds_section()
+
+
+## The «Миры» tab: each world with «Открыть», «Имя…» (typed on the keyboard) and
+## «Удалить»; a new empty world, or a copy of this one.
+func _build_worlds_section(tab: Node3D) -> void:
+	_settings_label("Миры", Vector3(-0.5, 0.53, 0.0), 28, tab)
+	for r in WORLD_ROWS:
+		var row := Node3D.new()
+		row.position = Vector3(0.0, 0.43 - r * 0.085, 0.0)
+		tab.add_child(row)
+		var name_label := _settings_label("", Vector3(-0.45, 0.0, 0.0), 24, row)
+		name_label.name = "Name"
+		_add_button_to(row, "Открыть", Vector3(0.1, 0.0, 0.0), Vector2(0.2, 0.06), 0.6).activated.connect(_on_world_open.bind(r))
+		_add_button_to(row, "Имя…", Vector3(0.34, 0.0, 0.0), Vector2(0.17, 0.06), 0.4).activated.connect(_on_world_name.bind(r))
+		_add_button_to(row, "Удалить", Vector3(0.57, 0.0, 0.0), Vector2(0.2, 0.06), 1.0).activated.connect(_on_world_delete.bind(r))
+		_world_rows.append(row)
+	_add_button_to(tab, "Новый пустой мир", Vector3(-0.4, -0.12, 0.0), Vector2(0.42, 0.07), 0.6).activated.connect(_on_world_new.bind(false))
+	_add_button_to(tab, "Копия этого мира", Vector3(0.1, -0.12, 0.0), Vector2(0.42, 0.07), 0.6).activated.connect(_on_world_new.bind(true))
+	_world_status = _settings_label("Мир сохраняется сам при каждом изменении. У каждого мира свои заготовки, экраны на них\nи их места, связи и группы. «Имя…» — печатайте на клавиатуре, Enter — готово, Esc — отмена.",
+			Vector3(-0.15, -0.24, 0.0), 20, tab)
+	_refresh_worlds_section()
+
+
+func _refresh_worlds_section() -> void:
+	if _world_rows.is_empty():
+		return
+	for r in WORLD_ROWS:
+		var row := _world_rows[r]
+		row.visible = r < _worlds.size()
+		if not row.visible:
+			continue
+		var label := row.get_node("Name") as Label3D
+		if r == _world_naming:
+			label.text = "Имя: %s_" % MouseInput.get_recorded_text()
+		else:
+			label.text = ("» %s «" if r == _world_index else "%s") % str(_worlds[r].get("name", "Мир"))
+
+
+func _world_names() -> Array:
+	return _worlds.map(func(world: Dictionary) -> String: return str(world.get("name", "")))
+
+
+func _on_world_open(row: int) -> void:
+	if row >= _worlds.size() or row == _world_index:
+		return
+	_save_settings()
+	_world_index = row
+	_world_restore(_worlds[row].get("data", {}))
+	_save_settings()
+	_world_status.text = "Открыт «%s»" % _worlds[row]["name"]
+	print("[world] открыт мир «%s»" % _worlds[row]["name"])
+
+
+func _on_world_new(copy: bool) -> void:
+	if _worlds.size() >= WORLD_ROWS:
+		_world_status.text = "Миров уже %d — больше на вкладке не поместится." % WORLD_ROWS
+		return
+	_save_settings()
+	var data := _world_snapshot().duplicate(true) if copy else {}
+	var name := WorldEdit.next_world_name(_world_names())
+	_worlds.append({"name": name, "data": data})
+	_world_index = _worlds.size() - 1
+	_world_restore(data)
+	_save_settings()
+	_world_status.text = "«%s» — %s" % [name, "копия" if copy else "новый: один шар со всеми экранами"]
+	print("[world] новый мир «%s»%s" % [name, " (копия)" if copy else ""])
+
+
+func _on_world_delete(row: int) -> void:
+	if row >= _worlds.size():
+		return
+	if row == _world_index:
+		_world_status.text = "Открытый мир удалить нельзя — сначала откройте другой."
+		return
+	var gone := str(_worlds[row]["name"])
+	_worlds.remove_at(row)
+	if row < _world_index:
+		_world_index -= 1
+	_save_settings()
+	_refresh_worlds_section()
+	_world_status.text = "«%s» удалён" % gone
+	print("[world] удалён мир «%s»" % gone)
+
+
+func _on_world_name(row: int) -> void:
+	if row >= _worlds.size():
+		return
+	if not MouseInput.start_text_recording():
+		_world_status.text = "Клавиатуру не получилось слушать."
+		return
+	_map_naming = -1
+	_world_naming = row
+	_world_status.text = "Печатайте имя «%s» на клавиатуре: Enter — готово, Esc — отмена." % _worlds[row]["name"]
+
+
+## A world's name being typed: shown in its row as it comes; Enter keeps it, Esc not.
+func _update_world_naming() -> void:
+	if _world_naming < 0:
+		return
+	var ended := MouseInput.get_text_recording_end()
+	var text := MouseInput.get_recorded_text().strip_edges()
+	if ended == 0 and _world_naming < _worlds.size():
+		_refresh_worlds_section()
+		return
+	MouseInput.stop_key_recording()
+	var row := _world_naming
+	_world_naming = -1
+	if ended == 1 and row < _worlds.size() and text != "":
+		_worlds[row]["name"] = text
+		_save_settings()
+		_world_status.text = "Мир назван «%s»" % text
+	_refresh_worlds_section()
+
+
 func _build_map_nodes() -> void:
 	_groups_root = Node3D.new()
 	_groups_root.visible = false
@@ -4619,6 +5434,7 @@ func _placement_name(fixture: WorldLayout.Fixture) -> String:
 
 ## A fixture's screens: as everywhere → by cells (layout) → freely → as everywhere.
 func _on_fixture_placement(row: int) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
@@ -4643,6 +5459,7 @@ func _reset_fixture_places(fixture: WorldLayout.Fixture) -> void:
 
 ## A fixture's place goes to the next group (none, 1 … MAX_GROUPS).
 func _on_fixture_group(row: int) -> void:
+	row += _fixture_page * FIXTURE_ROWS
 	if row >= _fixtures.size():
 		return
 	var fixture := _fixtures[row]
@@ -4762,7 +5579,7 @@ func _primary_index() -> int:
 ## The menu grip is there whenever the menu is switched on in the settings.
 func _allowed_grips(panel: ScreenPanel) -> Array:
 	var grips := []
-	if not _handles_shown():
+	if not _handles_shown() or _world_editing:
 		return grips
 	if _gesture_settings.grab_mode <= 1:
 		grips = [ScreenPanel.Grip.MOVE, ScreenPanel.Grip.RESIZE, ScreenPanel.Grip.TILT, ScreenPanel.Grip.CURVE]
@@ -4786,7 +5603,7 @@ func _allowed_grips(panel: ScreenPanel) -> Array:
 ## changes the Windows layout (the others make room the way Windows will, see
 ## LayoutEdit) or, if so set, only the place in VR.
 func _update_grabs(delta: float) -> void:
-	if _map_open or _groups_open:
+	if _map_open or _groups_open or _world_editing:
 		return
 	var carrying := _any_panel_carried()
 	for pointer in _pointers:
@@ -4951,6 +5768,14 @@ func _start_grab(pointer: Pointer, panel: ScreenPanel, kind: int, by_fist: bool)
 func _drag(pointer: Pointer) -> void:
 	var panel := pointer.grab_panel
 	var fixture := _fixture_of(panel)
+	# On another fixture: it goes there when let go (slice n2); until then it stays.
+	var onto := _carry_target(pointer, fixture) if pointer.grab_kind == ScreenPanel.Grip.MOVE and _fixtures.size() > 1 else -1
+	if onto != pointer.grab_other:
+		pointer.grab_other = onto
+		var target := WorldLayout.find(_fixtures, onto)
+		_vdd_message = ("отпустите — %s перейдёт на «%s»" % [panel.monitor_name.trim_prefix("\\\\.\\"), target.name]) if target != null else ""
+	if onto >= 0:
+		return
 	if _wall_preview_fixture >= 0:
 		_drag_wall(pointer, fixture)
 		return
@@ -5116,6 +5941,14 @@ func _visible_half(placement: PanelLayout.Placement, radius: float) -> Vector2:
 func _end_grab(pointer: Pointer) -> void:
 	var panel := pointer.grab_panel
 	pointer.grab_panel = null
+	var other := pointer.grab_other
+	pointer.grab_other = -1
+	if other >= 0 and is_instance_valid(panel):
+		# Let go on another fixture: onto it, the carrying on its own one is dropped.
+		_wall_preview = null
+		_wall_preview_fixture = -1
+		_move_to_fixture(pointer, panel, other)
+		return
 	if _wall_preview_fixture >= 0:
 		_end_wall_grab(panel if is_instance_valid(panel) else null)
 		return
@@ -5336,6 +6169,9 @@ func _load_settings() -> void:
 	_group_offsets = DesktopGroups.offsets_from(config.get_value("world", "group_offsets", {}))
 	var slide: Variant = config.get_value("world", "seat_slide", Vector2.ZERO)
 	_seat_slide = slide if slide is Vector2 else Vector2.ZERO
+	var worlds: Variant = config.get_value("worlds", "list", [])
+	_worlds = worlds if worlds is Array else []
+	_world_index = clampi(int(config.get_value("worlds", "current", 0)), 0, maxi(_worlds.size() - 1, 0))
 	_apply_bindings()
 	print("[settings] загружено: луч рук %s, наклон %.0f°, вбок %.1f°" % ["Meta" if _use_runtime_aim else "свой", _ray_pitch_down_deg, _ray_yaw_right_deg])
 
@@ -5368,6 +6204,13 @@ func _save_settings() -> void:
 	config.set_value("world", "links_removed", PlaceNetwork.links_to(_links_removed))
 	config.set_value("world", "group_offsets", DesktopGroups.offsets_to(_group_offsets))
 	config.set_value("world", "seat_slide", _seat_slide)
+	# The open world keeps itself up to date in its slot.
+	if _worlds.is_empty():
+		_worlds.append({"name": WorldEdit.next_world_name([]), "data": {}})
+	_world_index = clampi(_world_index, 0, _worlds.size() - 1)
+	_worlds[_world_index]["data"] = _world_snapshot()
+	config.set_value("worlds", "list", _worlds)
+	config.set_value("worlds", "current", _world_index)
 	if not _slot_loading.is_empty():
 		config.set_value("layouts", "pending", _slot_loading)
 	if _driver_restore_pending:
@@ -5432,11 +6275,17 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 	var text: String = TOPOLOGY_MESSAGES.get(code, code)
 	_vdd_message = ("готово: " if ok else "ошибка: ") + text + ((" (" + detail + ")") if detail != "" else "")
 	print("[screens] ", _vdd_message)
-	if _wall_mode_attempt != "":
-		if code != "mode_set":
-			_wall_modes_refused[_wall_mode_attempt] = true
-			print("[world] разрешение по клетке: Windows не приняла %s — больше не пробую" % _wall_mode_attempt)
-		_wall_mode_attempt = ""
+	if not _wall_mode_attempts.is_empty():
+		if code != "modes_set":
+			# The ones Windows refused are named; nothing named — none went through.
+			var named := false
+			for monitor_name: String in _wall_mode_attempts:
+				named = named or detail.contains(monitor_name)
+			for monitor_name: String in _wall_mode_attempts:
+				if not named or detail.contains(monitor_name):
+					_wall_modes_refused[_wall_mode_attempts[monitor_name]] = true
+					print("[world] разрешение по клетке: Windows не приняла %s — больше не пробую" % _wall_mode_attempts[monitor_name])
+		_wall_mode_attempts = {}
 	if not _slot_loading.is_empty() and not ok:
 		if code == "no_free_screen":
 			# Not enough driver instances: create more (Quest Link reconnects; the
@@ -5451,7 +6300,7 @@ func _on_topology_finished(ok: bool, code: String, detail: String) -> void:
 			_finish_slot_load()
 	elif not _slot_loading.is_empty():
 		_continue_slot_load()
-	if code == "mode_set" or (not ok and _mode_change_monitor != ""):
+	if code in ["mode_set", "modes_set"] or (not ok and _mode_change_monitor != ""):
 		_repair_layout()
 		_mode_change_monitor = ""
 		if _monitor_menu.visible:
@@ -5539,7 +6388,7 @@ func _finish_menu(index: int, how: String) -> void:
 func _run_menu_action(id: String) -> void:
 	var keys: Array = MenuSet.action(id)[1]
 	if not keys.is_empty():
-		if not _editing:
+		if not _computer_locked():
 			MouseInput.press_keys(PackedInt32Array(keys))
 	elif id == "center":
 		# Seated: back to the seat, facing the fixture (the user's wish, 21.10.2026:
@@ -5566,8 +6415,12 @@ func _run_menu_action(id: String) -> void:
 			_open_groups_plane()
 	elif id == "edit":
 		_editing = not _editing
+		if _editing:
+			_set_world_editing(false)
 		_release_cursor_button()
 		print("[world] режим редактирования %s" % ("включён" if _editing else "выключен"))
+	elif id == "world_edit":
+		_set_world_editing(not _world_editing)
 	elif id == "quit":
 		# The ordinary exit: the layout stays as it is.
 		_quit()
@@ -6062,6 +6915,9 @@ func _update_pointer(index: int, delta: float) -> void:
 	var was_fist := pointer.fist
 	pointer.fist = false
 	pointer.fist_started = false
+	var was_edit_fist := pointer.edit_fist
+	pointer.edit_fist = false
+	pointer.edit_fist_started = false
 	var controller := _controllers[index]
 	var tracker := XRServer.get_tracker(HAND_TRACKER_NAMES[index]) as XRHandTracker
 	pointer.hit_distance = INF
@@ -6213,18 +7069,20 @@ func _update_pointer(index: int, delta: float) -> void:
 		# fist), nor while the hand comes close to one of the user's own poses.
 		var thumb_up := pointer.hand_features.size() == HandPose.FEATURE_COUNT \
 				and pointer.hand_features[0] > FIST_THUMB_UP_STRAIGHT and pointer.hand_features[5] > FIST_THUMB_UP_DISTANCE
-		var builtin_fist := curl < _gesture_settings.fist_curl + (FIST_RELEASE_MARGIN if was_fist else 0.0) \
+		var builtin_fist := curl < _gesture_settings.fist_curl + (FIST_RELEASE_MARGIN if was_fist or was_edit_fist else 0.0) \
 				and not thumb_up and not pointer.near_own_pose
 		# It has to hold FIST_DWELL_SEC to start: a hand folding into a thumb up
 		# passes through a fist first (20.10.2026, once right before the "like").
 		if not builtin_fist:
 			pointer.fist_since = NAN
-		elif not was_fist and is_nan(pointer.fist_since):
+		elif not (was_fist or was_edit_fist) and is_nan(pointer.fist_since):
 			pointer.fist_since = frame.time
-		builtin_fist = builtin_fist and (was_fist or frame.time - pointer.fist_since >= FIST_DWELL_SEC)
+		builtin_fist = builtin_fist and (was_fist or was_edit_fist or frame.time - pointer.fist_since >= FIST_DWELL_SEC)
 		var grab_pose: bool = builtin_fist if _bindings["grab"] == "pose:fist" else pointer.poses.get("grab", false)
 		pointer.fist = not resting and (_gesture_settings.grab_mode == 1 or _gesture_settings.grab_mode == 2) and grab_pose
 		pointer.fist_started = pointer.fist and not was_fist
+		pointer.edit_fist = not resting and grab_pose
+		pointer.edit_fist_started = pointer.edit_fist and not was_edit_fist
 		if pointer.fist_started:
 			print("[gesture] %s: %s (пальцы у ладони до %.0f мм)" % [SIDE_LABELS[index],
 					GestureCatalog.name_of(_bindings["grab"], _custom_poses).to_lower(), curl * 1000.0])
@@ -6238,9 +7096,11 @@ func _update_pointer(index: int, delta: float) -> void:
 				frame.scroll_pose = 1 if pointer.poses.get("scroll", false) else 0
 		# Moving or turning with a pose: no clicks meanwhile, as with the fist.
 		var travelling: bool = pointer.poses.get("move", false) or pointer.poses.get("turn", false)
-		if resting or pointer.fist or travelling:
+		# In the world editor a fist carries a fixture: no clicks meanwhile either.
+		var holding := pointer.fist or (_world_editing and pointer.edit_fist)
+		if resting or holding or travelling:
 			pointer.gestures.reset()
-		var gesture := HandGestures.Output.new() if resting or pointer.fist or travelling else pointer.gestures.update(frame)
+		var gesture := HandGestures.Output.new() if resting or holding or travelling else pointer.gestures.update(frame)
 		pointer.button = gesture.button
 		pointer.pending = gesture.pending
 		pointer.anchor_time = gesture.anchor_time
@@ -6310,7 +7170,7 @@ func _update_pointer(index: int, delta: float) -> void:
 				# Only while the hand's ray is on a screen (last frame): turning round with
 				# an open hand swings it sideways too, but points it away from the screens.
 				swipe_pose and not resting and not pointer.scrolling and not pointer.menu_open and pointer.on_panel)
-		if swipe != 0 and not _editing:
+		if swipe != 0 and not _computer_locked():
 			var keys := SWIPE_KEYS[_gesture_settings.swipe_mode][0 if swipe < 0 else 1] as Array
 			MouseInput.press_keys(PackedInt32Array(keys))
 			print("[gesture] %s: смахивание %s" % [SIDE_LABELS[index], "влево" if swipe < 0 else "вправо"])
@@ -6741,6 +7601,7 @@ func _build_settings_panel() -> void:
 	_build_bindings_section(_settings_tabs[SETTINGS_TABS.find("Назначения")])
 	_build_world_section(_settings_tabs[SETTINGS_TABS.find("Мир")])
 	_build_fixture_section(_settings_tabs[SETTINGS_TABS.find("Заготовки")])
+	_build_worlds_section(_settings_tabs[SETTINGS_TABS.find("Миры")])
 	_build_menu_section(_settings_tabs[SETTINGS_TABS.find("Меню")])
 
 	# Kept apart from the tabs so that it is not hit by accident.
@@ -7182,6 +8043,14 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "правая рука" if value >= 0.5 else "левая рука"
 	elif tunable[1] == "flight_sec":
 		return "мгновенно" if value <= 0.0 else "%.1f с" % value
+	elif tunable[1] == "drag_threshold" and value <= 0.0:
+		return "без магнита"
+	elif tunable[1] in ["double_click_sec", "double_click_radius"] and value <= 0.0:
+		return "выключен"
+	elif tunable[1] == "edit_step":
+		return "без сетки" if value <= 0.0 else "%.2f м" % value
+	elif tunable[1] == "edit_turn_degrees":
+		return "свободно" if value <= 0.0 else "%d°" % roundi(value)
 	elif tunable[1] == "auto_links":
 		return "выключены" if value < 0.5 else "по %d" % roundi(value)
 	elif tunable[1] == "turn_mode":

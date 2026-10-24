@@ -184,6 +184,9 @@ void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("stop_key_recording"), &MouseInput::stop_key_recording);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("get_recorded_keys"), &MouseInput::get_recorded_keys);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("get_key_recording_seen"), &MouseInput::get_key_recording_seen);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("start_text_recording"), &MouseInput::start_text_recording);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_recorded_text"), &MouseInput::get_recorded_text);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_text_recording_end"), &MouseInput::get_text_recording_end);
 
 	BIND_ENUM_CONSTANT(BUTTON_LEFT);
 	BIND_ENUM_CONSTANT(BUTTON_RIGHT);
@@ -243,6 +246,21 @@ void MouseInput::stop_key_recording() {
 
 int MouseInput::get_key_recording_seen() {
 	return workplace::key_recording_seen();
+}
+
+bool MouseInput::start_text_recording() {
+	return workplace::text_recording_start();
+}
+
+String MouseInput::get_recorded_text() {
+	std::wstring text;
+	workplace::text_recording_result(text);
+	return String(text.c_str());
+}
+
+int MouseInput::get_text_recording_end() {
+	std::wstring text;
+	return workplace::text_recording_result(text);
 }
 
 PackedInt32Array MouseInput::get_recorded_keys() {

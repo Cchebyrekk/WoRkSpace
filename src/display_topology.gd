@@ -59,6 +59,15 @@ func set_mode(monitor_name: String, mode: String, scale: int) -> void:
 	_run("setmode", arguments)
 
 
+## Several monitors' modes in one step (name -> "1920x544@60"): one run and one
+## window watch instead of one per monitor.
+func set_modes(modes: Dictionary) -> void:
+	var items: PackedStringArray = []
+	for monitor_name: String in modes:
+		items.append("%s=%s" % [monitor_name, modes[monitor_name]])
+	_run("setmodes", ["-Modes", ";".join(items)])
+
+
 func count_instances() -> void:
 	_run("instances")
 

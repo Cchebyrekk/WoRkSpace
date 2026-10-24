@@ -88,6 +88,11 @@ public:
 	// The recorded shortcut (modifiers first, then the key), empty until pressed.
 	static PackedInt32Array get_recorded_keys();
 	static int get_key_recording_seen();
+	// Records text from the physical keyboard (names of places); stop_key_recording() stops it.
+	static bool start_text_recording();
+	// The text so far; how it ended: 0 still typing, 1 Enter, 2 Esc.
+	static String get_recorded_text();
+	static int get_text_recording_end();
 };
 
 // System-wide keyboard shortcut that works while another window has focus.

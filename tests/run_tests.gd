@@ -33,6 +33,7 @@ func _init() -> void:
 	_test_column_and_lean()
 	_test_place_network()
 	_test_desktop_groups()
+	_test_world_edit()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -187,6 +188,13 @@ func _test_cursor_filter() -> void:
 	filter.update(Vector2(900.0, 500.0), true, false, 2.7)
 	result = filter.update(Vector2(900.0, 500.0), true, true, 2.8)
 	_check(result.position == Vector2(900.0, 500.0) and not result.double_click, "нажатие далеко от предыдущего — отдельный щелчок")
+	# Switched off (radius 0): a quick press near the last one stays where it is.
+	filter.update(Vector2(900.0, 500.0), true, false, 2.85)
+	filter.double_click_radius = 0.0
+	filter.update(Vector2(905.0, 503.0), true, false, 2.9)
+	filter.update(Vector2(905.0, 503.0), true, false, 3.0)
+	result = filter.update(Vector2(905.0, 503.0), true, true, 3.1)
+	_check(result.position == Vector2(905.0, 503.0) and not result.double_click, "двойной щелчок выключен — нажатие там, где луч")
 
 	_check(is_equal_approx(PointerMath.adaptive_smoothing(0.0, 0.2, 0.03, 0.1, 1.0), 0.2), "неподвижный луч — сильное сглаживание")
 	_check(is_equal_approx(PointerMath.adaptive_smoothing(5.0, 0.2, 0.03, 0.1, 1.0), 0.03), "быстрый поворот — почти без сглаживания")
@@ -1968,3 +1976,38 @@ func _test_desktop_groups() -> void:
 	var two_boxes: Array[Rect2i] = [Rect2i(0, 0, 1920, 1080), Rect2i(1920, 0, 1920, 1080)]
 	var cut_off: Array[Rect2i] = joined[3]
 	_check(DesktopGroups.fits(cut_off, two_boxes) and cut_off[1].position - cut_off[0].position == Vector2i(1920, 0), "группы: оторванная приставлена целиком (%s)" % [cut_off])
+
+
+func _test_world_edit() -> void:
+	# The grip turns with the ray about the vertical only.
+	var ahead := WorldEdit.grip(Vector3.ZERO, Vector3(0.0, 0.0, -1.0), 2.0)
+	_check(ahead.origin.is_equal_approx(Vector3(0.0, 0.0, -2.0)) and absf(WorldEdit.yaw_of(ahead.basis)) < 0.0001, "редактор мира: хват впереди")
+	var tipped := WorldEdit.grip(Vector3.ZERO, Vector3(0.0, -0.6, -0.8), 1.0)
+	_check(tipped.basis.y.is_equal_approx(Vector3.UP), "редактор мира: наклон луча не наклоняет")
+	# Carried: the ray turns 90° left — the fixture goes round with it and turns too.
+	var start := Transform3D(Basis.IDENTITY, Vector3(0.0, 1.5, -3.0))
+	var left := WorldEdit.grip(Vector3.ZERO, Vector3(-1.0, 0.0, 0.0), 2.0)
+	var moved := WorldEdit.carried(start, ahead, left)
+	_check(moved.origin.is_equal_approx(Vector3(-3.0, 1.5, 0.0)), "редактор мира: заготовка идёт за лучом (%s)" % moved.origin)
+	_check(is_equal_approx(WorldEdit.yaw_of(moved.basis), PI / 2.0), "редактор мира: и поворачивается с ним")
+	# On the grid: a wall's front middle on the step, its turn in 15° steps.
+	var anchor := WorldEdit.anchor_of("wall", 2.0)
+	var frame := Transform3D(Basis(Vector3.UP, deg_to_rad(17.0)), Vector3(0.12, 1.43, 0.07))
+	var snapped := WorldEdit.on_grid(frame, anchor, 0.25, deg_to_rad(15.0))
+	var front := snapped * anchor
+	_check(is_equal_approx(WorldEdit.yaw_of(snapped.basis), deg_to_rad(15.0)), "редактор мира: поворот по 15°")
+	_check(front.is_equal_approx(front.snapped(Vector3.ONE * 0.25)), "редактор мира: лицо стены на сетке (%s)" % front)
+	_check(WorldEdit.anchor_of("sphere", 1.5) == Vector3.ZERO, "редактор мира: у шара на сетке центр")
+	var free := WorldEdit.on_grid(frame, anchor, 0.0, 0.0)
+	_check(free.origin.is_equal_approx(frame.origin), "редактор мира: шаг 0 — свободно")
+	# A new one: faces along the ray, its seat on the user's side.
+	var fresh := WorldEdit.new_frame(ahead, anchor)
+	_check(fresh.origin.is_equal_approx(Vector3.ZERO) and (fresh * anchor).is_equal_approx(ahead.origin), "редактор мира: новая стена лицом к тебе")
+	# The ray and a sphere's shell: from outside the near side, from inside where it leaves.
+	_check(is_equal_approx(WorldEdit.sphere_hit(Vector3(0.0, 0.0, 5.0), Vector3(0.0, 0.0, -1.0), Vector3.ZERO, 1.0), 4.0), "редактор мира: шар снаружи")
+	_check(is_equal_approx(WorldEdit.sphere_hit(Vector3.ZERO, Vector3(1.0, 0.0, 0.0), Vector3.ZERO, 1.5), 1.5), "редактор мира: шар изнутри")
+	_check(WorldEdit.sphere_hit(Vector3(0.0, 3.0, 5.0), Vector3(0.0, 0.0, -1.0), Vector3.ZERO, 1.0) == INF, "редактор мира: мимо шара")
+	# The shelf: the nearest slot within reach.
+	var slots := PackedVector3Array([Vector3(0.0, 0.0, 0.0), Vector3(0.15, 0.0, 0.0)])
+	_check(WorldEdit.slot_at(Vector3(0.12, 0.02, 0.0), slots, 0.08) == 1 and WorldEdit.slot_at(Vector3(0.5, 0.0, 0.0), slots, 0.08) == -1, "редактор мира: полочка")
+	_check(WorldEdit.next_world_name(["Мир 1", "Мир 3"]) == "Мир 2" and WorldEdit.next_world_name([]) == "Мир 1", "миры: имя нового")

@@ -23,8 +23,9 @@ class Result:
 
 ## The press is placed where the pointer was this long before the pinch closed.
 var lookback_sec := 0.1
-## While held, the cursor follows only after the pointer has left this radius...
-var drag_threshold := 40.0
+## While held, the cursor follows only after the pointer has left this radius
+## (0 = at once; 24.10.2026 the user found 40 px too sticky)...
+var drag_threshold := 20.0
 ## ...and only once the press has lasted this long, so a quick click never drags.
 var drag_delay_sec := 0.25
 ## A press this soon after the previous release, and this close to the previous
@@ -90,7 +91,9 @@ func update(target: Vector2, on_screen: bool, pressed: bool, time: float, freeze
 		_press_time = time
 		var anchor_at := time - lookback_sec if is_nan(anchor_time) else maxf(anchor_time, time - HISTORY_SEC)
 		_anchor = _position_at(anchor_at, target)
-		result.double_click = time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
+		# A zero window or radius switches it off (the user's wish, 24.10.2026).
+		result.double_click = double_click_sec > 0.0 and double_click_radius > 0.0 \
+				and time - _last_release_time <= double_click_sec and _anchor.distance_to(previous_anchor) <= double_click_radius
 		if result.double_click:
 			_anchor = previous_anchor
 			_double_click_done = true

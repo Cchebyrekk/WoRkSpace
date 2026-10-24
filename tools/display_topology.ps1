@@ -15,6 +15,8 @@
 #   -Action modes    each monitor's mode, the modes it offers and its Windows scale
 #   -Action setmode -Monitor \\.\DISPLAY3 -Mode 2560x1440@60 -Scale 150
 #                    change one monitor's mode and/or scale (either may be left out)
+#   -Action setmodes -Modes "\\.\DISPLAY3=2560x1440@60;\\.\DISPLAY4=1920x544@60"
+#                    change several monitors' modes in one step (one window watch)
 #
 # Prints one JSON line: {"ok":true,"code":"detached","detail":"..","attached":5}
 # Monitors are identified by their device path (\\?\DISPLAY#MTT1337#...), which
@@ -24,10 +26,11 @@
 # Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less script as ANSI.
 # The embedded C# has to stay C# 5 (no string interpolation, no "out var").
 param(
-    [ValidateSet('list', 'add', 'remove', 'arrange', 'save', 'restore', 'modes', 'setmode', 'instances')][string]$Action = 'list',
+    [ValidateSet('list', 'add', 'remove', 'arrange', 'save', 'restore', 'modes', 'setmode', 'setmodes', 'instances')][string]$Action = 'list',
     [string]$Positions = '',
     [string]$Monitor = '',
     [string]$Mode = '',
+    [string]$Modes = '',
     [int]$Scale = 0,
     # save/restore: 'start' = the layout before the session (emergency exit),
     # 'apply' = the layout before the driver restart of "Apply".
@@ -791,6 +794,24 @@ function Set-Mode {
     return @{ ok = $true; code = 'mode_set'; detail = "$Monitor $($done -join ', ')" }
 }
 
+# Several monitors' modes in one run (23.10.2026: one run per monitor, each with
+# its own 5-10 s window watch and a layout step after it, took minutes for nine).
+# Each keeps its scale as Set-Mode does; the ones Windows refuses are named.
+function Set-Modes {
+    $failed = @()
+    $set = @()
+    foreach ($item in ($Modes -split ';')) {
+        if ($item -notmatch '^(.+)=(\d+x\d+@\d+)$') { continue }
+        $script:Monitor = $Matches[1]
+        $script:Mode = $Matches[2]
+        $script:Scale = 0
+        $one = Set-Mode
+        if ($one.ok) { $set += "$Monitor $Mode" } else { $failed += "$Monitor $Mode" }
+    }
+    if ($failed.Count -gt 0) { return @{ ok = $false; code = 'failed'; detail = "refused: $($failed -join ', ')"; set = $set.Count } }
+    return @{ ok = $true; code = 'modes_set'; detail = ($set -join ', ') }
+}
+
 function Save-Layout {
     $screens = Get-Screens
     Write-ScreensToLog $screens
@@ -883,7 +904,7 @@ function Read-SavedWindows {
 
 try {
     $windows = $null
-    if (-not $DryRun -and @('add', 'remove', 'arrange', 'restore', 'setmode') -contains $Action) { $windows = [WindowKeeper]::Snapshot() }
+    if (-not $DryRun -and @('add', 'remove', 'arrange', 'restore', 'setmode', 'setmodes') -contains $Action) { $windows = [WindowKeeper]::Snapshot() }
     switch ($Action) {
         'list'    { Get-Screens | Select-Object Short, IsVdd, Active, Primary, X, Y, Width, Height | Format-Table -AutoSize | Out-String -Width 200 | Write-Output; exit 0 }
         'remove'  { $result = Remove-Screen }
@@ -893,6 +914,7 @@ try {
         'restore' { $result = Restore-Layout }
         'modes'   { $result = Get-Modes }
         'setmode' { $result = Set-Mode }
+        'setmodes' { $result = Set-Modes }
         'instances' { $result = Get-Instances }
     }
 } catch {
