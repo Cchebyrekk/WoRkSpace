@@ -58,6 +58,31 @@ struct Failure {
 	std::string what;
 };
 
+// Steps of starting and stopping streams, written through at once, to
+// %LOCALAPPDATA%\WoRkPlace\stream.log: a hang shows as the last line (slice o4).
+std::mutex trace_mutex;
+
+void trace(int port, const char *what) {
+	std::lock_guard<std::mutex> lock(trace_mutex);
+	static FILE *file = nullptr;
+	if (!file) {
+		char path[MAX_PATH];
+		DWORD length = GetEnvironmentVariableA("LOCALAPPDATA", path, MAX_PATH);
+		if (length == 0 || length >= MAX_PATH) {
+			return;
+		}
+		std::string name = std::string(path) + "\\WoRkPlace\\stream.log";
+		file = std::fopen(name.c_str(), "a");
+		if (!file) {
+			return;
+		}
+	}
+	SYSTEMTIME now;
+	GetLocalTime(&now);
+	std::fprintf(file, "%02d:%02d:%02d.%03d %d %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, port, what);
+	std::fflush(file);
+}
+
 void check(HRESULT result, const char *step) {
 	if (FAILED(result)) {
 		char code[16];
@@ -158,6 +183,8 @@ class MfStream : public StreamBackend {
 	SOCKET listener = INVALID_SOCKET;
 	SOCKET client = INVALID_SOCKET;
 	bool want_key_frame = false;
+	// While shutting down: encoded frames are dropped, not sent.
+	bool draining = false;
 	std::chrono::steady_clock::time_point started;
 
 public:
@@ -188,7 +215,9 @@ public:
 	void stop() override {
 		stopping = true;
 		if (thread.joinable()) {
+			trace(port, "stop: joining");
 			thread.join();
+			trace(port, "stop: joined");
 		}
 	}
 
@@ -207,11 +236,17 @@ private:
 				winrt::init_apartment(winrt::apartment_type::multi_threaded);
 			} catch (const winrt::hresult_error &) {
 			}
+			trace(port, "start: MFStartup");
 			check(MFStartup(MF_VERSION, MFSTARTUP_LITE), "MFStartup");
+			trace(port, "start: capture");
 			open_capture();
+			trace(port, "start: converter");
 			open_converter();
+			trace(port, "start: encoder");
 			open_encoder();
+			trace(port, "start: listener");
 			open_listener();
+			trace(port, "start: running");
 			started = std::chrono::steady_clock::now();
 			alive = true;
 			reported = true;
@@ -226,7 +261,9 @@ private:
 		} catch (const std::exception &e) {
 			finish(e.what(), ready, reported);
 		}
+		trace(port, "thread: closing");
 		close_all();
+		trace(port, "thread: closed");
 		alive = false;
 	}
 
@@ -598,7 +635,7 @@ private:
 		}
 		packet.insert(packet.end(), data, data + size);
 		buffer->Unlock();
-		bool sent = send_all(packet);
+		bool sent = !draining && send_all(packet);
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		shared_stats.frames_encoded++;
 		shared_stats.encode_ms = encode_ms;
@@ -616,6 +653,7 @@ private:
 			return;
 		}
 		// The newest headset wins: there is one user.
+		trace(port, "client accepted");
 		close_client();
 		client = incoming;
 		u_long blocking = 0;
@@ -647,6 +685,7 @@ private:
 		while (done < bytes.size()) {
 			int sent = send(client, reinterpret_cast<const char *>(bytes.data() + done), static_cast<int>(bytes.size() - done), 0);
 			if (sent <= 0) {
+				trace(port, "send failed, client closed");
 				close_client();
 				return false;
 			}
@@ -664,6 +703,44 @@ private:
 		shared_stats.client.clear();
 	}
 
+	// The asynchronous encoder still works on frames from its own threads: they
+	// must be out before the surfaces and the device go (taking them away under it
+	// crashed or hung the server when a headset left mid-stream, slice o4).
+	void drain_encoder() {
+		if (!encoder || !events) {
+			return;
+		}
+		draining = true;
+		encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+		if (SUCCEEDED(encoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0))) {
+			auto give_up = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+			bool done = false;
+			while (!done && std::chrono::steady_clock::now() < give_up) {
+				winrt::com_ptr<IMFMediaEvent> event;
+				HRESULT result = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, event.put());
+				if (result == MF_E_NO_EVENTS_AVAILABLE) {
+					Sleep(1);
+					continue;
+				}
+				if (FAILED(result)) {
+					break;
+				}
+				MediaEventType type = MEUnknown;
+				event->GetType(&type);
+				if (type == METransformHaveOutput) {
+					try {
+						take_output();
+					} catch (...) {
+						break;
+					}
+				} else if (type == METransformDrainComplete) {
+					done = true;
+				}
+			}
+		}
+		encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+	}
+
 	void close_all() {
 		close_client();
 		if (listener != INVALID_SOCKET) {
@@ -671,18 +748,18 @@ private:
 			listener = INVALID_SOCKET;
 			WSACleanup();
 		}
-		if (encoder) {
-			encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-			encoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
-			encoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, 0);
-		}
+		trace(port, "close: drain");
+		drain_encoder();
+		trace(port, "close: shutdown encoder");
 		if (auto shutdown = encoder.try_as<IMFShutdown>()) {
 			shutdown->Shutdown();
 		}
+		trace(port, "close: release encoder");
 		events = nullptr;
 		codec = nullptr;
 		encoder = nullptr;
 		device_manager = nullptr;
+		trace(port, "close: capture");
 		try {
 			if (frame_pool) {
 				frame_pool.FrameArrived(frame_token);
@@ -718,6 +795,8 @@ private:
 		}
 		need_input = 0;
 		in_flight.clear();
+		draining = false;
+		trace(port, "close: MFShutdown");
 		MFShutdown();
 	}
 };

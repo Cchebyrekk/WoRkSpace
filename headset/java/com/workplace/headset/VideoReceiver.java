@@ -22,80 +22,97 @@ public final class VideoReceiver {
 	private static final int CONNECT_TIMEOUT_MS = 3000;
 	private static final int MAX_FRAME_BYTES = 16 << 20;
 
-	private static Thread thread;
-	private static Socket socket;
-	private static volatile boolean running;
-	private static volatile String status = "остановлен";
-	private static volatile long framesReceived;
-	private static volatile long framesShown;
-	private static volatile long bytesReceived;
-	private static volatile double decodeMs;
-	private static volatile int width;
-	private static volatile int height;
+	/** Screen id (chosen by the caller) -> its receiver. */
+	private static final HashMap<Integer, VideoReceiver> receivers = new HashMap<>();
+
+	private Thread thread;
+	private Socket socket;
+	private volatile boolean running;
+	private volatile String status = "остановлен";
+	private volatile long framesReceived;
+	private volatile long framesShown;
+	private volatile long bytesReceived;
+	private volatile double decodeMs;
+	private volatile int width;
+	private volatile int height;
 
 	private VideoReceiver() {
 	}
 
-	public static synchronized void start(Surface surface, String host, int port) {
-		stop();
-		running = true;
-		status = "подключаюсь";
-		framesReceived = 0;
-		framesShown = 0;
-		bytesReceived = 0;
-		decodeMs = 0;
-		thread = new Thread(() -> run(surface, host, port), "WoRkPlaceVideo");
-		thread.start();
+	/** Starts receiving into `surface`; a receiver already running under `id` is stopped first. */
+	public static synchronized void start(int id, Surface surface, String host, int port) {
+		VideoReceiver previous = receivers.remove(id);
+		Thread previousThread = null;
+		if (previous != null) {
+			previous.halt();
+			previousThread = previous.thread;
+		}
+		VideoReceiver receiver = new VideoReceiver();
+		receiver.running = true;
+		receiver.status = "подключаюсь";
+		Thread waitFor = previousThread;
+		receiver.thread = new Thread(() -> {
+			// The surface takes one decoder at a time: the old one lets go first.
+			if (waitFor != null) {
+				try {
+					waitFor.join(2000);
+				} catch (InterruptedException ignored) {
+					return;
+				}
+			}
+			receiver.run(surface, host, port);
+		}, "WoRkPlaceVideo" + id);
+		receivers.put(id, receiver);
+		receiver.thread.start();
 	}
 
-	public static synchronized void stop() {
-		running = false;
-		closeSocket();
-		if (thread != null) {
-			try {
-				thread.join(2000);
-			} catch (InterruptedException ignored) {
-				Thread.currentThread().interrupt();
-			}
-			thread = null;
+	public static synchronized void stop(int id) {
+		VideoReceiver receiver = receivers.remove(id);
+		if (receiver != null) {
+			receiver.halt();
 		}
 	}
 
-	public static boolean isRunning() {
-		return running;
+	public static synchronized void stopAll() {
+		for (VideoReceiver receiver : receivers.values()) {
+			receiver.halt();
+		}
+		receivers.clear();
+	}
+
+	private static synchronized VideoReceiver get(int id) {
+		return receivers.get(id);
 	}
 
 	/** What the receiver is doing, or why it stopped. */
-	public static String status() {
-		return status;
+	public static String status(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? "нет" : receiver.status;
 	}
 
-	public static long framesReceived() {
-		return framesReceived;
+	public static long framesShown(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.framesShown;
 	}
 
-	public static long framesShown() {
-		return framesShown;
-	}
-
-	public static long bytesReceived() {
-		return bytesReceived;
+	public static long bytesReceived(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.bytesReceived;
 	}
 
 	/** The last frame's time from entering the decoder to being shown. */
-	public static double decodeMs() {
-		return decodeMs;
+	public static double decodeMs(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.decodeMs;
 	}
 
-	public static int width() {
-		return width;
+	/** Does not wait: closing the socket ends the thread, which releases the decoder. */
+	private void halt() {
+		running = false;
+		closeSocket();
 	}
 
-	public static int height() {
-		return height;
-	}
-
-	private static synchronized void closeSocket() {
+	private synchronized void closeSocket() {
 		if (socket != null) {
 			try {
 				socket.close();
@@ -105,11 +122,11 @@ public final class VideoReceiver {
 		}
 	}
 
-	private static void run(Surface surface, String host, int port) {
+	private void run(Surface surface, String host, int port) {
 		MediaCodec decoder = null;
 		try {
 			Socket connection = new Socket();
-			synchronized (VideoReceiver.class) {
+			synchronized (this) {
 				socket = connection;
 			}
 			connection.setTcpNoDelay(true);
@@ -132,8 +149,8 @@ public final class VideoReceiver {
 
 			MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
 			format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
-			format.setInteger(MediaFormat.KEY_PRIORITY, 0);
-			format.setInteger(MediaFormat.KEY_OPERATING_RATE, fps);
+			// No KEY_PRIORITY 0 / KEY_OPERATING_RATE: with them the Quest 3S reserved
+			// realtime capacity and refused the 7th decoder (NO_MEMORY, slice o4).
 			// Qualcomm's own switch for the same; unknown keys are ignored.
 			format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
 			decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
@@ -193,7 +210,7 @@ public final class VideoReceiver {
 		}
 	}
 
-	private static void drain(MediaCodec decoder, MediaCodec.BufferInfo info, HashMap<Long, Long> queuedAt) {
+	private void drain(MediaCodec decoder, MediaCodec.BufferInfo info, HashMap<Long, Long> queuedAt) {
 		int index;
 		while ((index = decoder.dequeueOutputBuffer(info, 0)) != MediaCodec.INFO_TRY_AGAIN_LATER) {
 			if (index < 0) {

@@ -12,8 +12,9 @@ extends RefCounted
 const VERSION := 1
 const DISCOVERY_PORT := 47801
 const CONTROL_PORT := 47802
-## The H.264 stream of one monitor (slice o3), its own TCP connection; the
-## format is described at StreamBackend in native/src/win_backend.h.
+## The H.264 stream of each monitor (slices o3, o4), each its own TCP
+## connection on VIDEO_PORT + its index; the format is described at
+## StreamBackend in native/src/win_backend.h.
 const VIDEO_PORT := 47803
 const VIDEO_MAGIC := "WRKV"
 const VIDEO_HEADER_SIZE := 20
@@ -31,7 +32,9 @@ const FIELDS := {
 	"monitors": ["monitors"],
 	"ping": ["time"],
 	"pong": ["time"],
-	"video": ["port", "key", "w", "h"],
+	"videos": ["videos"],
+	"pointer": ["key", "x", "y"],
+	"button": ["b", "down"],
 	"bye": [],
 }
 
@@ -76,9 +79,24 @@ static func monitors_message(monitors: Array) -> Dictionary:
 	return {"t": "monitors", "monitors": monitors}
 
 
-## The PC streams monitor `key` (w × h pixels) on `port` of its own address.
+## One stream the PC offers: monitor `key` (w × h pixels) on `port` of its own address.
 static func video(port: int, key: String, size: Vector2i) -> Dictionary:
-	return {"t": "video", "port": port, "key": key, "w": size.x, "h": size.y}
+	return {"port": port, "key": key, "w": size.x, "h": size.y}
+
+
+## Every stream the PC runs now; a monitor missing from the list has none.
+static func videos_message(videos: Array) -> Dictionary:
+	return {"t": "videos", "videos": videos}
+
+
+## The headset moves the cursor to pixel (x, y) of monitor `key`.
+static func pointer(key: String, position: Vector2i) -> Dictionary:
+	return {"t": "pointer", "key": key, "x": position.x, "y": position.y}
+
+
+## Mouse button `b` (0 left, 1 right, 2 middle) goes down or up where the cursor is.
+static func button(b: int, down: bool) -> Dictionary:
+	return {"t": "button", "b": b, "down": down}
 
 
 static func ping(time: float) -> Dictionary:
@@ -107,6 +125,16 @@ static func problem(message: Variant) -> String:
 			return "%s без поля %s" % [type, field]
 	if message.has("v") and message["v"] != VERSION:
 		return "версия %s, а нужна %d" % [str(message["v"]), VERSION]
+	if message.has("videos"):
+		if not message["videos"] is Array:
+			return "videos не список"
+		for entry: Variant in message["videos"]:
+			if not entry is Dictionary or not entry.get("port", 0) is int or not entry.get("key", 0) is String 					or not entry.get("w", 0) is int or not entry.get("h", 0) is int 					or int(entry.get("port", 0)) <= 0 or int(entry.get("w", 0)) <= 0 or int(entry.get("h", 0)) <= 0:
+				return "плохое видео %s" % str(entry)
+	if type == "pointer" and not (message["key"] is String and message["x"] is int and message["y"] is int):
+		return "pointer с плохими полями"
+	if type == "button" and not (message["b"] is int and int(message["b"]) >= 0 and int(message["b"]) <= 2 and message["down"] is bool):
+		return "button с плохими полями"
 	if message.has("monitors"):
 		if not message["monitors"] is Array:
 			return "monitors не список"

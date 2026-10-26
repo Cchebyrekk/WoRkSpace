@@ -18,10 +18,10 @@ var monitors: Array = []
 var monitors_changed := false
 ## The last ping's round trip, -1 until one came back.
 var rtt_ms := -1.0
-## The stream the PC offers (LinkProtocol.video: port, key, w, h), {} if none;
-## `video_changed` is set when it is new or gone.
-var video: Dictionary = {}
-var video_changed := false
+## The streams the PC offers (LinkProtocol.video: port, key, w, h each);
+## `videos_changed` is set when the list is new.
+var videos: Array = []
+var videos_changed := false
 
 var _device := ""
 var _udp := PacketPeerUDP.new()
@@ -61,6 +61,12 @@ func describe() -> String:
 		_:
 			return "ПК %s (%s), мониторов %d, задержка %s" % [pc_name, pc_address, monitors.size(),
 					"%.0f мс" % rtt_ms if rtt_ms >= 0.0 else "—"]
+
+
+## Sends a message to the PC if connected (input: LinkProtocol.pointer, button).
+func send(message: Dictionary) -> void:
+	if state == State.CONNECTED and _greeted:
+		_channel.put_var(message)
 
 
 func close() -> void:
@@ -108,7 +114,6 @@ func _connect(ip: String, port: int, now: float) -> void:
 	if _tcp.connect_to_host(ip, port) != OK:
 		_tcp = null
 		return
-	_tcp.set_no_delay(true)
 	pc_address = ip
 	_started = now
 	state = State.CONNECTING
@@ -118,6 +123,8 @@ func _connecting(now: float) -> void:
 	_tcp.poll()
 	match _tcp.get_status():
 		StreamPeerTCP.STATUS_CONNECTED:
+			# Only a connected socket takes this option.
+			_tcp.set_no_delay(true)
 			_channel = PacketPeerStream.new()
 			_channel.stream_peer = _tcp
 			_channel.put_var(LinkProtocol.hello(_device))
@@ -155,10 +162,10 @@ func _connected(now: float) -> void:
 			"monitors":
 				_take_monitors(message["monitors"])
 				print("[link] ПК прислал мониторы: %d" % monitors.size())
-			"video":
-				video = message
-				video_changed = true
-				print("[link] ПК показывает %s, %d×%d, порт %d" % [message["key"], message["w"], message["h"], message["port"]])
+			"videos":
+				videos = message["videos"]
+				videos_changed = true
+				print("[link] ПК показывает мониторов: %d" % videos.size())
 			"pong":
 				rtt_ms = (now - float(message["time"])) * 1000.0
 			"bye":
@@ -189,8 +196,8 @@ func _reset(why: String) -> void:
 	if state == State.CONNECTED and not monitors.is_empty():
 		monitors = []
 		monitors_changed = true
-	if not video.is_empty():
-		video = {}
-		video_changed = true
+	if not videos.is_empty():
+		videos = []
+		videos_changed = true
 	state = State.SEARCHING
 	pc_name = ""

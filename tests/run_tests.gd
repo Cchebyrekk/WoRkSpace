@@ -2042,7 +2042,43 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem([1, 2]) != "", "протокол: не словарь отвергнут")
 	_check(LinkProtocol.problem(LinkProtocol.monitors_message([{"w": 0, "h": 10}])) != "", "протокол: монитор нулевой ширины отвергнут")
 	_check(LinkProtocol.problem(LinkProtocol.monitors_message([])) == "", "протокол: пустой список мониторов допустим")
-	var video: Dictionary = bytes_to_var(var_to_bytes(LinkProtocol.video(LinkProtocol.VIDEO_PORT, "MTT1337#1", Vector2i(1920, 1080))))
-	_check(LinkProtocol.problem(video) == "" and video["port"] == LinkProtocol.VIDEO_PORT and video["w"] == 1920,
-			"протокол: сообщение о видео правильное")
-	_check(LinkProtocol.problem({"t": "video", "port": 1}) != "", "протокол: видео без монитора отвергнуто")
+	var videos: Dictionary = bytes_to_var(var_to_bytes(LinkProtocol.videos_message(
+			[LinkProtocol.video(LinkProtocol.VIDEO_PORT, "MTT1337#1", Vector2i(1920, 1080))])))
+	_check(LinkProtocol.problem(videos) == "" and videos["videos"][0]["port"] == LinkProtocol.VIDEO_PORT,
+			"протокол: список видео правильный")
+	_check(LinkProtocol.problem(LinkProtocol.videos_message([{"port": 1, "key": "x"}])) != "", "протокол: видео без размера отвергнуто")
+	_check(LinkProtocol.problem(LinkProtocol.videos_message([])) == "", "протокол: пустой список видео допустим")
+	_check(LinkProtocol.problem(bytes_to_var(var_to_bytes(LinkProtocol.pointer("MTT1337#1", Vector2i(10, 20))))) == "",
+			"протокол: курсор правильный")
+	_check(LinkProtocol.problem({"t": "pointer", "key": "x", "x": 1.5, "y": 2}) != "", "протокол: курсор не в целых пикселях отвергнут")
+	_check(LinkProtocol.problem(LinkProtocol.button(1, true)) == "", "протокол: кнопка правильная")
+	_check(LinkProtocol.problem(LinkProtocol.button(5, true)) != "", "протокол: неизвестная кнопка отвергнута")
+	# The headset's screen arc, loaded by path (headset/ is hidden from this project).
+	var arc: GDScript = load("res://headset/src/screen_arc.gd")
+	var placed: Dictionary = arc.place([
+		LinkProtocol.monitor("A", "a", Vector2i(-1920, 0), Vector2i(1920, 1080), false),
+		LinkProtocol.monitor("B", "b", Vector2i(0, 0), Vector2i(1920, 1080), true),
+		LinkProtocol.monitor("C", "c", Vector2i(1920, -1080), Vector2i(1920, 1080), false)])
+	var front: Transform3D = placed["B"]["transform"]
+	_check(is_zero_approx(front.origin.x) and is_equal_approx(front.origin.y, arc.EYE_HEIGHT) and front.origin.z < -1.0,
+			"дуга: основной монитор прямо впереди на высоте глаз")
+	var left_one: Transform3D = placed["A"]["transform"]
+	var upper_right: Transform3D = placed["C"]["transform"]
+	_check(left_one.origin.x < 0.0 and upper_right.origin.x > 0.0 and upper_right.origin.y > arc.EYE_HEIGHT + 0.4,
+			"дуга: левый слева, правый верхний справа и выше")
+	_check(is_equal_approx(left_one.origin.length_squared() - left_one.origin.y ** 2, front.origin.z ** 2),
+			"дуга: все на одном радиусе")
+	_check((left_one.basis.z).dot(-Vector3(left_one.origin.x, 0.0, left_one.origin.z).normalized()) > 0.999,
+			"дуга: экран повёрнут к пользователю")
+	_check(placed["A"]["size"].x < 1.0 and placed["A"]["size"].x > 0.9, "дуга: 1920 пикселей — чуть меньше метра (шов)")
+	var wide: Array = []
+	for i in 8:
+		wide.append(LinkProtocol.monitor(str(i), str(i), Vector2i(1920 * i, 0), Vector2i(1920, 1080), i == 0))
+	var wide_placed: Dictionary = arc.place(wide)
+	var radius: float = -wide_placed["0"]["transform"].origin.z
+	_check(radius > arc.MIN_RADIUS and is_equal_approx(8.0 / radius, arc.MAX_ARC), "дуга: 8 мониторов — радиус растёт, дуга не больше 200°")
+	_check(arc.place([]).is_empty(), "дуга: без мониторов пусто")
+	# The headset reuses these pure classes as copies, like the protocol.
+	for file in ["pointer_math.gd", "cursor_filter.gd"]:
+		_check(FileAccess.get_file_as_string("res://src/" + file) == FileAccess.get_file_as_string("res://headset/src/" + file),
+				"шлем: копия %s совпадает" % file)

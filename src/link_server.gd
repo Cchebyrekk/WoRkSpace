@@ -1,8 +1,9 @@
 extends Node
 ## The PC side of the own link (slice o2): no VR here, the headset draws. It
 ## answers the headset's search, keeps one control channel and tells the
-## headset which monitors there are. Slice o3: streams the primary monitor
-## (ScreenStreamer) while a headset is connected. Run: scenes/link_server.tscn
+## headset which monitors there are. While a headset is connected every monitor
+## is streamed (ScreenStreamer, slices o3, o4) and the headset's pointer moves
+## the real cursor and presses its buttons. Run: scenes/link_server.tscn
 ## (`--headless --xr-mode off --path . res://scenes/link_server.tscn`).
 
 ## How often the monitor list is looked at for changes.
@@ -22,10 +23,13 @@ var _monitors: Array = []
 var _monitors_signature := ""
 var _next_monitors_check := 0.0
 var _pc_name := ""
-var _streamer: ScreenStreamer
-var _video_key := ""
+## Monitor key -> its ScreenStreamer.
+var _streamers: Dictionary = {}
 var _next_video_log := 0.0
+## Monitor key -> its stats at the last log line.
 var _video_logged: Dictionary = {}
+## Mouse buttons the headset holds down: released when it goes away.
+var _buttons_down: Dictionary = {}
 
 
 func _ready() -> void:
@@ -43,6 +47,10 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
+	# Reads the SYSTEM agent's status messages, as the module wants every frame:
+	# left unread they fill its pipe, the agent stops taking input and the next
+	# cursor move blocks the server for good (it hung so with a real headset, o4).
+	MouseInput.is_secure_desktop_active()
 	_answer_searches()
 	if _server.is_connection_available():
 		_accept(now)
@@ -54,9 +62,9 @@ func _process(_delta: float) -> void:
 			print("[link] мониторы изменились: %d" % _monitors.size())
 			_send(LinkProtocol.monitors_message(_monitors))
 			# Indices and sizes may have moved: the stream starts over.
-			_start_video()
-	if _streamer != null:
-		_watch_video(now)
+			_start_videos()
+	if not _streamers.is_empty():
+		_watch_videos(now)
 
 
 func _answer_searches() -> void:
@@ -104,7 +112,15 @@ func _serve(now: float) -> void:
 				_device = message["device"]
 				print("[link] шлем «%s» поздоровался; мониторов %d" % [_device, _monitors.size()])
 				_send(LinkProtocol.welcome(_pc_name, _monitors))
-				_start_video()
+				_start_videos()
+			"pointer":
+				_move_pointer(message["key"], Vector2i(message["x"], message["y"]))
+			"button":
+				MouseInput.set_button(message["b"], message["down"])
+				if message["down"]:
+					_buttons_down[message["b"]] = true
+				else:
+					_buttons_down.erase(message["b"])
 			"ping":
 				_send(LinkProtocol.pong(message["time"]))
 			"bye":
@@ -130,57 +146,81 @@ func _drop(why: String) -> void:
 	_tcp = null
 	_channel = null
 	_device = ""
-	_stop_video()
+	for b: int in _buttons_down:
+		MouseInput.set_button(b, false)
+	_buttons_down.clear()
+	_stop_videos()
 
 
-## Streams the primary monitor (the first one if none is primary) and tells the headset.
-func _start_video() -> void:
-	_stop_video()
-	if _channel == null or _monitors.is_empty():
+## The pointer is in pixels of one monitor; the cursor wants the virtual desktop.
+func _move_pointer(key: String, at: Vector2i) -> void:
+	for monitor: Dictionary in _monitors:
+		if monitor["key"] == key:
+			var inside := at.clamp(Vector2i.ZERO, Vector2i(monitor["w"] - 1, monitor["h"] - 1))
+			MouseInput.move_to(Vector2i(monitor["x"], monitor["y"]) + inside)
+			return
+
+
+## Streams every monitor, each on VIDEO_PORT + its index, and tells the headset.
+func _start_videos() -> void:
+	_stop_videos()
+	if _channel == null:
 		return
-	var index := 0
+	var videos: Array = []
 	for i in _monitors.size():
-		if _monitors[i]["primary"]:
-			index = i
-			break
-	_streamer = ScreenStreamer.new()
-	if not _streamer.start(index, LinkProtocol.VIDEO_PORT, VIDEO_BITRATE_KBPS, VIDEO_FPS):
-		print("[video] не запустился: %s" % _streamer.get_last_error())
-		_streamer = null
-		return
-	var stats := _streamer.get_stats()
-	_video_key = _monitors[index]["key"]
-	_video_logged = stats
+		var monitor: Dictionary = _monitors[i]
+		var streamer := ScreenStreamer.new()
+		var port := LinkProtocol.VIDEO_PORT + i
+		if not streamer.start(i, port, VIDEO_BITRATE_KBPS, VIDEO_FPS):
+			print("[video] %s не запустился: %s" % [monitor["name"], streamer.get_last_error()])
+			continue
+		var stats := streamer.get_stats()
+		_streamers[monitor["key"]] = streamer
+		_video_logged[monitor["key"]] = stats
+		videos.append(LinkProtocol.video(port, monitor["key"], stats["size"]))
 	_next_video_log = Time.get_ticks_msec() / 1000.0 + VIDEO_LOG_SEC
-	print("[video] %s: %s %s, %d кбит/с, %d к/с" % [_monitors[index]["name"], stats["encoder"], stats["size"],
-			VIDEO_BITRATE_KBPS, VIDEO_FPS])
-	_send(LinkProtocol.video(LinkProtocol.VIDEO_PORT, _video_key, stats["size"]))
+	if not _streamers.is_empty():
+		var first: ScreenStreamer = _streamers.values()[0]
+		print("[video] потоков %d из %d: %s, %d кбит/с, %d к/с" % [_streamers.size(), _monitors.size(),
+				first.get_stats()["encoder"], VIDEO_BITRATE_KBPS, VIDEO_FPS])
+	_send(LinkProtocol.videos_message(videos))
 
 
-func _stop_video() -> void:
-	if _streamer != null:
-		_streamer.stop()
-		_streamer = null
-		print("[video] остановлен")
-	_video_key = ""
-
-
-func _watch_video(now: float) -> void:
-	if not _streamer.is_running():
-		print("[video] остановился сам: %s" % _streamer.get_stats().get("error", ""))
-		_streamer = null
+func _stop_videos() -> void:
+	if _streamers.is_empty():
 		return
+	for streamer: ScreenStreamer in _streamers.values():
+		streamer.stop()
+	_streamers.clear()
+	_video_logged.clear()
+	print("[video] остановлены")
+
+
+## One log line for all streams: what the headset gets, summed up.
+func _watch_videos(now: float) -> void:
+	for key: String in _streamers.keys():
+		var streamer: ScreenStreamer = _streamers[key]
+		if not streamer.is_running():
+			print("[video] %s остановился сам: %s" % [key, streamer.get_stats().get("error", "")])
+			_streamers.erase(key)
 	if now < _next_video_log:
 		return
-	var stats := _streamer.get_stats()
 	var seconds := VIDEO_LOG_SEC + now - _next_video_log
 	_next_video_log = now + VIDEO_LOG_SEC
-	print("[video] шлем %s: снято %.0f к/с, отправлено %.0f к/с, %.1f Мбит/с, кодирование %.1f мс" % [
-			stats["client"] if stats["client"] != "" else "не подключён",
-			(stats["frames_captured"] - _video_logged["frames_captured"]) / seconds,
-			(stats["frames_sent"] - _video_logged["frames_sent"]) / seconds,
-			(stats["bytes_sent"] - _video_logged["bytes_sent"]) * 8.0 / seconds / 1e6, stats["encode_ms"]])
-	_video_logged = stats
+	var sent := 0
+	var bytes := 0
+	var watched := 0
+	var slowest := 0.0
+	for key: String in _streamers:
+		var stats: Dictionary = _streamers[key].get_stats()
+		var before: Dictionary = _video_logged.get(key, stats)
+		sent += stats["frames_sent"] - before["frames_sent"]
+		bytes += stats["bytes_sent"] - before["bytes_sent"]
+		watched += 1 if stats["client"] != "" else 0
+		slowest = maxf(slowest, stats["encode_ms"])
+		_video_logged[key] = stats
+	print("[video] шлем смотрит %d из %d: отправлено %.0f к/с, %.1f Мбит/с, кодирование до %.1f мс" % [watched,
+			_streamers.size(), sent / seconds, bytes * 8.0 / seconds / 1e6, slowest])
 
 
 ## True if the list differs from the one the headset was last told about.
