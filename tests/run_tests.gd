@@ -34,6 +34,7 @@ func _init() -> void:
 	_test_place_network()
 	_test_desktop_groups()
 	_test_world_edit()
+	_test_link_protocol()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -2011,3 +2012,33 @@ func _test_world_edit() -> void:
 	var slots := PackedVector3Array([Vector3(0.0, 0.0, 0.0), Vector3(0.15, 0.0, 0.0)])
 	_check(WorldEdit.slot_at(Vector3(0.12, 0.02, 0.0), slots, 0.08) == 1 and WorldEdit.slot_at(Vector3(0.5, 0.0, 0.0), slots, 0.08) == -1, "редактор мира: полочка")
 	_check(WorldEdit.next_world_name(["Мир 1", "Мир 3"]) == "Мир 2" and WorldEdit.next_world_name([]) == "Мир 1", "миры: имя нового")
+
+
+func _test_link_protocol() -> void:
+	# The headset project keeps its own copy: it must not drift.
+	var ours := FileAccess.get_file_as_string("res://src/link_protocol.gd")
+	var headset := FileAccess.get_file_as_string("res://headset/src/link_protocol.gd")
+	_check(ours != "" and ours == headset, "протокол: копия в шлеме совпадает")
+	_check(LinkProtocol.ask_version(LinkProtocol.ask_packet()) == LinkProtocol.VERSION, "протокол: вопрос узнаётся")
+	_check(LinkProtocol.ask_version("hello".to_utf8_buffer()) == -1, "протокол: чужой пакет — не вопрос")
+	_check(LinkProtocol.ask_version(PackedByteArray()) == -1, "протокол: пустой пакет — не вопрос")
+	var answer := LinkProtocol.parse_answer(LinkProtocol.answer_packet("DESK|1", 47802))
+	_check(answer.get("pc") == "DESK|1" and answer.get("port") == 47802 and answer.get("version") == LinkProtocol.VERSION,
+			"протокол: ответ ПК разбирается, имя с разделителем цело")
+	_check(LinkProtocol.parse_answer(LinkProtocol.ask_packet()).is_empty(), "протокол: вопрос — не ответ")
+	_check(LinkProtocol.parse_answer("WoRkPlace!|1|0|PC".to_utf8_buffer()).is_empty(), "протокол: порт 0 отвергнут")
+	_check(LinkProtocol.parse_answer("WoRkPlace!|1|x|PC".to_utf8_buffer()).is_empty(), "протокол: порт не число")
+	var monitor := LinkProtocol.monitor("MTT1337#1", "\\\\.\\DISPLAY3", Vector2i(-1920, 0), Vector2i(1920, 1080), true)
+	var welcome := LinkProtocol.welcome("DESK", [monitor])
+	_check(LinkProtocol.problem(welcome) == "", "протокол: приветствие ПК правильное")
+	# What PacketPeerStream does to it on the way.
+	_check(LinkProtocol.problem(bytes_to_var(var_to_bytes(welcome))) == "", "протокол: приветствие переживает передачу")
+	_check(LinkProtocol.problem(LinkProtocol.hello("Quest 3S")) == "", "протокол: привет шлема правильный")
+	_check(LinkProtocol.problem(LinkProtocol.ping(1.5)) == "" and LinkProtocol.problem(LinkProtocol.pong(1.5)) == "",
+			"протокол: пинг и понг правильные")
+	_check(LinkProtocol.problem({"t": "hello", "v": 99, "device": "x"}) != "", "протокол: чужая версия отвергнута")
+	_check(LinkProtocol.problem({"t": "welcome", "v": LinkProtocol.VERSION, "pc": "x"}) != "", "протокол: без мониторов отвергнуто")
+	_check(LinkProtocol.problem({"t": "jump"}) != "", "протокол: неизвестный тип отвергнут")
+	_check(LinkProtocol.problem([1, 2]) != "", "протокол: не словарь отвергнут")
+	_check(LinkProtocol.problem(LinkProtocol.monitors_message([{"w": 0, "h": 10}])) != "", "протокол: монитор нулевой ширины отвергнут")
+	_check(LinkProtocol.problem(LinkProtocol.monitors_message([])) == "", "протокол: пустой список мониторов допустим")
