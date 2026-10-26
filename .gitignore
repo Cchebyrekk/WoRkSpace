@@ -18,3 +18,11 @@
 
 # Personal Claude Code settings of this machine
 .claude/settings.local.json
+
+# The headset app (slice o): its cache, and the OpenXR vendors addon (installed from its release, not kept in git)
+/headset/.godot/
+/headset/addons/godotopenxrvendors/
+
+# Built apps and the headset project's Android build template (regenerated on export)
+/build/
+/headset/android/

@@ -1,0 +1,23 @@
+; WoRkPlace in the headset (slice o): the app that runs on the Quest itself and
+; shows the PC's screens streamed to it. A project of its own, apart from the PC
+; app at the repository root (which ignores this folder: .gdignore).
+
+config_version=5
+
+[application]
+
+config/name="WoRkPlace Headset"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7", "Mobile")
+
+[rendering]
+
+renderer/rendering_method="mobile"
+textures/vram_compression/import_etc2_astc=true
+
+[xr]
+
+openxr/enabled=true
+openxr/extensions/hand_tracking=true
+openxr/extensions/hand_interaction_profile=true
+shaders/enabled=true
