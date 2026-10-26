@@ -22,6 +22,9 @@ var rtt_ms := -1.0
 ## `videos_changed` is set when the list is new.
 var videos: Array = []
 var videos_changed := false
+## The PC app's settings file as it sent it ("" until then); `settings_changed` on arrival.
+var pc_settings := ""
+var settings_changed := false
 
 var _device := ""
 var _udp := PacketPeerUDP.new()
@@ -126,6 +129,8 @@ func _connecting(now: float) -> void:
 			# Only a connected socket takes this option.
 			_tcp.set_no_delay(true)
 			_channel = PacketPeerStream.new()
+			_channel.input_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
+			_channel.output_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
 			_channel.stream_peer = _tcp
 			_channel.put_var(LinkProtocol.hello(_device))
 			_last_heard = now
@@ -166,6 +171,9 @@ func _connected(now: float) -> void:
 				videos = message["videos"]
 				videos_changed = true
 				print("[link] ПК показывает мониторов: %d" % videos.size())
+			"settings":
+				pc_settings = message["text"]
+				settings_changed = true
 			"pong":
 				rtt_ms = (now - float(message["time"])) * 1000.0
 			"bye":

@@ -30,6 +30,8 @@ var _next_video_log := 0.0
 var _video_logged: Dictionary = {}
 ## Mouse buttons the headset holds down: released when it goes away.
 var _buttons_down: Dictionary = {}
+## Keys the headset holds down (Ctrl for zoom): let go when it goes away.
+var _keys_down: Dictionary = {}
 
 
 func _ready() -> void:
@@ -88,6 +90,8 @@ func _accept(now: float) -> void:
 	_tcp = _server.take_connection()
 	_tcp.set_no_delay(true)
 	_channel = PacketPeerStream.new()
+	_channel.input_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
+	_channel.output_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
 	_channel.stream_peer = _tcp
 	_last_heard = now
 	print("[link] подключился %s:%d" % [_tcp.get_connected_host(), _tcp.get_connected_port()])
@@ -112,6 +116,9 @@ func _serve(now: float) -> void:
 				_device = message["device"]
 				print("[link] шлем «%s» поздоровался; мониторов %d" % [_device, _monitors.size()])
 				_send(LinkProtocol.welcome(_pc_name, _monitors))
+				var settings := FileAccess.get_file_as_string("user://settings.cfg")
+				if settings != "":
+					_send(LinkProtocol.settings_message(settings))
 				_start_videos()
 			"pointer":
 				_move_pointer(message["key"], Vector2i(message["x"], message["y"]))
@@ -121,6 +128,19 @@ func _serve(now: float) -> void:
 					_buttons_down[message["b"]] = true
 				else:
 					_buttons_down.erase(message["b"])
+			"wheel":
+				if message["up"] != 0:
+					MouseInput.scroll(message["up"])
+				if message["right"] != 0:
+					MouseInput.scroll_horizontal(message["right"])
+			"keys":
+				MouseInput.press_keys(PackedInt32Array(message["keys"]))
+			"key":
+				MouseInput.set_key(message["vk"], message["down"])
+				if message["down"]:
+					_keys_down[message["vk"]] = true
+				else:
+					_keys_down.erase(message["vk"])
 			"ping":
 				_send(LinkProtocol.pong(message["time"]))
 			"bye":
@@ -149,6 +169,9 @@ func _drop(why: String) -> void:
 	for b: int in _buttons_down:
 		MouseInput.set_button(b, false)
 	_buttons_down.clear()
+	for vk: int in _keys_down:
+		MouseInput.set_key(vk, false)
+	_keys_down.clear()
 	_stop_videos()
 
 

@@ -65,6 +65,9 @@ const THUMB_WIDTH := 480
 var _surface_shape := ""
 var _origin: XROrigin3D
 var _hole_punch := false
+## In the headset (slice o5) the capture is a stand-in that has no texture: the
+## PC's video stream is decoded straight into the layer's Android surface.
+var _video := false
 var _rendered_frame := 0
 var _active_until := 0.0
 var _grips := {}
@@ -97,6 +100,7 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel.primary = monitor["primary"]
 	panel._origin = origin
 	panel._hole_punch = hole_punch
+	panel._video = new_capture.has_method("attach_layer")
 
 	var picture := TextureRect.new()
 	picture.texture = new_capture.get_texture()
@@ -200,13 +204,19 @@ func _make_layer(curved: bool) -> void:
 		layer.layer_viewport = null
 		layer.queue_free()
 	layer = OpenXRCompositionLayerCylinder.new() if curved else OpenXRCompositionLayerQuad.new()
-	layer.layer_viewport = _viewport
+	if _video:
+		layer.use_android_surface = true
+		layer.android_surface_size = monitor_rect.size
+	else:
+		layer.layer_viewport = _viewport
 	if _hole_punch:
 		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
 		# -2: the secure-desktop prompt (main.gd, -1) sits between the panels and the scene.
 		layer.sort_order = -2
 		layer.enable_hole_punch = true
 	_origin.add_child(layer)
+	if _video:
+		capture.call(&"attach_layer", layer)
 
 
 ## The part of a monitor's device path that stays the same: from
@@ -263,7 +273,8 @@ func place(new_placement: PanelLayout.Placement) -> void:
 	# Convex (on a wall or a column, slice l): drawn as a mesh (_surface); its quad
 	# layer stays, empty and without a hole, so the panel keeps its place in the list.
 	var convex := placement.curvature < 0.0
-	if convex == (layer.layer_viewport != null):
+	# A video layer stays as it is: its surface has no texture for the convex mesh.
+	if not _video and convex == (layer.layer_viewport != null):
 		layer.layer_viewport = null if convex else _viewport
 		layer.enable_hole_punch = _hole_punch and not convex
 	# The shape only when it changed: each change may rebuild the layer's mesh (its
@@ -387,6 +398,8 @@ func refresh(session_visible: bool, copy_frames: bool, now: float) -> void:
 	if frame != _rendered_frame:
 		_rendered_frame = frame
 		_active_until = now + ACTIVE_HOLD_SEC
+	if _video:
+		return  # The decoder draws into the layer itself; the viewport stays idle.
 	var mode := SubViewport.UPDATE_ALWAYS if session_visible and now < _active_until else SubViewport.UPDATE_DISABLED
 	if _viewport.render_target_update_mode != mode:
 		_viewport.render_target_update_mode = mode

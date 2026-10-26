@@ -52,6 +52,8 @@ const AIM_CALIBRATION_FAST_SEC := 1.0
 const AIM_CALIBRATION_BOOST_SEC := 5.0
 const ROTATION_WEIGHT_STEP := 0.05
 const SETTINGS_PATH := "user://settings.cfg"
+## A button this far behind a screen still counts (one lying on the screen's plane).
+const SCREEN_COVER_MARGIN := 0.01
 const SETTINGS_VERSION := 2
 ## The wrist rotation is tracked worst exactly when the fingers close. Below this
 ## thumb-to-index distance, and while a pinch is held, the rotation's contribution
@@ -403,6 +405,10 @@ class Pointer:
 	var pressed := false
 	var just_pressed := false
 	var hit_distance := INF
+	## Along the ray to the nearest screen panel this frame (INF if none): what is
+	## behind a screen cannot be pressed through it (slice o5, 26.10.2026: in the
+	## headset the settings panel stood behind the screens and took their clicks).
+	var screen_distance := INF
 	var pinch_mm := 0.0
 	## Rotation from the shoulder-to-palm line to the full hand ray; see PINCH_FREEZE_DISTANCE.
 	var rotation_offset := Quaternion.IDENTITY
@@ -1224,6 +1230,7 @@ func _process(delta: float) -> void:
 	_update_groups_plane()
 	_update_world_editor(delta)
 	_place_monitor_menu()
+	_update_screen_distances()
 	_update_buttons(delta)
 	_update_sliders()
 	if _menu_editor != null:
@@ -3805,7 +3812,9 @@ func _update_cursor() -> void:
 		MouseInput.move_to(pixel)
 	if result.press:
 		_cursor_button = owner_pointer.button
-		var mouse_button := _cursor_button as MouseInput.Button
+		# A plain int, not MouseInput.Button: the headset's stand-in (slice o5) cannot
+		# declare an enum named like the Button class.
+		var mouse_button: int = _cursor_button
 		if result.double_click and _cursor_button == HandGestures.Click.LEFT:
 			# A full click first: the press that follows is then the second one of a
 			# double click by Windows' own timing, however slow the hand was.
@@ -3954,7 +3963,7 @@ func _update_calibration() -> void:
 
 func _release_cursor_button() -> void:
 	if _cursor_button != HandGestures.Click.NONE:
-		MouseInput.set_button(_cursor_button as MouseInput.Button, false)
+		MouseInput.set_button(int(_cursor_button), false)
 		_cursor_button = HandGestures.Click.NONE
 
 
@@ -6066,6 +6075,10 @@ func _schedule_reconnect() -> void:
 
 
 func _restart_app(attempt: int) -> void:
+	if OS.has_feature("android"):
+		# In the headset (slice o5) there is no Quest Link to lose and no PowerShell.
+		print("[xr] перезапуск в шлеме не нужен, пропускаю (попытка %d)" % attempt)
+		return
 	print("[xr] перезапускаю приложение, попытка %d" % attempt)
 	OS.set_environment(XR_RETRY_ENV, str(attempt))
 	# Launched through a delayed PowerShell so the new process starts after this one
@@ -6883,13 +6896,13 @@ func _update_secure_cursor() -> void:
 	if _secure_button == HandGestures.Click.NONE and pointer.just_pressed and pointer.button != HandGestures.Click.NONE:
 		_secure_button = pointer.button
 		_secure_press_pointer = owner
-		MouseInput.set_button(_secure_button as MouseInput.Button, true)
+		MouseInput.set_button(int(_secure_button), true)
 		print("[secure] %s в %s на защищённом столе" % [CLICK_LABELS[_secure_button], pixel])
 
 
 func _release_secure_button() -> void:
 	if _secure_button != HandGestures.Click.NONE:
-		MouseInput.set_button(_secure_button as MouseInput.Button, false)
+		MouseInput.set_button(int(_secure_button), false)
 		_secure_button = HandGestures.Click.NONE
 
 
@@ -7277,6 +7290,19 @@ func _update_pointer(index: int, delta: float) -> void:
 				("нажата " + CLICK_LABELS[pointer.button]) if pointer.pressed else "отпущено"])
 
 
+## The screens are drawn by the runtime, not in the scene, so nothing hides what
+## stands behind them from a ray: each pointer notes the nearest screen instead.
+func _update_screen_distances() -> void:
+	for pointer in _pointers:
+		pointer.screen_distance = INF
+		if not pointer.active:
+			continue
+		for panel in _panels:
+			var distance := panel.hit_distance(pointer.origin, pointer.direction)
+			if distance >= 0.0:
+				pointer.screen_distance = minf(pointer.screen_distance, distance)
+
+
 func _update_buttons(delta: float) -> void:
 	for button in _buttons:
 		# Buttons of a hidden panel cannot be pressed.
@@ -7290,7 +7316,7 @@ func _update_buttons(delta: float) -> void:
 			if not pointer.active:
 				continue
 			var distance := button.hit_distance(pointer.origin, pointer.direction)
-			if distance < 0.0:
+			if distance < 0.0 or distance > pointer.screen_distance + SCREEN_COVER_MARGIN:
 				continue
 			hovered = true
 			pressed = pressed or pointer.pressed
@@ -7975,7 +8001,7 @@ func _update_sliders() -> void:
 		for pointer in _pointers:
 			if visible and pointer.active and pointer.slider == null and pointer.grab_panel == null:
 				var distance := slider.hit_distance(pointer.origin, pointer.direction)
-				if distance >= 0.0:
+				if distance >= 0.0 and distance <= pointer.screen_distance + SCREEN_COVER_MARGIN:
 					hovered = true
 					pointer.hit_distance = minf(pointer.hit_distance, distance)
 					if pointer.just_pressed:

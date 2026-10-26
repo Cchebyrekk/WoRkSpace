@@ -24,6 +24,9 @@ const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.
 const PING_SEC := 1.0
 const LINK_TIMEOUT_SEC := 4.0
+## Control messages can be large (the settings file is ~30 KB): PacketPeerStream's
+## buffers on both ends are made this big.
+const CHANNEL_BUFFER := 1 << 20
 
 ## Message types and the fields each must carry.
 const FIELDS := {
@@ -35,6 +38,10 @@ const FIELDS := {
 	"videos": ["videos"],
 	"pointer": ["key", "x", "y"],
 	"button": ["b", "down"],
+	"wheel": ["up", "right"],
+	"keys": ["keys"],
+	"key": ["vk", "down"],
+	"settings": ["text"],
 	"bye": [],
 }
 
@@ -99,6 +106,28 @@ static func button(b: int, down: bool) -> Dictionary:
 	return {"t": "button", "b": b, "down": down}
 
 
+## The mouse wheel: `up` and `right`; 120 is one notch (MouseInput.scroll). Not
+## "v": that field is the protocol version.
+static func wheel(up: int, right: int) -> Dictionary:
+	return {"t": "wheel", "up": up, "right": right}
+
+
+## A shortcut: Windows virtual keys pressed in order, released in reverse (slice o5).
+static func keys(virtual_keys: Array) -> Dictionary:
+	return {"t": "keys", "keys": virtual_keys}
+
+
+## One Windows virtual key held down or let go.
+static func key(virtual_key: int, down: bool) -> Dictionary:
+	return {"t": "key", "vk": virtual_key, "down": down}
+
+
+## The PC app's settings file (user://settings.cfg) as text, for the headset to
+## take over once (slice o5).
+static func settings_message(text: String) -> Dictionary:
+	return {"t": "settings", "text": text}
+
+
 static func ping(time: float) -> Dictionary:
 	return {"t": "ping", "time": time}
 
@@ -135,6 +164,18 @@ static func problem(message: Variant) -> String:
 		return "pointer с плохими полями"
 	if type == "button" and not (message["b"] is int and int(message["b"]) >= 0 and int(message["b"]) <= 2 and message["down"] is bool):
 		return "button с плохими полями"
+	if type == "settings" and not message["text"] is String:
+		return "settings не текст"
+	if type == "wheel" and not (message["up"] is int and message["right"] is int):
+		return "wheel с плохими полями"
+	if type == "keys":
+		if not message["keys"] is Array or (message["keys"] as Array).is_empty():
+			return "keys пустой"
+		for code: Variant in message["keys"]:
+			if not code is int or int(code) <= 0 or int(code) > 255:
+				return "keys: плохая клавиша %s" % str(code)
+	if type == "key" and not (message["vk"] is int and int(message["vk"]) > 0 and int(message["vk"]) <= 255 and message["down"] is bool):
+		return "key с плохими полями"
 	if message.has("monitors"):
 		if not message["monitors"] is Array:
 			return "monitors не список"

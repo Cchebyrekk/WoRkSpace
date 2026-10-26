@@ -2015,10 +2015,6 @@ func _test_world_edit() -> void:
 
 
 func _test_link_protocol() -> void:
-	# The headset project keeps its own copy: it must not drift.
-	var ours := FileAccess.get_file_as_string("res://src/link_protocol.gd")
-	var headset := FileAccess.get_file_as_string("res://headset/src/link_protocol.gd")
-	_check(ours != "" and ours == headset, "протокол: копия в шлеме совпадает")
 	_check(LinkProtocol.ask_version(LinkProtocol.ask_packet()) == LinkProtocol.VERSION, "протокол: вопрос узнаётся")
 	_check(LinkProtocol.ask_version("hello".to_utf8_buffer()) == -1, "протокол: чужой пакет — не вопрос")
 	_check(LinkProtocol.ask_version(PackedByteArray()) == -1, "протокол: пустой пакет — не вопрос")
@@ -2053,6 +2049,16 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem({"t": "pointer", "key": "x", "x": 1.5, "y": 2}) != "", "протокол: курсор не в целых пикселях отвергнут")
 	_check(LinkProtocol.problem(LinkProtocol.button(1, true)) == "", "протокол: кнопка правильная")
 	_check(LinkProtocol.problem(LinkProtocol.button(5, true)) != "", "протокол: неизвестная кнопка отвергнута")
+	_check(LinkProtocol.problem(LinkProtocol.wheel(120, -240)) == "", "протокол: колесо правильное")
+	_check(LinkProtocol.problem(LinkProtocol.settings_message("[ray]
+x=1
+")) == "" and LinkProtocol.problem({"t": "settings", "text": 5}) != "",
+			"протокол: настройки — текст")
+	_check(LinkProtocol.problem(bytes_to_var(var_to_bytes(LinkProtocol.keys([17, 90])))) == "", "протокол: сочетание правильное")
+	_check(LinkProtocol.problem(LinkProtocol.keys([])) != "" and LinkProtocol.problem(LinkProtocol.keys([17, 999])) != "",
+			"протокол: пустое сочетание и чужая клавиша отвергнуты")
+	_check(LinkProtocol.problem(LinkProtocol.key(17, true)) == "" and LinkProtocol.problem({"t": "key", "vk": 0, "down": true}) != "",
+			"протокол: клавиша правильная, нулевая отвергнута")
 	# The headset's screen arc, loaded by path (headset/ is hidden from this project).
 	var arc: GDScript = load("res://headset/src/screen_arc.gd")
 	var placed: Dictionary = arc.place([
@@ -2078,7 +2084,7 @@ func _test_link_protocol() -> void:
 	var radius: float = -wide_placed["0"]["transform"].origin.z
 	_check(radius > arc.MIN_RADIUS and is_equal_approx(8.0 / radius, arc.MAX_ARC), "дуга: 8 мониторов — радиус растёт, дуга не больше 200°")
 	_check(arc.place([]).is_empty(), "дуга: без мониторов пусто")
-	# The headset reuses these pure classes as copies, like the protocol.
-	for file in ["pointer_math.gd", "cursor_filter.gd"]:
-		_check(FileAccess.get_file_as_string("res://src/" + file) == FileAccess.get_file_as_string("res://headset/src/" + file),
-				"шлем: копия %s совпадает" % file)
+	# The headset takes src/ through tools/sync_headset.ps1; its stand-ins for the
+	# PC module's classes live in headset/src/pc.
+	for stand_in: String in ["mouse_input", "screen_capture", "global_hotkey", "secure_desktop", "display_topology", "vdd_control"]:
+		_check(FileAccess.file_exists("res://headset/src/pc/%s.gd" % stand_in), "шлем: подмена %s есть" % stand_in)
