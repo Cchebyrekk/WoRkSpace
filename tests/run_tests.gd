@@ -2050,6 +2050,18 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem(LinkProtocol.button(1, true)) == "", "протокол: кнопка правильная")
 	_check(LinkProtocol.problem(LinkProtocol.button(5, true)) != "", "протокол: неизвестная кнопка отвергнута")
 	_check(LinkProtocol.problem(LinkProtocol.wheel(120, -240)) == "", "протокол: колесо правильное")
+	_check(HeadsetOptions.link_mode_name(HeadsetOptions.LINK_CABLE) == "только кабель" and HeadsetOptions.new().live_screens == 6,
+			"шлем: настройки связи и живых экранов по умолчанию")
+	_check(LinkProtocol.problem(bytes_to_var(var_to_bytes(LinkProtocol.call_message("topology", "arrange", [{"a": Vector2i(1, 2)}])))) == "",
+			"протокол: вызов раскладки правильный")
+	_check(LinkProtocol.problem(LinkProtocol.call_message("topology", "restore_layout_now")) != "",
+			"протокол: действие вне списка отвергнуто")
+	_check(LinkProtocol.problem(LinkProtocol.call_message("os", "execute")) != "", "протокол: чужая цель отвергнута")
+	_check(LinkProtocol.problem({"t": "call", "target": "vdd", "op": "apply", "args": 3}) != "", "протокол: аргументы не списком отвергнуты")
+	_check(LinkProtocol.problem(LinkProtocol.event("topology", "finished", [true, "arranged", ""])) == "", "протокол: событие правильное")
+	_check(LinkProtocol.problem(LinkProtocol.pc_state(true, false, true)) == "", "протокол: состояние ПК правильное")
+	_check(LinkProtocol.problem(LinkProtocol.secure_frame(PackedByteArray([1, 2]), Vector2i.ZERO, Vector2i(10, 10))) == "",
+			"протокол: кадр защищённого стола правильный")
 	_check(LinkProtocol.problem(LinkProtocol.settings_message("[ray]
 x=1
 ")) == "" and LinkProtocol.problem({"t": "settings", "text": 5}) != "",

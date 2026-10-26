@@ -10,6 +10,11 @@ config/name="WoRkPlace Headset"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.7", "Mobile")
 
+[debug]
+
+file_logging/enable_file_logging=true
+file_logging/max_log_files=20
+
 [rendering]
 
 renderer/rendering_method="mobile"

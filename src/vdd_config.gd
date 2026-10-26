@@ -5,6 +5,11 @@ class_name VddConfig
 ## is. parse_resolutions() and with_resolutions() are pure, covered by tests.
 
 const PATH := "C:/VirtualDisplayDriver/vdd_settings.xml"
+## In the headset (slice o5b) the file is on the PC: `remote_text` returns its
+## text as the PC last sent it, `remote_write` sends the list there and returns
+## "" (the PC's answer comes later). Unset on the PC.
+static var remote_text := Callable()
+static var remote_write := Callable()
 ## Offered on the settings panel; any other resolution already in the file is shown too.
 const PRESETS: Array[Vector2i] = [
 	Vector2i(1280, 720), Vector2i(1600, 900), Vector2i(1920, 1080), Vector2i(1920, 1200),
@@ -80,6 +85,8 @@ static func with_resolutions(text: String, resolutions: Array[Vector2i]) -> Stri
 
 
 static func read() -> Array[Vector2i]:
+	if remote_text.is_valid():
+		return parse_resolutions(remote_text.call())
 	if not FileAccess.file_exists(PATH):
 		return []
 	return parse_resolutions(FileAccess.get_file_as_string(PATH))
@@ -108,6 +115,8 @@ static func write(wanted: Array[Vector2i]) -> String:
 	if resolutions.is_empty():
 		return "нужно хотя бы одно разрешение"
 	resolutions = ordered(resolutions)
+	if remote_write.is_valid():
+		return remote_write.call(resolutions)
 	var text := FileAccess.get_file_as_string(PATH)
 	if text.is_empty() or _block.search(text) == null:
 		return "не удалось прочитать %s" % PATH

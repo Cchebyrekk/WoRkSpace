@@ -30,6 +30,7 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.DirectX.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -53,6 +54,12 @@ constexpr int SURFACES = 4;
 // With nothing changing on the desktop WGC sends no frames; the last picture is
 // encoded again this often, so a new headset gets one and the quality settles.
 constexpr auto REFRESH = std::chrono::milliseconds(1000);
+// After a new picture the same one is encoded again this many times, this far
+// apart: a decoder that keeps one frame back then shows the new one at once.
+constexpr int PUSH_REPEATS = 2;
+constexpr auto PUSH_INTERVAL = std::chrono::milliseconds(17);
+// The longest side H.264 hardware encoders take.
+constexpr int MAX_SIDE = 4096;
 
 struct Failure {
 	std::string what;
@@ -148,6 +155,11 @@ class MfStream : public StreamBackend {
 	int port = 0;
 	int bitrate_kbps = 0;
 	int fps = 0;
+	// The captured monitor (the picture texture), and the encoded frame: the same,
+	// or scaled down to MAX_SIDE keeping the shape (slice o5b: «Разрешение по
+	// клетке» made a 4632×3576 screen, which H.264 hardware cannot encode).
+	int capture_width = 0;
+	int capture_height = 0;
 	int width = 0;
 	int height = 0;
 
@@ -291,16 +303,19 @@ private:
 				"capture item");
 		winrt::Windows::Graphics::SizeInt32 size = item.Size();
 		// NV12 and H.264 want even sides.
-		width = size.Width & ~1;
-		height = size.Height & ~1;
-		if (width < 64 || height < 64 || width > 4096 || height > 4096) {
+		capture_width = size.Width & ~1;
+		capture_height = size.Height & ~1;
+		double scale = std::min(1.0, static_cast<double>(MAX_SIDE) / std::max(capture_width, capture_height));
+		width = static_cast<int>(capture_width * scale) & ~1;
+		height = static_cast<int>(capture_height * scale) & ~1;
+		if (width < 64 || height < 64) {
 			throw Failure{ "monitor " + std::to_string(size.Width) + "x" + std::to_string(size.Height) +
-				" is outside what H.264 hardware encodes (64..4096)" };
+				" is too small for H.264 hardware (64 at least)" };
 		}
 
 		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = static_cast<UINT>(width);
-		desc.Height = static_cast<UINT>(height);
+		desc.Width = static_cast<UINT>(capture_width);
+		desc.Height = static_cast<UINT>(capture_height);
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
 		desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -332,8 +347,8 @@ private:
 		D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
 		content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
 		content.InputFrameRate = { static_cast<UINT>(fps), 1 };
-		content.InputWidth = static_cast<UINT>(width);
-		content.InputHeight = static_cast<UINT>(height);
+		content.InputWidth = static_cast<UINT>(capture_width);
+		content.InputHeight = static_cast<UINT>(capture_height);
 		content.OutputFrameRate = { static_cast<UINT>(fps), 1 };
 		content.OutputWidth = static_cast<UINT>(width);
 		content.OutputHeight = static_cast<UINT>(height);
@@ -428,7 +443,10 @@ private:
 		MFSetAttributeRatio(out_type.get(), MF_MT_FRAME_RATE, fps, 1);
 		MFSetAttributeRatio(out_type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 		out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-		out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+		// Constrained Baseline: no frame reordering at all. With High the Quest's
+		// decoder held each frame until the next one came, so typed letters showed
+		// only with the next change (26.10.2026).
+		out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_ConstrainedBase);
 		out_type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
 		out_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
 		check(encoder->SetOutputType(0, out_type.get(), 0), "encoder output type");
@@ -491,6 +509,7 @@ private:
 	void loop() {
 		auto last_input = std::chrono::steady_clock::now() - REFRESH;
 		bool fresh = false;
+		int pushes = 0;
 		while (!stopping) {
 			accept_client();
 			pump_events();
@@ -498,9 +517,11 @@ private:
 				fresh = take_frame() || fresh;
 			}
 			auto now = std::chrono::steady_clock::now();
-			bool due = fresh || want_key_frame || now - last_input >= REFRESH;
+			bool push = pushes > 0 && now - last_input >= PUSH_INTERVAL;
+			bool due = fresh || want_key_frame || push || now - last_input >= REFRESH;
 			if (client != INVALID_SOCKET && have_picture && need_input > 0 && due) {
 				encode_picture();
+				pushes = fresh ? PUSH_REPEATS : (push ? pushes - 1 : 0);
 				fresh = false;
 				last_input = now;
 				continue;
@@ -530,10 +551,10 @@ private:
 		check(access->GetInterface(IID_PPV_ARGS(texture.put())), "frame texture");
 		D3D11_TEXTURE2D_DESC desc{};
 		texture->GetDesc(&desc);
-		if (static_cast<int>(desc.Width) < width || static_cast<int>(desc.Height) < height) {
+		if (static_cast<int>(desc.Width) < capture_width || static_cast<int>(desc.Height) < capture_height) {
 			return false; // The monitor changed size; the caller restarts the stream.
 		}
-		D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(width), static_cast<UINT>(height), 1 };
+		D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(capture_width), static_cast<UINT>(capture_height), 1 };
 		context->CopySubresourceRegion(picture.get(), 0, 0, 0, 0, texture.get(), 0, &box);
 		have_picture = true;
 		std::lock_guard<std::mutex> lock(stats_mutex);

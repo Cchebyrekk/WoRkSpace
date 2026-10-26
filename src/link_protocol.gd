@@ -23,10 +23,22 @@ const ASK := "WoRkPlace?"
 const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.
 const PING_SEC := 1.0
-const LINK_TIMEOUT_SEC := 4.0
+## 8 s: a driver restart (VDD «Применить») keeps the PC busy for a few seconds.
+const LINK_TIMEOUT_SEC := 8.0
 ## Control messages can be large (the settings file is ~30 KB): PacketPeerStream's
 ## buffers on both ends are made this big.
 const CHANNEL_BUFFER := 1 << 20
+
+## What the headset may ask the PC to run (slice o5b): target -> its operations.
+## Nothing else is run, whatever arrives. "topology" is DisplayTopology, "vdd"
+## VddControl, "vdd_config" VddConfig.write, "keyboard" MouseInput's recording.
+const CALLS := {
+	"topology": ["add_screen", "remove_screen", "arrange", "list_modes", "set_mode", "set_modes",
+			"count_instances", "save_layout", "restore_layout"],
+	"vdd": ["add_screen", "remove_screen", "apply"],
+	"vdd_config": ["write"],
+	"keyboard": ["start_key_recording", "stop_key_recording", "start_text_recording"],
+}
 
 ## Message types and the fields each must carry.
 const FIELDS := {
@@ -42,6 +54,11 @@ const FIELDS := {
 	"keys": ["keys"],
 	"key": ["vk", "down"],
 	"settings": ["text"],
+	"call": ["target", "op", "args"],
+	"event": ["target", "name", "args"],
+	"pc_state": ["agent", "secure", "vdd_installed"],
+	"vdd_config": ["text"],
+	"secure_frame": ["jpg", "x", "y", "w", "h"],
 	"bye": [],
 }
 
@@ -128,6 +145,32 @@ static func settings_message(text: String) -> Dictionary:
 	return {"t": "settings", "text": text}
 
 
+## The headset asks the PC to run `target`.`op`(`args`) (see CALLS).
+static func call_message(target: String, op: String, args: Array = []) -> Dictionary:
+	return {"t": "call", "target": target, "op": op, "args": args}
+
+
+## The PC tells the headset what one of its services did: a signal and its arguments.
+static func event(target: String, name: String, args: Array = []) -> Dictionary:
+	return {"t": "event", "target": target, "name": name, "args": args}
+
+
+## What the headset cannot see itself: whether the input agent is there, whether
+## the secure desktop (UAC, lock screen) is up, whether the VDD helper is installed.
+static func pc_state(agent: bool, secure: bool, vdd_installed: bool) -> Dictionary:
+	return {"t": "pc_state", "agent": agent, "secure": secure, "vdd_installed": vdd_installed}
+
+
+## The driver's settings file (VddConfig.PATH) as text, "" if there is none.
+static func vdd_config(text: String) -> Dictionary:
+	return {"t": "vdd_config", "text": text}
+
+
+## A picture of the secure desktop (JPEG) and where it is on the virtual desktop.
+static func secure_frame(jpg: PackedByteArray, origin: Vector2i, size: Vector2i) -> Dictionary:
+	return {"t": "secure_frame", "jpg": jpg, "x": origin.x, "y": origin.y, "w": size.x, "h": size.y}
+
+
 static func ping(time: float) -> Dictionary:
 	return {"t": "ping", "time": time}
 
@@ -164,6 +207,21 @@ static func problem(message: Variant) -> String:
 		return "pointer с плохими полями"
 	if type == "button" and not (message["b"] is int and int(message["b"]) >= 0 and int(message["b"]) <= 2 and message["down"] is bool):
 		return "button с плохими полями"
+	if type == "call":
+		if not message["target"] is String or not CALLS.has(message["target"]):
+			return "call: чужая цель %s" % str(message["target"])
+		if not message["op"] is String or not (message["op"] in CALLS[message["target"]]):
+			return "call: чужое действие %s" % str(message["op"])
+		if not message["args"] is Array:
+			return "call: аргументы не список"
+	if type == "event" and not (message["target"] is String and message["name"] is String and message["args"] is Array):
+		return "event с плохими полями"
+	if type == "pc_state" and not (message["agent"] is bool and message["secure"] is bool and message["vdd_installed"] is bool):
+		return "pc_state с плохими полями"
+	if type == "vdd_config" and not message["text"] is String:
+		return "vdd_config не текст"
+	if type == "secure_frame" and not message["jpg"] is PackedByteArray:
+		return "secure_frame без картинки"
 	if type == "settings" and not message["text"] is String:
 		return "settings не текст"
 	if type == "wheel" and not (message["up"] is int and message["right"] is int):

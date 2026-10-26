@@ -6,8 +6,13 @@ extends RefCounted
 ## gives an app 6 hardware decoders (slice o4): the panels nearest the gaze are
 ## live, the others keep their last frame.
 
-const MAX_LIVE := 6
+## Without the world's settings yet (HeadsetOptions.live_screens is the user's).
+const DEFAULT_LIVE := 6
 const LIVE_CHECK_SEC := 0.3
+## A live panel keeps its place until another is this much nearer the gaze
+## (radians, 10°): on the edge two panels took turns every few seconds, each
+## time a new connection and a key frame (26.10.2026).
+const LIVE_STICKINESS := 0.17
 
 ## com.workplace.headset.VideoReceiver, null off Android.
 var _receiver: Variant = null
@@ -16,8 +21,17 @@ var _attached: Dictionary = {}
 var _next_id := 1
 var _live: Dictionary = {}
 var _next_live_check := 0.0
-## The streams offered when the attached receivers were started (a change restarts them).
-var _videos_signature := ""
+## The stream list the attached receivers were started for (a new one restarts them).
+var _videos_serial := -1
+## A receiver whose stream ended is started again after this, doubling with each
+## failure in a row up to RETRY_MAX_SEC (each try makes a decoder: trying every
+## second with too many screens live made the headset stall, 26.10.2026).
+const RETRY_SEC := 1.0
+const RETRY_MAX_SEC := 30.0
+## How many decoders this headset gives at once, learnt from the first refusal
+## (the user's setting may ask for more); learnt again when the setting changes.
+var _decoder_limit := 1 << 30
+var _limit_for_setting := -1
 
 
 func _init() -> void:
@@ -54,17 +68,42 @@ func poll(now: float, camera: Camera3D) -> void:
 	if _receiver == null:
 		return
 	var videos := PcLink.link.videos if PcLink.link != null else []
-	var signature := str(videos)
-	if signature != _videos_signature:
-		_videos_signature = signature
+	var serial := PcLink.link.videos_serial if PcLink.link != null else 0
+	if serial != _videos_serial:
+		_videos_serial = serial
 		for key: String in _attached:
 			_stop(_attached[key])
+	# A stream that ended (the PC restarted it, the connection broke) leaves its
+	# panel frozen while it still counts as live (26.10.2026): it starts again,
+	# later each time it fails. A decoder refused means the headset has no more:
+	# fewer panels stay live from then on.
+	for key: String in _attached:
+		var screen: Dictionary = _attached[key]
+		if not screen["started"]:
+			continue
+		if _receiver.isAlive(screen["id"]):
+			# Showing pictures again: the next failure waits the shortest time.
+			if screen.get("failures", 0) > 0 and _receiver.framesShown(screen["id"]) > 0:
+				screen["failures"] = 0
+			continue
+		var failures: int = screen.get("failures", 0) + 1
+		screen["failures"] = failures
+		screen["retry_at"] = now + minf(RETRY_SEC * pow(2.0, failures - 1), RETRY_MAX_SEC)
+		if _receiver.decoderFailed(screen["id"]):
+			var working := _working_count()
+			if working < _decoder_limit:
+				_decoder_limit = maxi(working, 1)
+				print("[video] шлем дал только %d декодеров — живых экранов будет не больше" % _decoder_limit)
+		else:
+			print("[video] %s: поток прервался (%s), снова через %.0f с" % [key, _receiver.status(screen["id"]),
+					screen["retry_at"] - now])
+		_stop(screen)
 	if now >= _next_live_check and camera != null:
 		_next_live_check = now + LIVE_CHECK_SEC
 		_choose_live(camera)
 	for key: String in _attached:
 		var screen: Dictionary = _attached[key]
-		if screen["started"] or not _live.has(key):
+		if screen["started"] or not _live.has(key) or now < screen.get("retry_at", 0.0):
 			continue
 		var port := _port_of(videos, key)
 		var layer: OpenXRCompositionLayer = screen["layer"]
@@ -93,6 +132,15 @@ func stop_all() -> void:
 		_attached[key]["started"] = false
 
 
+## Receivers decoding now.
+func _working_count() -> int:
+	var count := 0
+	for key: String in _attached:
+		if _attached[key]["started"] and _receiver.isAlive(_attached[key]["id"]):
+			count += 1
+	return count
+
+
 ## A line for the status: how many panels decode and the slowest decoder.
 func describe() -> String:
 	var live := 0
@@ -114,10 +162,19 @@ func _choose_live(camera: Camera3D) -> void:
 	for key: String in _attached:
 		var layer: OpenXRCompositionLayer = _attached[key]["layer"]
 		if is_instance_valid(layer):
-			ranked.append([forward.angle_to(layer.global_position - eye), key])
+			var angle := forward.angle_to(layer.global_position - eye)
+			if _attached[key]["started"]:
+				angle -= LIVE_STICKINESS
+			if key == PcLink.cursor_key:
+				angle = -INF
+			ranked.append([angle, key])
 	ranked.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
 	_live.clear()
-	for i in mini(MAX_LIVE, ranked.size()):
+	var wanted := HeadsetOptions.current.live_screens if HeadsetOptions.current != null else DEFAULT_LIVE
+	if wanted != _limit_for_setting:
+		_limit_for_setting = wanted
+		_decoder_limit = 1 << 30
+	for i in mini(mini(wanted, _decoder_limit), ranked.size()):
 		_live[ranked[i][1]] = true
 	for key: String in _attached:
 		if not _live.has(key):

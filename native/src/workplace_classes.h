@@ -149,6 +149,7 @@ class SecureDesktop : public RefCounted {
 
 	uint32_t last_sequence = 0xFFFFFFFF; // anything but a real sequence, so the first frame reads
 	Ref<ImageTexture> texture;
+	Ref<Image> image;
 	Vector2i frame_size;
 	Vector2i frame_origin;
 
@@ -159,6 +160,8 @@ public:
 	// Reads the latest frame if a new one is ready; true when the texture changed.
 	bool update();
 	Ref<ImageTexture> get_texture() const;
+	// The same frame as an image (slice o5b: the link server sends it to the headset).
+	Ref<Image> get_image() const;
 	// The captured monitor's size in pixels and its top-left on the virtual desktop.
 	Vector2i get_frame_size() const;
 	Vector2i get_frame_origin() const;

@@ -22,9 +22,15 @@ var rtt_ms := -1.0
 ## `videos_changed` is set when the list is new.
 var videos: Array = []
 var videos_changed := false
+## Grows with every stream list the PC sends, even an unchanged one: the PC
+## sends it after restarting its streams, and the receivers must connect again.
+var videos_serial := 0
 ## The PC app's settings file as it sent it ("" until then); `settings_changed` on arrival.
 var pc_settings := ""
 var settings_changed := false
+## Messages for the stand-ins of the PC's services (event, pc_state, vdd_config,
+## secure_frame), in order; PcLink.dispatch takes them every frame.
+var inbox: Array[Dictionary] = []
 
 var _device := ""
 var _udp := PacketPeerUDP.new()
@@ -93,12 +99,22 @@ func _search(now: float) -> void:
 	if now < _next_search:
 		return
 	_next_search = now + SEARCH_SEC
+	var mode := _mode()
+	if mode == HeadsetOptions.LINK_CABLE:
+		_connect(LOCALHOST, LinkProtocol.CONTROL_PORT, now)
+		return
 	for address in _broadcast_addresses():
 		_udp.set_dest_address(address, LinkProtocol.DISCOVERY_PORT)
 		_udp.put_packet(LinkProtocol.ask_packet())
 	# Over the cable the PC is reachable here after `adb reverse`; the attempt
 	# fails at once when nothing listens, so it can go every round.
-	_connect(LOCALHOST, LinkProtocol.CONTROL_PORT, now)
+	if mode == HeadsetOptions.LINK_AUTO:
+		_connect(LOCALHOST, LinkProtocol.CONTROL_PORT, now)
+
+
+## The user's choice (HeadsetOptions.link_mode), "either way" before the world has it.
+func _mode() -> int:
+	return HeadsetOptions.current.link_mode if HeadsetOptions.current != null else HeadsetOptions.LINK_AUTO
 
 
 ## The general broadcast, and the /24 one of each local address in case the
@@ -145,6 +161,12 @@ func _connecting(now: float) -> void:
 
 
 func _connected(now: float) -> void:
+	# The user switched to the other way: this connection goes, the next is found.
+	var mode := _mode()
+	var cable := pc_address == LOCALHOST
+	if (mode == HeadsetOptions.LINK_CABLE and not cable) or (mode == HeadsetOptions.LINK_WIFI and cable):
+		_reset("связь переключена на «%s»" % HeadsetOptions.link_mode_name(mode))
+		return
 	_tcp.poll()
 	if _tcp.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		_reset("связь с %s оборвалась" % pc_address)
@@ -170,7 +192,10 @@ func _connected(now: float) -> void:
 			"videos":
 				videos = message["videos"]
 				videos_changed = true
+				videos_serial += 1
 				print("[link] ПК показывает мониторов: %d" % videos.size())
+			"event", "pc_state", "vdd_config", "secure_frame":
+				inbox.append(message)
 			"settings":
 				pc_settings = message["text"]
 				settings_changed = true

@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $source = Join-Path $root "src"
 $target = Join-Path $root "headset\shared"
-$pcOnly = @("link_server.gd", "display_topology.gd", "vdd_control.gd")
+$pcOnly = @("link_server.gd", "display_topology.gd", "vdd_control.gd", "input_worker.gd")
 New-Item -ItemType Directory -Force $target | Out-Null
 # Scripts gone from src/ must go from shared/ too (their .uid files with them).
 Get-ChildItem $target -Filter *.gd | Where-Object {

@@ -206,7 +206,8 @@ func _make_layer(curved: bool) -> void:
 	layer = OpenXRCompositionLayerCylinder.new() if curved else OpenXRCompositionLayerQuad.new()
 	if _video:
 		layer.use_android_surface = true
-		layer.android_surface_size = monitor_rect.size
+		# The PC encodes at most 4096 on a side too (native video_stream.cpp).
+		layer.android_surface_size = layer_size(monitor_rect.size)
 	else:
 		layer.layer_viewport = _viewport
 	if _hole_punch:

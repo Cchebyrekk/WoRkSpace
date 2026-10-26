@@ -35,6 +35,8 @@ public final class VideoReceiver {
 	private volatile double decodeMs;
 	private volatile int width;
 	private volatile int height;
+	/** The decoder could not be made or started (the Quest ran out of decoders), not the network. */
+	private volatile boolean decoderFailed;
 
 	private VideoReceiver() {
 	}
@@ -82,6 +84,17 @@ public final class VideoReceiver {
 
 	private static synchronized VideoReceiver get(int id) {
 		return receivers.get(id);
+	}
+
+	/** Whether the receiver under `id` still receives (false once its stream ended or failed). */
+	public static boolean decoderFailed(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver != null && receiver.decoderFailed;
+	}
+
+	public static boolean isAlive(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver != null && receiver.running;
 	}
 
 	/** What the receiver is doing, or why it stopped. */
@@ -153,9 +166,14 @@ public final class VideoReceiver {
 			// realtime capacity and refused the 7th decoder (NO_MEMORY, slice o4).
 			// Qualcomm's own switch for the same; unknown keys are ignored.
 			format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
-			decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-			decoder.configure(format, surface, null, 0);
-			decoder.start();
+			try {
+				decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+				decoder.configure(format, surface, null, 0);
+				decoder.start();
+			} catch (Exception e) {
+				decoderFailed = true;
+				throw e;
+			}
 			status = "показываю " + width + "×" + height;
 
 			MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();

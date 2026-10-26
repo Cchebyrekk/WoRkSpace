@@ -171,6 +171,8 @@ const TUNABLES := [
 	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
 	["world", "option_lists", "Выбор вариантов в настройках", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
+	["headset", "live_screens", "Живых экранов", 1.0, "", 1.0, 1.0, 16.0],
+	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "flight_sec", "Перелёт к месту", 1.0, "с", 0.1, 0.0, 2.0],
@@ -214,7 +216,7 @@ const MONITOR_MENU_FORWARD := 0.25
 const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Миры", "Меню"]
 ## Subheadings over the rows they start (the user's wish, 22.10.2026: to find things at a glance).
 const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауза", "swipe_mode": "Смахивание и масштаб",
-	"drop": "Покой", "fist_curl": "Кулак и движение рукой",
+	"drop": "Покой", "live_screens": "Шлем (своя связь)", "fist_curl": "Кулак и движение рукой",
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
 	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
@@ -225,6 +227,7 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
+	"live_screens": 2, "link_mode": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
 	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
 	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7, "edit_step": 7, "edit_turn_degrees": 7,
@@ -722,6 +725,8 @@ var _move_hand := 0
 ## The world (slice i): its settings, the floor's height (gravity walks on it), the
 ## orientation dots, the floor, the comfort vignette and what moved last frame.
 var _world := Locomotion.Options.new()
+## Only the headset app uses these (slice o5c: decoded screens, the way to the PC).
+var _headset_options := HeadsetOptions.new()
 var _floor_height := 0.0
 var _grid: MultiMeshInstance3D
 var _grid_key := ""
@@ -1090,6 +1095,7 @@ var _session_loss := SessionLossLogger.new()
 
 func _ready() -> void:
 	OS.add_logger(_session_loss)
+	HeadsetOptions.current = _headset_options
 	_build_world()
 	_build_rig()
 	_build_world_visuals()
@@ -7947,6 +7953,8 @@ func _tunable_target(section: String) -> Object:
 			return _pause
 		"world":
 			return _world
+		"headset":
+			return _headset_options
 	return _cursor_filter
 
 
@@ -8086,6 +8094,10 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "гравитация" if value >= 0.5 else "космос"
 	elif tunable[1] == "wall_resolution":
 		return "да (экспериментально)" if value >= 0.5 else "нет, только масштаб"
+	elif tunable[1] == "link_mode":
+		return HeadsetOptions.link_mode_name(roundi(value))
+	elif tunable[1] == "live_screens":
+		return "%d (больше 6 — проверить)" % roundi(value) if value > 6.5 else "%d" % roundi(value)
 	elif tunable[1] == "handles_mode":
 		return "только в режиме редактирования" if value >= 0.5 else "всегда"
 	elif tunable[1] == "wall_slide_hand":

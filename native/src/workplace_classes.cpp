@@ -375,6 +375,7 @@ bool GlobalHotkey::consume_pressed() {
 void SecureDesktop::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("update"), &SecureDesktop::update);
 	ClassDB::bind_method(D_METHOD("get_texture"), &SecureDesktop::get_texture);
+	ClassDB::bind_method(D_METHOD("get_image"), &SecureDesktop::get_image);
 	ClassDB::bind_method(D_METHOD("get_frame_size"), &SecureDesktop::get_frame_size);
 	ClassDB::bind_method(D_METHOD("get_frame_origin"), &SecureDesktop::get_frame_origin);
 }
@@ -393,10 +394,11 @@ bool SecureDesktop::update() {
 	PackedByteArray data;
 	data.resize(static_cast<int64_t>(buffer.size()));
 	memcpy(data.ptrw(), buffer.data(), buffer.size());
-	Ref<Image> image = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
-	if (image.is_null()) {
+	Ref<Image> frame = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
+	if (frame.is_null()) {
 		return false;
 	}
+	image = frame;
 	if (texture.is_null() || frame_size != Vector2i(width, height)) {
 		texture = ImageTexture::create_from_image(image);
 	} else {
@@ -405,6 +407,10 @@ bool SecureDesktop::update() {
 	frame_size = Vector2i(width, height);
 	frame_origin = Vector2i(origin_x, origin_y);
 	return true;
+}
+
+Ref<Image> SecureDesktop::get_image() const {
+	return image;
 }
 
 Ref<ImageTexture> SecureDesktop::get_texture() const {
