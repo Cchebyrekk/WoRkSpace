@@ -27,6 +27,12 @@ static var restart_world := false
 ## The monitor the PC's cursor is on (its key, "" if none): its screen is always
 ## decoded, whatever the gaze (VideoScreens), or the cursor seemed frozen there.
 static var cursor_key := ""
+## Thumbnails (slice o5c): monitor key -> its texture, the same object for the
+## whole run (panels keep it), updated as pictures come. `thumbs_live` counts the
+## panels that want theirs now; while it is above 0 the PC sends them.
+static var thumb_textures: Dictionary = {}
+static var thumbs_live := 0
+static var _thumbs_asked := false
 
 
 ## The PC's monitors (LinkProtocol.monitor entries), [] without a PC.
@@ -59,10 +65,27 @@ static func monitor_at(pixel: Vector2i) -> Dictionary:
 	return {}
 
 
+## The texture monitor `key`'s thumbnail goes into (dark until the first picture).
+static func thumb_texture(key: String) -> ImageTexture:
+	if not thumb_textures.has(key):
+		var dark := Image.create(16, 9, false, Image.FORMAT_RGBA8)
+		dark.fill(Color(0.11, 0.12, 0.14))
+		thumb_textures[key] = ImageTexture.create_from_image(dark)
+	return thumb_textures[key]
+
+
 ## Every frame: what the PC sent for the services.
 static func dispatch() -> void:
 	if link == null:
 		return
+	# Ask the PC for thumbnails when the first panel wants one, stop after the last
+	# (and ask again on a new connection: the PC forgets with the old one).
+	var want := thumbs_live > 0 and connected()
+	if not connected():
+		_thumbs_asked = false
+	elif want != _thumbs_asked:
+		_thumbs_asked = want
+		call_pc("thumbs", "start" if want else "stop")
 	var messages := link.inbox
 	link.inbox = []
 	for message in messages:
@@ -80,6 +103,14 @@ static func dispatch() -> void:
 			"vdd_config":
 				vdd_config = message["text"]
 				has_vdd_config = true
+			"thumb":
+				var picture := Image.new()
+				if picture.load_jpg_from_buffer(message["jpg"]) == OK:
+					var texture := thumb_texture(message["key"])
+					if texture.get_size() == Vector2(picture.get_size()):
+						texture.update(picture)
+					else:
+						texture.set_image(picture)
 			"secure_frame":
 				var image := Image.new()
 				if image.load_jpg_from_buffer(message["jpg"]) == OK:

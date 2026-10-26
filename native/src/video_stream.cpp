@@ -147,6 +147,12 @@ class MfStream : public StreamBackend {
 	std::thread thread;
 	std::atomic<bool> stopping{ false };
 	std::atomic<bool> alive{ false };
+	// Snapshots (request_snapshot): the width asked for, 0 if none; the last made,
+	// under stats_mutex.
+	std::atomic<int32_t> snapshot_width{ 0 };
+	std::vector<uint8_t> snapshot;
+	int32_t snapshot_size[2] = { 0, 0 };
+	winrt::com_ptr<ID3D11Texture2D> staging;
 	mutable std::mutex stats_mutex;
 	StreamStats shared_stats;
 
@@ -234,6 +240,20 @@ public:
 	}
 
 	bool running() const override { return alive.load(); }
+
+	void request_snapshot(int32_t p_width) override { snapshot_width = p_width; }
+
+	bool take_snapshot(std::vector<uint8_t> &rgba, int32_t &p_width, int32_t &p_height) override {
+		std::lock_guard<std::mutex> lock(stats_mutex);
+		if (snapshot.empty()) {
+			return false;
+		}
+		rgba.swap(snapshot);
+		snapshot.clear();
+		p_width = snapshot_size[0];
+		p_height = snapshot_size[1];
+		return true;
+	}
 
 	StreamStats stats() const override {
 		std::lock_guard<std::mutex> lock(stats_mutex);
@@ -516,6 +536,9 @@ private:
 			if (WaitForSingleObject(frame_event, 0) == WAIT_OBJECT_0) {
 				fresh = take_frame() || fresh;
 			}
+			if (snapshot_width > 0 && have_picture) {
+				make_snapshot(snapshot_width.exchange(0));
+			}
 			auto now = std::chrono::steady_clock::now();
 			bool push = pushes > 0 && now - last_input >= PUSH_INTERVAL;
 			bool due = fresh || want_key_frame || push || now - last_input >= REFRESH;
@@ -560,6 +583,50 @@ private:
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		shared_stats.frames_captured++;
 		return true;
+	}
+
+	// Reads `picture` back to the CPU and scales it down (each target pixel the
+	// average of a 2×2 sample of its source area: thin text stays visible).
+	void make_snapshot(int32_t target_width) {
+		if (!staging) {
+			D3D11_TEXTURE2D_DESC desc{};
+			picture->GetDesc(&desc);
+			desc.Usage = D3D11_USAGE_STAGING;
+			desc.BindFlags = 0;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+			desc.MiscFlags = 0;
+			check(device->CreateTexture2D(&desc, nullptr, staging.put()), "snapshot texture");
+		}
+		context->CopyResource(staging.get(), picture.get());
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		check(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped), "snapshot map");
+		int w = std::max(1, std::min(target_width, capture_width));
+		int h = std::max(1, static_cast<int>(static_cast<int64_t>(capture_height) * w / capture_width));
+		std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
+		const uint8_t *source = static_cast<const uint8_t *>(mapped.pData);
+		for (int y = 0; y < h; y++) {
+			for (int x = 0; x < w; x++) {
+				int sum[3] = { 0, 0, 0 };
+				for (int k = 0; k < 4; k++) {
+					int sx = std::min(capture_width - 1, static_cast<int>((x + 0.25 + 0.5 * (k & 1)) * capture_width / w));
+					int sy = std::min(capture_height - 1, static_cast<int>((y + 0.25 + 0.5 * (k >> 1)) * capture_height / h));
+					const uint8_t *pixel = source + static_cast<size_t>(sy) * mapped.RowPitch + static_cast<size_t>(sx) * 4;
+					sum[0] += pixel[2];
+					sum[1] += pixel[1];
+					sum[2] += pixel[0];
+				}
+				uint8_t *out = rgba.data() + (static_cast<size_t>(y) * w + x) * 4;
+				out[0] = static_cast<uint8_t>(sum[0] / 4);
+				out[1] = static_cast<uint8_t>(sum[1] / 4);
+				out[2] = static_cast<uint8_t>(sum[2] / 4);
+				out[3] = 255;
+			}
+		}
+		context->Unmap(staging.get(), 0);
+		std::lock_guard<std::mutex> lock(stats_mutex);
+		snapshot.swap(rgba);
+		snapshot_size[0] = w;
+		snapshot_size[1] = h;
 	}
 
 	void encode_picture() {
@@ -806,6 +873,7 @@ private:
 		video_context = nullptr;
 		video_device = nullptr;
 		picture = nullptr;
+		staging = nullptr;
 		have_picture = false;
 		winrt_device = nullptr;
 		context = nullptr;

@@ -28,7 +28,7 @@ var videos_serial := 0
 ## The PC app's settings file as it sent it ("" until then); `settings_changed` on arrival.
 var pc_settings := ""
 var settings_changed := false
-## Messages for the stand-ins of the PC's services (event, pc_state, vdd_config,
+## Messages for the stand-ins of the PC's services (event, pc_state, vdd_config, thumb,
 ## secure_frame), in order; PcLink.dispatch takes them every frame.
 var inbox: Array[Dictionary] = []
 
@@ -194,7 +194,7 @@ func _connected(now: float) -> void:
 				videos_changed = true
 				videos_serial += 1
 				print("[link] ПК показывает мониторов: %d" % videos.size())
-			"event", "pc_state", "vdd_config", "secure_frame":
+			"event", "pc_state", "vdd_config", "secure_frame", "thumb":
 				inbox.append(message)
 			"settings":
 				pc_settings = message["text"]

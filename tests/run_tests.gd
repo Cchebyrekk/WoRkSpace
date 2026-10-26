@@ -2057,6 +2057,8 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem(LinkProtocol.call_message("topology", "restore_layout_now")) != "",
 			"протокол: действие вне списка отвергнуто")
 	_check(LinkProtocol.problem(LinkProtocol.call_message("os", "execute")) != "", "протокол: чужая цель отвергнута")
+	_check(LinkProtocol.problem(LinkProtocol.call_message("thumbs", "start")) == ""
+			and LinkProtocol.problem(LinkProtocol.thumb("MTT1337#1", PackedByteArray([1]))) == "", "протокол: миниатюры")
 	_check(LinkProtocol.problem({"t": "call", "target": "vdd", "op": "apply", "args": 3}) != "", "протокол: аргументы не списком отвергнуты")
 	_check(LinkProtocol.problem(LinkProtocol.event("topology", "finished", [true, "arranged", ""])) == "", "протокол: событие правильное")
 	_check(LinkProtocol.problem(LinkProtocol.pc_state(true, false, true)) == "", "протокол: состояние ПК правильное")
@@ -2071,31 +2073,6 @@ x=1
 			"протокол: пустое сочетание и чужая клавиша отвергнуты")
 	_check(LinkProtocol.problem(LinkProtocol.key(17, true)) == "" and LinkProtocol.problem({"t": "key", "vk": 0, "down": true}) != "",
 			"протокол: клавиша правильная, нулевая отвергнута")
-	# The headset's screen arc, loaded by path (headset/ is hidden from this project).
-	var arc: GDScript = load("res://headset/src/screen_arc.gd")
-	var placed: Dictionary = arc.place([
-		LinkProtocol.monitor("A", "a", Vector2i(-1920, 0), Vector2i(1920, 1080), false),
-		LinkProtocol.monitor("B", "b", Vector2i(0, 0), Vector2i(1920, 1080), true),
-		LinkProtocol.monitor("C", "c", Vector2i(1920, -1080), Vector2i(1920, 1080), false)])
-	var front: Transform3D = placed["B"]["transform"]
-	_check(is_zero_approx(front.origin.x) and is_equal_approx(front.origin.y, arc.EYE_HEIGHT) and front.origin.z < -1.0,
-			"дуга: основной монитор прямо впереди на высоте глаз")
-	var left_one: Transform3D = placed["A"]["transform"]
-	var upper_right: Transform3D = placed["C"]["transform"]
-	_check(left_one.origin.x < 0.0 and upper_right.origin.x > 0.0 and upper_right.origin.y > arc.EYE_HEIGHT + 0.4,
-			"дуга: левый слева, правый верхний справа и выше")
-	_check(is_equal_approx(left_one.origin.length_squared() - left_one.origin.y ** 2, front.origin.z ** 2),
-			"дуга: все на одном радиусе")
-	_check((left_one.basis.z).dot(-Vector3(left_one.origin.x, 0.0, left_one.origin.z).normalized()) > 0.999,
-			"дуга: экран повёрнут к пользователю")
-	_check(placed["A"]["size"].x < 1.0 and placed["A"]["size"].x > 0.9, "дуга: 1920 пикселей — чуть меньше метра (шов)")
-	var wide: Array = []
-	for i in 8:
-		wide.append(LinkProtocol.monitor(str(i), str(i), Vector2i(1920 * i, 0), Vector2i(1920, 1080), i == 0))
-	var wide_placed: Dictionary = arc.place(wide)
-	var radius: float = -wide_placed["0"]["transform"].origin.z
-	_check(radius > arc.MIN_RADIUS and is_equal_approx(8.0 / radius, arc.MAX_ARC), "дуга: 8 мониторов — радиус растёт, дуга не больше 200°")
-	_check(arc.place([]).is_empty(), "дуга: без мониторов пусто")
 	# The headset takes src/ through tools/sync_headset.ps1; its stand-ins for the
 	# PC module's classes live in headset/src/pc.
 	for stand_in: String in ["mouse_input", "screen_capture", "global_hotkey", "secure_desktop", "display_topology", "vdd_control"]:

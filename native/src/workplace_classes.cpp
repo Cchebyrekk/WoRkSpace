@@ -31,6 +31,8 @@ void ScreenStreamer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_running"), &ScreenStreamer::is_running);
 	ClassDB::bind_method(D_METHOD("get_stats"), &ScreenStreamer::get_stats);
 	ClassDB::bind_method(D_METHOD("get_last_error"), &ScreenStreamer::get_last_error);
+	ClassDB::bind_method(D_METHOD("request_snapshot", "width"), &ScreenStreamer::request_snapshot);
+	ClassDB::bind_method(D_METHOD("get_snapshot"), &ScreenStreamer::get_snapshot);
 }
 
 ScreenStreamer::~ScreenStreamer() {
@@ -88,6 +90,25 @@ Dictionary ScreenStreamer::get_stats() const {
 
 String ScreenStreamer::get_last_error() const {
 	return last_error;
+}
+
+void ScreenStreamer::request_snapshot(int p_width) {
+	if (backend) {
+		backend->request_snapshot(p_width);
+	}
+}
+
+Ref<Image> ScreenStreamer::get_snapshot() {
+	std::vector<uint8_t> rgba;
+	int32_t width = 0;
+	int32_t height = 0;
+	if (!backend || !backend->take_snapshot(rgba, width, height)) {
+		return Ref<Image>();
+	}
+	PackedByteArray data;
+	data.resize(static_cast<int64_t>(rgba.size()));
+	memcpy(data.ptrw(), rgba.data(), rgba.size());
+	return Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
 }
 
 ScreenCapture::~ScreenCapture() {

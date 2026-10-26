@@ -3,13 +3,14 @@ extends RefCounted
 ## Headset stand-in for the PC module's ScreenCapture (slice o5), so that
 ## main.gd and ScreenPanel run here unchanged: the monitor list comes over the
 ## link, and the picture is the PC's video stream decoded straight into the
-## panel's layer (ScreenPanel asks for that through attach_layer). There is no
-## texture: thumbnails stay empty.
+## panel's layer (ScreenPanel asks for that through attach_layer). The texture
+## is the thumbnail the PC sends while the plane of groups shows it (slice o5c).
 
 var _key := ""
 var _size := Vector2i.ZERO
 var _running := false
 var _error := ""
+var _thumb_live := false
 
 
 ## Like the module's: name, position, size, primary, path. The path is the
@@ -42,6 +43,7 @@ func attach_layer(layer: OpenXRCompositionLayer) -> void:
 func stop() -> void:
 	if _running and PcLink.screens != null:
 		PcLink.screens.detach(_key)
+	set_thumbnail_live(false)
 	_running = false
 
 
@@ -54,7 +56,14 @@ func update() -> void:
 
 
 func get_texture() -> Texture2D:
-	return null
+	return PcLink.thumb_texture(_key)
+
+
+## ScreenPanel.set_thumbnail_live passes this on: the PC sends pictures meanwhile.
+func set_thumbnail_live(live: bool) -> void:
+	if live != _thumb_live:
+		_thumb_live = live
+		PcLink.thumbs_live += 1 if live else -1
 
 
 func get_size() -> Vector2i:

@@ -456,6 +456,9 @@ func thumbnail() -> Texture2D:
 
 
 func set_thumbnail_live(live: bool) -> void:
+	if _video:
+		# In the headset the picture comes from the PC, which sends it only on demand.
+		capture.call(&"set_thumbnail_live", live)
 	if _thumb != null:
 		_thumb.render_target_update_mode = SubViewport.UPDATE_ALWAYS if live else SubViewport.UPDATE_DISABLED
 

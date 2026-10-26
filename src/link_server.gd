@@ -41,6 +41,13 @@ const ADB_CHECK_SEC := 5.0
 ## Control, then a video port for each of up to 16 monitors.
 const REVERSED_PORTS := 17
 var _adb_path := ""
+## Thumbnails (slice o5c): while the headset shows the plane of groups, every
+## THUMB_SEC each stream makes a small picture, sent as JPEG.
+const THUMB_SEC := 0.5
+const THUMB_WIDTH := 480
+const THUMB_JPEG_QUALITY := 0.7
+var _thumbs_on := false
+var _next_thumbs := 0.0
 var _adb_thread: Thread
 var _next_adb := 0.0
 ## Monitor key -> its ScreenStreamer.
@@ -130,6 +137,8 @@ func _process(_delta: float) -> void:
 			_adb_thread.wait_to_finish()
 		_adb_thread = Thread.new()
 		_adb_thread.start(_reverse_over_usb)
+	if _connected() and _thumbs_on:
+		_send_thumbs(now)
 	if _connected():
 		_send_state(secure)
 		_send_recording()
@@ -243,6 +252,7 @@ func _drop(why: String) -> void:
 	_tcp = null
 	_channel = null
 	_device = ""
+	_thumbs_on = false
 	for b: int in _buttons_down:
 		_input.push(LinkProtocol.button(b, false))
 	_buttons_down.clear()
@@ -294,6 +304,9 @@ func _run_call(target: String, op: String, args: Array) -> void:
 			var problem := VddConfig.write(wanted)
 			_event("vdd_config", "written", [problem])
 			_send_vdd_config()
+		"thumbs":
+			_thumbs_on = op == "start"
+			_next_thumbs = 0.0
 		"keyboard":
 			match op:
 				"start_key_recording":
@@ -305,6 +318,18 @@ func _run_call(target: String, op: String, args: Array) -> void:
 					_recording = false
 			_recording_sent = {}
 			_event("keyboard", "started", [_recording])
+
+
+## Sends the pictures the streams have made and asks for the next ones.
+func _send_thumbs(now: float) -> void:
+	for key: String in _streamers:
+		var image: Image = _streamers[key].get_snapshot()
+		if image != null:
+			_send(LinkProtocol.thumb(key, image.save_jpg_to_buffer(THUMB_JPEG_QUALITY)))
+	if now >= _next_thumbs:
+		_next_thumbs = now + THUMB_SEC
+		for key: String in _streamers:
+			_streamers[key].request_snapshot(THUMB_WIDTH)
 
 
 func _event(target: String, name: String, args: Array) -> void:

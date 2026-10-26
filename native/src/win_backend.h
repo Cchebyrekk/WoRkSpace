@@ -69,6 +69,11 @@ public:
 	virtual void stop() = 0;
 	virtual bool running() const = 0;
 	virtual StreamStats stats() const = 0;
+	// A small CPU copy of the current picture (slice o5c: thumbnails for the
+	// headset), `width` pixels wide with the monitor's shape. Asked for here, made
+	// on the stream's thread, taken with take_snapshot (RGBA8, false if none yet).
+	virtual void request_snapshot(int32_t width) = 0;
+	virtual bool take_snapshot(std::vector<uint8_t> &rgba, int32_t &width, int32_t &height) = 0;
 };
 
 // Mouse input injected into Windows with SendInput. Coordinates are pixels of the

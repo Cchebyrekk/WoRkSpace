@@ -38,6 +38,7 @@ const CALLS := {
 	"vdd": ["add_screen", "remove_screen", "apply"],
 	"vdd_config": ["write"],
 	"keyboard": ["start_key_recording", "stop_key_recording", "start_text_recording"],
+	"thumbs": ["start", "stop"],
 }
 
 ## Message types and the fields each must carry.
@@ -59,6 +60,7 @@ const FIELDS := {
 	"pc_state": ["agent", "secure", "vdd_installed"],
 	"vdd_config": ["text"],
 	"secure_frame": ["jpg", "x", "y", "w", "h"],
+	"thumb": ["key", "jpg"],
 	"bye": [],
 }
 
@@ -171,6 +173,12 @@ static func secure_frame(jpg: PackedByteArray, origin: Vector2i, size: Vector2i)
 	return {"t": "secure_frame", "jpg": jpg, "x": origin.x, "y": origin.y, "w": size.x, "h": size.y}
 
 
+## A small picture of monitor `key` (JPEG), for the plane of groups (slice o5c);
+## sent while the headset has asked for them ("thumbs" "start").
+static func thumb(key: String, jpg: PackedByteArray) -> Dictionary:
+	return {"t": "thumb", "key": key, "jpg": jpg}
+
+
 static func ping(time: float) -> Dictionary:
 	return {"t": "ping", "time": time}
 
@@ -220,6 +228,8 @@ static func problem(message: Variant) -> String:
 		return "pc_state с плохими полями"
 	if type == "vdd_config" and not message["text"] is String:
 		return "vdd_config не текст"
+	if type == "thumb" and not (message["key"] is String and message["jpg"] is PackedByteArray):
+		return "thumb с плохими полями"
 	if type == "secure_frame" and not message["jpg"] is PackedByteArray:
 		return "secure_frame без картинки"
 	if type == "settings" and not message["text"] is String:

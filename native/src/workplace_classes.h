@@ -1,5 +1,6 @@
 #pragma once
 
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
@@ -76,6 +77,10 @@ public:
 	// encoder, client ("" without a headset), error.
 	Dictionary get_stats() const;
 	String get_last_error() const;
+	// A small picture of the monitor (slice o5c): ask, then a frame or two later
+	// get_snapshot() returns it as an RGBA8 image (null until it is there).
+	void request_snapshot(int p_width);
+	Ref<Image> get_snapshot();
 };
 
 // Moves the real Windows cursor and presses its buttons. Static methods only.
