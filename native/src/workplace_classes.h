@@ -9,6 +9,7 @@
 
 namespace workplace {
 class CaptureBackend;
+class StreamBackend;
 class HotkeyBackend;
 } // namespace workplace
 
@@ -49,6 +50,31 @@ public:
 	Vector2i get_size() const;
 	// Grows with every captured frame; the desktop only produces frames when it changes.
 	int64_t get_frame_count() const;
+	String get_last_error() const;
+};
+
+// Streams one monitor to the headset as H.264 over TCP (slice o3); the work runs
+// on the module's own thread, see StreamBackend in win_backend.h.
+class ScreenStreamer : public RefCounted {
+	GDCLASS(ScreenStreamer, RefCounted)
+
+	workplace::StreamBackend *backend = nullptr;
+	String last_error;
+
+protected:
+	static void _bind_methods();
+
+public:
+	~ScreenStreamer();
+
+	// Index into ScreenCapture.list_monitors(). On failure returns false; see get_last_error().
+	bool start(int p_monitor_index, int p_port, int p_bitrate_kbps, int p_fps);
+	void stop();
+	// False also when the stream thread stopped by itself; get_stats() then has "error".
+	bool is_running() const;
+	// frames_captured, frames_encoded, frames_sent, bytes_sent, encode_ms, size,
+	// encoder, client ("" without a headset), error.
+	Dictionary get_stats() const;
 	String get_last_error() const;
 };
 

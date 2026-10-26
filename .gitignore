@@ -26,3 +26,4 @@
 # Built apps and the headset project's Android build template (regenerated on export)
 /build/
 /headset/android/
+/headset/addons/workplace_video/bin/

@@ -18,6 +18,10 @@ var monitors: Array = []
 var monitors_changed := false
 ## The last ping's round trip, -1 until one came back.
 var rtt_ms := -1.0
+## The stream the PC offers (LinkProtocol.video: port, key, w, h), {} if none;
+## `video_changed` is set when it is new or gone.
+var video: Dictionary = {}
+var video_changed := false
 
 var _device := ""
 var _udp := PacketPeerUDP.new()
@@ -151,6 +155,10 @@ func _connected(now: float) -> void:
 			"monitors":
 				_take_monitors(message["monitors"])
 				print("[link] ПК прислал мониторы: %d" % monitors.size())
+			"video":
+				video = message
+				video_changed = true
+				print("[link] ПК показывает %s, %d×%d, порт %d" % [message["key"], message["w"], message["h"], message["port"]])
 			"pong":
 				rtt_ms = (now - float(message["time"])) * 1000.0
 			"bye":
@@ -181,5 +189,8 @@ func _reset(why: String) -> void:
 	if state == State.CONNECTED and not monitors.is_empty():
 		monitors = []
 		monitors_changed = true
+	if not video.is_empty():
+		video = {}
+		video_changed = true
 	state = State.SEARCHING
 	pc_name = ""

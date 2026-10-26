@@ -25,6 +25,71 @@ void ScreenCapture::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_error"), &ScreenCapture::get_last_error);
 }
 
+void ScreenStreamer::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("start", "monitor_index", "port", "bitrate_kbps", "fps"), &ScreenStreamer::start);
+	ClassDB::bind_method(D_METHOD("stop"), &ScreenStreamer::stop);
+	ClassDB::bind_method(D_METHOD("is_running"), &ScreenStreamer::is_running);
+	ClassDB::bind_method(D_METHOD("get_stats"), &ScreenStreamer::get_stats);
+	ClassDB::bind_method(D_METHOD("get_last_error"), &ScreenStreamer::get_last_error);
+}
+
+ScreenStreamer::~ScreenStreamer() {
+	stop();
+}
+
+bool ScreenStreamer::start(int p_monitor_index, int p_port, int p_bitrate_kbps, int p_fps) {
+	stop();
+	std::vector<workplace::MonitorInfo> monitors = workplace::enumerate_monitors();
+	if (p_monitor_index < 0 || p_monitor_index >= static_cast<int>(monitors.size())) {
+		last_error = "no monitor " + String::num_int64(p_monitor_index);
+		return false;
+	}
+	backend = workplace::StreamBackend::create();
+	std::string error;
+	if (!backend->start(monitors[p_monitor_index].handle, p_port, p_bitrate_kbps, p_fps, error)) {
+		last_error = String::utf8(error.c_str());
+		delete backend;
+		backend = nullptr;
+		return false;
+	}
+	last_error = "";
+	return true;
+}
+
+void ScreenStreamer::stop() {
+	if (backend) {
+		backend->stop();
+		delete backend;
+		backend = nullptr;
+	}
+}
+
+bool ScreenStreamer::is_running() const {
+	return backend && backend->running();
+}
+
+Dictionary ScreenStreamer::get_stats() const {
+	Dictionary result;
+	if (!backend) {
+		return result;
+	}
+	workplace::StreamStats stats = backend->stats();
+	result["frames_captured"] = static_cast<int64_t>(stats.frames_captured);
+	result["frames_encoded"] = static_cast<int64_t>(stats.frames_encoded);
+	result["frames_sent"] = static_cast<int64_t>(stats.frames_sent);
+	result["bytes_sent"] = static_cast<int64_t>(stats.bytes_sent);
+	result["encode_ms"] = stats.encode_ms;
+	result["size"] = Vector2i(stats.width, stats.height);
+	result["encoder"] = String::utf8(stats.encoder.c_str());
+	result["client"] = String::utf8(stats.client.c_str());
+	result["error"] = String::utf8(stats.error.c_str());
+	return result;
+}
+
+String ScreenStreamer::get_last_error() const {
+	return last_error;
+}
+
 ScreenCapture::~ScreenCapture() {
 	stop();
 }

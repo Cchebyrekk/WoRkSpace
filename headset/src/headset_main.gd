@@ -3,18 +3,22 @@ extends Node3D
 ## OpenXR running on the headset, the hands drawn as their joints, a line with
 ## the frame rate. Built in code, like the PC app; the scene file only holds this.
 ## Slice o2: finds the PC (HeadsetLink) and shows its monitors as grey frames
-## laid out like the Windows desktop.
+## laid out like the Windows desktop. Slice o3: the PC's primary monitor as
+## video on an OpenXR quad layer; the Java VideoReceiver decodes into its surface.
 
 const HAND_TRACKERS: Array[StringName] = [&"/user/hand_tracker/left", &"/user/hand_tracker/right"]
 const HAND_COLORS: Array[Color] = [Color(0.45, 0.75, 1.0), Color(1.0, 0.7, 0.45)]
 const JOINT_RADIUS := 0.006
 ## The line of text: this far ahead of where the user stood at the start, at eye height.
-const LABEL_AT := Vector3(0.0, 1.45, -1.2)
+const LABEL_AT := Vector3(0.0, 1.85, -1.4)
+## The video screen: its centre and width; the height follows the picture.
+const SCREEN_AT := Vector3(0.0, 1.25, -1.4)
+const SCREEN_WIDTH := 1.6
 ## The PC's desktop in miniature: its centre here, this many metres per pixel.
-const DESKTOP_AT := Vector3(0.0, 1.2, -1.5)
+const DESKTOP_AT := Vector3(0.0, 0.6, -1.1)
 ## ...but never wider than DESKTOP_WIDTH.
 const METRES_PER_PIXEL := 0.0004
-const DESKTOP_WIDTH := 1.6
+const DESKTOP_WIDTH := 0.8
 const FRAME_GAP := 0.01
 
 var _xr: XRInterface
@@ -25,6 +29,14 @@ var _hands: Array[MultiMeshInstance3D] = []
 var _seen: Array[bool] = [false, false]
 var _link: HeadsetLink
 var _desktop: Node3D
+## com.workplace.headset.VideoReceiver (headset/java), null off Android.
+var _receiver: Variant = null
+var _screen: OpenXRCompositionLayerQuad
+## The stream waiting for the layer's surface to exist, {} if none.
+var _pending_video: Dictionary = {}
+var _video_line := ""
+var _shown_before := 0
+var _next_video_line := 0.0
 
 
 func _ready() -> void:
@@ -57,6 +69,9 @@ func _ready() -> void:
 	_desktop.position = DESKTOP_AT
 	_origin.add_child(_desktop)
 	_link = HeadsetLink.new(OS.get_model_name())
+	if OS.get_name() == "Android":
+		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
+		print("[video] приёмник %s" % ("на месте" if _receiver != null else "не найден"))
 
 
 ## A hand: a small ball at each of its joints, hidden until it is tracked.
@@ -94,12 +109,56 @@ func _process(_delta: float) -> void:
 		if tracked != _seen[i]:
 			_seen[i] = tracked
 			print("[hands] %s: %s" % ["левая" if i == 0 else "правая", "видна" if tracked else "пропала"])
-	_link.poll(Time.get_ticks_msec() / 1000.0)
+	var now := Time.get_ticks_msec() / 1000.0
+	_link.poll(now)
 	if _link.monitors_changed:
 		_link.monitors_changed = false
 		_show_desktop(_link.monitors)
+	if _link.video_changed:
+		_link.video_changed = false
+		_show_video(_link.video)
+	_update_video(now)
 	_label.text = "WoRkPlace в шлеме\n%d к/с  |  руки: %s, %s\n%s" % [Engine.get_frames_per_second(),
-			"левая" if _seen[0] else "—", "правая" if _seen[1] else "—", _link.describe()]
+			"левая" if _seen[0] else "—", "правая" if _seen[1] else "—", _link.describe() + _video_line]
+
+
+## Starts or stops showing the PC's stream. The layer gets its Android surface
+## a frame or more after it is set up, so the receiver starts in _update_video.
+func _show_video(video: Dictionary) -> void:
+	_pending_video = {}
+	if _receiver != null:
+		_receiver.stop()
+	if _screen != null:
+		_screen.queue_free()
+		_screen = null
+	_video_line = ""
+	if video.is_empty():
+		return
+	_screen = OpenXRCompositionLayerQuad.new()
+	_screen.use_android_surface = true
+	_screen.android_surface_size = Vector2i(video["w"], video["h"])
+	_screen.quad_size = Vector2(SCREEN_WIDTH, SCREEN_WIDTH * video["h"] / video["w"])
+	_screen.position = SCREEN_AT
+	_origin.add_child(_screen)
+	_pending_video = video
+
+
+func _update_video(now: float) -> void:
+	if not _pending_video.is_empty() and _screen != null and _receiver != null:
+		var surface: Variant = _screen.get_android_surface()
+		if surface != null:
+			_receiver.start(surface, _link.pc_address, _pending_video["port"])
+			print("[video] принимаю с %s:%d" % [_link.pc_address, _pending_video["port"]])
+			_pending_video = {}
+			_shown_before = 0
+			_next_video_line = now
+	if _screen == null or _receiver == null or not _pending_video.is_empty() or now < _next_video_line:
+		return
+	_next_video_line = now + 1.0
+	var shown: int = _receiver.framesShown()
+	_video_line = "\nвидео: %s, %d к/с, декодер %.0f мс, принято %.1f МБ" % [_receiver.status(), shown - _shown_before,
+			_receiver.decodeMs(), _receiver.bytesReceived() / 1e6]
+	_shown_before = shown
 
 
 ## Each monitor a grey frame with its name and size, placed as on the desktop.
@@ -137,5 +196,7 @@ func _show_desktop(monitors: Array) -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED:
+		if _receiver != null:
+			_receiver.stop()
 		if _link != null:
 			_link.close()

@@ -39,6 +39,38 @@ public:
 	virtual uint64_t frame_count() const = 0;
 };
 
+// What a running stream has done so far (StreamBackend::stats).
+struct StreamStats {
+	uint64_t frames_captured = 0;
+	uint64_t frames_encoded = 0;
+	uint64_t frames_sent = 0;
+	uint64_t bytes_sent = 0;
+	double encode_ms = 0.0; // the last frame, from input to output of the encoder
+	int32_t width = 0;
+	int32_t height = 0;
+	std::string encoder; // the hardware encoder's name
+	std::string client; // "ip:port" of the connected headset, empty if none
+	std::string error; // what stopped the stream thread, empty while it runs
+};
+
+// Streams one monitor to the headset (slice o3): Windows.Graphics.Capture frames
+// are turned into NV12 on the GPU, encoded by the hardware H.264 encoder (Media
+// Foundation) and sent to one TCP client. Everything runs on its own thread.
+// Wire format, all integers big-endian: on connect "WRKV", version, width, height,
+// fps (u32 each); then per frame u32 length, u64 capture time in microseconds,
+// u8 flags (1 = key frame) and the Annex B H.264 bytes.
+class StreamBackend {
+public:
+	static StreamBackend *create();
+	virtual ~StreamBackend() = default;
+
+	// Returns once the capture, the encoder and the listening socket are up.
+	virtual bool start(void *monitor_handle, int32_t port, int32_t bitrate_kbps, int32_t fps, std::string &error) = 0;
+	virtual void stop() = 0;
+	virtual bool running() const = 0;
+	virtual StreamStats stats() const = 0;
+};
+
 // Mouse input injected into Windows with SendInput. Coordinates are pixels of the
 // virtual desktop (the same space as MonitorInfo::x / y).
 void mouse_move(int32_t x, int32_t y);

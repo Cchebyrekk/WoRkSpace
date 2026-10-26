@@ -2042,3 +2042,7 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem([1, 2]) != "", "протокол: не словарь отвергнут")
 	_check(LinkProtocol.problem(LinkProtocol.monitors_message([{"w": 0, "h": 10}])) != "", "протокол: монитор нулевой ширины отвергнут")
 	_check(LinkProtocol.problem(LinkProtocol.monitors_message([])) == "", "протокол: пустой список мониторов допустим")
+	var video: Dictionary = bytes_to_var(var_to_bytes(LinkProtocol.video(LinkProtocol.VIDEO_PORT, "MTT1337#1", Vector2i(1920, 1080))))
+	_check(LinkProtocol.problem(video) == "" and video["port"] == LinkProtocol.VIDEO_PORT and video["w"] == 1920,
+			"протокол: сообщение о видео правильное")
+	_check(LinkProtocol.problem({"t": "video", "port": 1}) != "", "протокол: видео без монитора отвергнуто")

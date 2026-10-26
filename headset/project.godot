@@ -21,3 +21,7 @@ openxr/enabled=true
 openxr/extensions/hand_tracking=true
 openxr/extensions/hand_interaction_profile=true
 shaders/enabled=true
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/workplace_video/plugin.cfg")

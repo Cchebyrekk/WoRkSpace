@@ -12,6 +12,12 @@ extends RefCounted
 const VERSION := 1
 const DISCOVERY_PORT := 47801
 const CONTROL_PORT := 47802
+## The H.264 stream of one monitor (slice o3), its own TCP connection; the
+## format is described at StreamBackend in native/src/win_backend.h.
+const VIDEO_PORT := 47803
+const VIDEO_MAGIC := "WRKV"
+const VIDEO_HEADER_SIZE := 20
+const VIDEO_FRAME_HEADER_SIZE := 13
 const ASK := "WoRkPlace?"
 const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.
@@ -25,6 +31,7 @@ const FIELDS := {
 	"monitors": ["monitors"],
 	"ping": ["time"],
 	"pong": ["time"],
+	"video": ["port", "key", "w", "h"],
 	"bye": [],
 }
 
@@ -67,6 +74,11 @@ static func welcome(pc_name: String, monitors: Array) -> Dictionary:
 
 static func monitors_message(monitors: Array) -> Dictionary:
 	return {"t": "monitors", "monitors": monitors}
+
+
+## The PC streams monitor `key` (w × h pixels) on `port` of its own address.
+static func video(port: int, key: String, size: Vector2i) -> Dictionary:
+	return {"t": "video", "port": port, "key": key, "w": size.x, "h": size.y}
 
 
 static func ping(time: float) -> Dictionary:
