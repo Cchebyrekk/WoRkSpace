@@ -40,6 +40,12 @@ func attach_layer(layer: OpenXRCompositionLayer) -> void:
 		PcLink.screens.attach(_key, layer)
 
 
+## A convex panel's mesh shows the stream through `texture` (slice o5d).
+func attach_texture(texture: ExternalTexture, node: Node3D) -> void:
+	if PcLink.screens != null:
+		PcLink.screens.attach_texture(_key, texture, node)
+
+
 func stop() -> void:
 	if _running and PcLink.screens != null:
 		PcLink.screens.detach(_key)

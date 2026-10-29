@@ -101,6 +101,7 @@ func _process(_delta: float) -> void:
 	_link.monitors_changed = false
 	_link.videos_changed = false
 	PcLink.screens.poll(now, get_viewport().get_camera_3d())
+	PcLink.screens.update_textures()
 
 
 func _notification(what: int) -> void:

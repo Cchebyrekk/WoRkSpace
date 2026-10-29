@@ -68,6 +68,35 @@ var _hole_punch := false
 ## In the headset (slice o5) the capture is a stand-in that has no texture: the
 ## PC's video stream is decoded straight into the layer's Android surface.
 var _video := false
+## In the headset a convex panel shows the stream on its curved mesh through this
+## (slice o5d): a layer is not drawn from outside, and the decoded frames reach no
+## viewport. `_video_convex` says the panel is in that state now.
+var _external: ExternalTexture
+var _video_convex := false
+## The decoder gives sRGB colours; the scene is drawn in linear ones.
+const VIDEO_CONVEX_SHADER := """
+shader_type spatial;
+render_mode unshaded, cull_disabled;
+uniform samplerExternalOES picture;
+void fragment() {
+	vec3 c = texture(picture, UV).rgb;
+	ALBEDO = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+"""
+## In the headset the hole for each layer is the panel's own mesh (_surface) with
+## this: Godot's hole punch does not clear the alpha on the Compatibility renderer,
+## and the walls, the grid and the buttons behind a screen were drawn over it
+## (29.10.2026). Multiplying by 0 clears colour and alpha (transparent background).
+const VIDEO_HOLE_SHADER := """
+shader_type spatial;
+render_mode blend_mul, unshaded, cull_disabled, shadows_disabled;
+void fragment() {
+	ALBEDO = vec3(0.0);
+	ALPHA = 0.0;
+}
+"""
+static var _hole_material: ShaderMaterial
+var _video_material: ShaderMaterial
 var _rendered_frame := 0
 var _active_until := 0.0
 var _grips := {}
@@ -143,6 +172,8 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	surface_material.albedo_texture = panel._viewport.get_texture()
 	panel._surface = MeshInstance3D.new()
 	panel._surface.material_override = surface_material
+	if panel._video:
+		panel._surface.material_override = _video_hole()
 	panel._surface.visible = false
 	panel.add_child(panel._surface)
 	return panel
@@ -154,7 +185,7 @@ func update_back(head: Vector3, shown: bool) -> void:
 	if _back == null or placement == null:
 		return
 	_back.visible = shown and (head - placement.transform.origin).dot(placement.transform.basis.z) < 0.0
-	_surface.visible = shown and placement.curvature < 0.0
+	_surface.visible = shown and (placement.curvature < 0.0 or (_video and _hole_punch))
 
 
 ## The back plate's mesh in the panel's own frame (+Z towards the viewer): flat,
@@ -208,16 +239,49 @@ func _make_layer(curved: bool) -> void:
 		layer.use_android_surface = true
 		# The PC encodes at most 4096 on a side too (native video_stream.cpp).
 		layer.android_surface_size = layer_size(monitor_rect.size)
+		# On the Compatibility renderer the surface's picture came upside down
+		# (29.10.2026); the Meta vendors plugin turns it back (ignored elsewhere).
+		layer.set(&"XR_FB_composition_layer_image_layout/vertical_flip", true)
 	else:
 		layer.layer_viewport = _viewport
 	if _hole_punch:
 		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
 		# -2: the secure-desktop prompt (main.gd, -1) sits between the panels and the scene.
 		layer.sort_order = -2
-		layer.enable_hole_punch = true
+		layer.enable_hole_punch = not _video
 	_origin.add_child(layer)
-	if _video:
+	if _video and _video_convex:
+		layer.visible = false
+	elif _video:
 		capture.call(&"attach_layer", layer)
+
+
+## Moves a headset panel's stream between its layer and its convex mesh (see _external).
+func _set_video_convex(convex: bool) -> void:
+	_video_convex = convex
+	layer.visible = not convex
+	if convex:
+		if _external == null:
+			_external = ExternalTexture.new()
+			# An external (decoder's) picture is read only through samplerExternalOES,
+			# which StandardMaterial3D does not use (Compatibility renderer, slice o5d).
+			_video_material = ShaderMaterial.new()
+			_video_material.shader = Shader.new()
+			_video_material.shader.code = VIDEO_CONVEX_SHADER
+			_video_material.set_shader_parameter(&"picture", _external)
+		_surface.material_override = _video_material
+		capture.call(&"attach_texture", _external, _surface)
+	else:
+		_surface.material_override = _video_hole()
+		capture.call(&"attach_layer", layer)
+
+
+static func _video_hole() -> ShaderMaterial:
+	if _hole_material == null:
+		_hole_material = ShaderMaterial.new()
+		_hole_material.shader = Shader.new()
+		_hole_material.shader.code = VIDEO_HOLE_SHADER
+	return _hole_material
 
 
 ## The part of a monitor's device path that stays the same: from
@@ -278,6 +342,8 @@ func place(new_placement: PanelLayout.Placement) -> void:
 	if not _video and convex == (layer.layer_viewport != null):
 		layer.layer_viewport = null if convex else _viewport
 		layer.enable_hole_punch = _hole_punch and not convex
+	if _video and convex != _video_convex:
+		_set_video_convex(convex)
 	# The shape only when it changed: each change may rebuild the layer's mesh (its
 	# hole punch), and a wall being bent changes it every frame (21.10.2026: the
 	# bend handle dropped the frame rate to ~20).
@@ -302,7 +368,7 @@ func place(new_placement: PanelLayout.Placement) -> void:
 			_back_shape = shape
 			_back.mesh = back_mesh(placement.size, placement.curvature, distance)
 		_back.global_transform = placement.transform
-	if convex:
+	if convex or _video:
 		if _surface_shape != _back_shape:
 			_surface_shape = _back_shape
 			_surface.mesh = back_mesh(placement.size, placement.curvature, distance, 0.0, true)

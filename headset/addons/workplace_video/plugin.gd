@@ -1,6 +1,6 @@
 @tool
 extends EditorPlugin
-## Slice o3: adds bin/workplace_video.jar (built from headset/java by
+## Slice o3: adds bin/workplace_video.aar (a jar until slice o5d) (built from headset/java by
 ## headset/java/build_java.ps1) to the Android export, so that GDScript can reach
 ## com.workplace.headset.VideoReceiver through JavaClassWrapper.
 
@@ -26,4 +26,4 @@ class VideoExport extends EditorExportPlugin:
 
 	# Relative to res://addons/.
 	func _get_android_libraries(_platform: EditorExportPlatform, _debug: bool) -> PackedStringArray:
-		return PackedStringArray(["workplace_video/bin/workplace_video.jar"])
+		return PackedStringArray(["workplace_video/bin/workplace_video.aar"])

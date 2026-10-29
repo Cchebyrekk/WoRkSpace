@@ -1,5 +1,9 @@
 package com.workplace.headset;
 
+import android.graphics.ImageFormat;
+import android.hardware.HardwareBuffer;
+import android.media.Image;
+import android.media.ImageReader;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.view.Surface;
@@ -37,8 +41,43 @@ public final class VideoReceiver {
 	private volatile int height;
 	/** The decoder could not be made or started (the Quest ran out of decoders), not the network. */
 	private volatile boolean decoderFailed;
+	/** Texture mode (surface null): where the decoder puts frames, and the frames held. */
+	private ImageReader reader;
+	private Image frame;
+	private Image previousFrame;
+	private long framePointer;
+	/** EGLImage of each of the reader's buffers (by HardwareBuffer id), made once. */
+	private final HashMap<Long, Long> images = new HashMap<>();
 
 	private VideoReceiver() {
+	}
+
+	/**
+	 * Like start, but the frames go into an ImageReader instead of a surface; Godot
+	 * takes each one through textureFrame (convex screens, slice o5d).
+	 */
+	public static synchronized void startTexture(int id, String host, int port) {
+		start(id, null, host, port);
+	}
+
+	/**
+	 * The newest decoded frame of a texture receiver as an EGLImage for Godot's
+	 * ExternalTexture (Compatibility renderer), 0 if none yet; call on Godot's thread. The frame and the one before it
+	 * stay open (Godot may still be drawing it); older ones are let go.
+	 */
+	public static long textureFrame(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.takeFrame();
+	}
+
+	public static int textureWidth(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.width;
+	}
+
+	public static int textureHeight(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.height;
 	}
 
 	/** Starts receiving into `surface`; a receiver already running under `id` is stopped first. */
@@ -135,6 +174,62 @@ public final class VideoReceiver {
 		}
 	}
 
+	private synchronized long takeFrame() {
+		if (reader == null) {
+			return framePointer;
+		}
+		Image image;
+		try {
+			image = reader.acquireLatestImage();
+		} catch (IllegalStateException e) {
+			return framePointer;
+		}
+		if (image == null) {
+			return framePointer;
+		}
+		if (previousFrame != null) {
+			previousFrame.close();
+		}
+		previousFrame = frame;
+		frame = image;
+		HardwareBuffer buffer = image.getHardwareBuffer();
+		if (buffer == null) {
+			return framePointer;
+		}
+		Long made = images.get(buffer.getId());
+		if (made == null) {
+			made = HardwareBuffers.image(buffer);
+			if (made != 0) {
+				images.put(buffer.getId(), made);
+			}
+		}
+		buffer.close();
+		if (made != 0) {
+			framePointer = made;
+		}
+		return framePointer;
+	}
+
+	private synchronized void closeFrames() {
+		if (frame != null) {
+			frame.close();
+			frame = null;
+		}
+		if (previousFrame != null) {
+			previousFrame.close();
+			previousFrame = null;
+		}
+		if (reader != null) {
+			reader.close();
+			reader = null;
+		}
+		for (long image : images.values()) {
+			HardwareBuffers.destroy(image);
+		}
+		images.clear();
+		framePointer = 0;
+	}
+
 	private void run(Surface surface, String host, int port) {
 		MediaCodec decoder = null;
 		try {
@@ -168,7 +263,16 @@ public final class VideoReceiver {
 			format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
 			try {
 				decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-				decoder.configure(format, surface, null, 0);
+				Surface output = surface;
+				if (output == null) {
+					// Texture mode: 4 buffers, 2 held for Godot, 2 for the decoder.
+					synchronized (this) {
+						reader = ImageReader.newInstance(width, height, ImageFormat.PRIVATE, 4,
+								HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
+					}
+					output = reader.getSurface();
+				}
+				decoder.configure(format, output, null, 0);
 				decoder.start();
 			} catch (Exception e) {
 				decoderFailed = true;
@@ -209,7 +313,7 @@ public final class VideoReceiver {
 			}
 		} catch (Exception e) {
 			if (running) {
-				status = "ошибка: " + e.getMessage();
+				status = "ошибка: " + e;
 			}
 		} finally {
 			if (decoder != null) {
@@ -219,6 +323,7 @@ public final class VideoReceiver {
 				}
 				decoder.release();
 			}
+			closeFrames();
 			closeSocket();
 			if (running) {
 				running = false;
