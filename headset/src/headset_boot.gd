@@ -13,10 +13,17 @@ const IMPORTED_MARK := "user://pc_settings_imported.txt"
 ## «Разрешение по клетке» took an empty list for "the driver has none") at most
 ## this long, then starts without it.
 const WAIT_FOR_PC_SEC := 4.0
+## A break shorter than this shows nothing (slice o6); longer, a line before the
+## eyes says so: the screens stay with their last picture and seemed frozen.
+const LOST_NOTICE_SEC := 1.5
+const LOST_NOTICE_OFFSET := Vector3(0.0, -0.18, -0.9)
 
 var _link: HeadsetLink
 var _main: Node3D
 var _started := 0.0
+var _lost_notice: Label3D
+## Since when the link is down (-1 while up).
+var _lost_since := -1.0
 
 
 func _ready() -> void:
@@ -102,6 +109,37 @@ func _process(_delta: float) -> void:
 	_link.videos_changed = false
 	PcLink.screens.poll(now, get_viewport().get_camera_3d())
 	PcLink.screens.update_textures()
+	_update_lost_notice(now)
+
+
+func _update_lost_notice(now: float) -> void:
+	var up := PcLink.connected()
+	if up:
+		if _lost_since >= 0.0:
+			print("[link] связь вернулась через %.1f с" % (now - _lost_since))
+		_lost_since = -1.0
+	elif _lost_since < 0.0:
+		_lost_since = now
+	var show := _main != null and not up and now - _lost_since >= LOST_NOTICE_SEC
+	var camera := get_viewport().get_camera_3d()
+	if show and camera != null and (_lost_notice == null or _lost_notice.get_parent() != camera):
+		# The world built again has a camera of its own.
+		if _lost_notice != null:
+			_lost_notice.queue_free()
+		_lost_notice = Label3D.new()
+		_lost_notice.pixel_size = 0.0009
+		_lost_notice.font_size = 40
+		_lost_notice.outline_size = 10
+		_lost_notice.modulate = Color(1.0, 0.82, 0.55)
+		_lost_notice.no_depth_test = true
+		_lost_notice.render_priority = 20
+		_lost_notice.position = LOST_NOTICE_OFFSET
+		camera.add_child(_lost_notice)
+	if is_instance_valid(_lost_notice):
+		_lost_notice.visible = show
+		if show:
+			_lost_notice.text = "Нет связи с ПК (%.0f с) — %s\nэкраны показывают последний кадр" % [now - _lost_since,
+					_link.describe()]
 
 
 func _notification(what: int) -> void:

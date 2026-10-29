@@ -226,9 +226,9 @@ func _reset(why: String) -> void:
 	_channel = null
 	_greeted = false
 	rtt_ms = -1.0
-	if state == State.CONNECTED and not monitors.is_empty():
-		monitors = []
-		monitors_changed = true
+	# The monitors stay (slice o6): without them the world took the PC's monitors
+	# as gone and dropped every screen at each break; the next welcome brings the
+	# list again. The streams are gone with the connection.
 	if not videos.is_empty():
 		videos = []
 		videos_changed = true

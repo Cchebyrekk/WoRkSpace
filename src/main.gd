@@ -4006,9 +4006,11 @@ func _update_panels(delta: float) -> void:
 		# Beyond the render radius a panel is neither drawn nor fed new pictures;
 		# the monitor stays in Windows as it is.
 		var in_range := _world.render_radius <= 0.0 or panel.placement.transform.origin.distance_to(head) <= _world.render_radius
-		if panel.layer.visible != in_range:
-			panel.layer.visible = in_range
-			print("[world] %s: %s радиуса отрисовки" % [panel.monitor_name, "в пределах" if in_range else "за пределами"])
+		var shown := panel.layer_shown(in_range)
+		if panel.layer.visible != shown:
+			panel.layer.visible = shown
+			if shown == in_range:
+				print("[world] %s: %s радиуса отрисовки" % [panel.monitor_name, "в пределах" if in_range else "за пределами"])
 		panel.refresh(_session_visible and in_range, copy_frames and in_range, now)
 		panel.update_back(head, in_range)
 	_order_layers(head)

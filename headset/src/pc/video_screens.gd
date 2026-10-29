@@ -81,8 +81,12 @@ func poll(now: float, camera: Camera3D) -> void:
 	var serial := PcLink.link.videos_serial if PcLink.link != null else 0
 	if serial != _videos_serial:
 		_videos_serial = serial
+		# New streams (after a reconnect, slice o6): every receiver starts at once,
+		# not after the wait its old stream's failures had built up (up to 30 s).
 		for key: String in _attached:
 			_stop(_attached[key])
+			_attached[key].erase("failures")
+			_attached[key].erase("retry_at")
 	# A stream that ended (the PC restarted it, the connection broke) leaves its
 	# panel frozen while it still counts as live (26.10.2026): it starts again,
 	# later each time it fails. A decoder refused means the headset has no more:

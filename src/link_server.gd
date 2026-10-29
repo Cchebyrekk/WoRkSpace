@@ -87,7 +87,10 @@ func _ready() -> void:
 		_pc_name = "ПК"
 	var error := _discovery.bind(LinkProtocol.DISCOVERY_PORT)
 	print("[link] поиск: порт UDP %d %s" % [LinkProtocol.DISCOVERY_PORT, "слушаю" if error == OK else "занят (%d)" % error])
-	for sdk: String in [OS.get_environment("ANDROID_HOME"), OS.get_environment("LOCALAPPDATA").path_join("Android/Sdk")]:
+	# C:/Android/Sdk: the SDK installed from the Claude app (29.10.2026) had landed in
+	# its MSIX package's private AppData, seen by nothing started outside it — the
+	# server started by the watchdog found no adb; a copy is there.
+	for sdk: String in [OS.get_environment("ANDROID_HOME"), "C:/Android/Sdk", OS.get_environment("LOCALAPPDATA").path_join("Android/Sdk")]:
 		if sdk != "" and FileAccess.file_exists(sdk.path_join("platform-tools/adb.exe")):
 			_adb_path = sdk.path_join("platform-tools/adb.exe")
 			break

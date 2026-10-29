@@ -256,6 +256,12 @@ func _make_layer(curved: bool) -> void:
 		capture.call(&"attach_layer", layer)
 
 
+## Whether the layer is drawn for a panel `in_range` (main.gd's render radius): a
+## headset panel shown on its convex mesh keeps its layer hidden.
+func layer_shown(in_range: bool) -> bool:
+	return in_range and not _video_convex
+
+
 ## Moves a headset panel's stream between its layer and its convex mesh (see _external).
 func _set_video_convex(convex: bool) -> void:
 	_video_convex = convex

@@ -36,7 +36,8 @@ static var thumbs_live := 0
 static var _thumbs_asked := false
 
 
-## The PC's monitors (LinkProtocol.monitor entries), [] without a PC.
+## The PC's monitors (LinkProtocol.monitor entries): the last ones it sent, also
+## while the link is broken (slice o6), [] before it ever answered.
 static func monitors() -> Array:
 	return link.monitors if link != null else []
 
