@@ -20,6 +20,7 @@ static var has_vdd_config := false
 ## The secure desktop's latest picture (null until one came) and where it is.
 static var secure_image: Image
 static var secure_origin := Vector2i.ZERO
+static var secure_scale := 1
 static var secure_sequence := 0
 ## A stand-in asks for the world to be built again (as the PC app restarted after
 ## the driver restarted under Quest Link); headset_boot.gd does it.
@@ -114,6 +115,9 @@ static func dispatch() -> void:
 			"secure_frame":
 				var image := Image.new()
 				if image.load_jpg_from_buffer(message["jpg"]) == OK:
+					if secure_image == null or secure_image.get_size() != image.get_size():
+						print("[pc] картинка защищённого стола %s" % image.get_size())
 					secure_image = image
 					secure_origin = Vector2i(message["x"], message["y"])
+					secure_scale = maxi(int(message["s"]), 1)
 					secure_sequence += 1

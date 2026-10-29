@@ -132,8 +132,12 @@ struct Duplication {
 	ID3D11Texture2D *staging = nullptr;
 	int32_t origin_x = 0;
 	int32_t origin_y = 0;
+	// The picture written (the monitor shrunk by `scale`) and the monitor's own size.
 	uint32_t width = 0;
 	uint32_t height = 0;
+	uint32_t scale = 1;
+	uint32_t source_width = 0;
+	uint32_t source_height = 0;
 
 	void stop() {
 		release(staging);
@@ -202,16 +206,22 @@ struct Duplication {
 		}
 		DXGI_OUTDUPL_DESC desc{};
 		duplication->GetDesc(&desc);
-		width = desc.ModeDesc.Width;
-		height = desc.ModeDesc.Height;
-		if (width == 0 || width > SECURE_FRAME_MAX_WIDTH || height == 0 || height > SECURE_FRAME_MAX_HEIGHT) {
-			cap_log(L"output %ux%u is out of range", width, height);
+		source_width = desc.ModeDesc.Width;
+		source_height = desc.ModeDesc.Height;
+		if (source_width == 0 || source_height == 0) {
+			cap_log(L"output %ux%u is empty", source_width, source_height);
 			stop();
 			return false;
 		}
+		scale = 1;
+		while (source_width / scale > SECURE_FRAME_MAX_WIDTH || source_height / scale > SECURE_FRAME_MAX_HEIGHT) {
+			scale++;
+		}
+		width = source_width / scale;
+		height = source_height / scale;
 		D3D11_TEXTURE2D_DESC staging_desc{};
-		staging_desc.Width = width;
-		staging_desc.Height = height;
+		staging_desc.Width = source_width;
+		staging_desc.Height = source_height;
 		staging_desc.MipLevels = 1;
 		staging_desc.ArraySize = 1;
 		staging_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -223,7 +233,8 @@ struct Duplication {
 			stop();
 			return false;
 		}
-		cap_log(L"duplicating the primary output %ux%u at %d,%d", width, height, origin_x, origin_y);
+		cap_log(L"duplicating the primary output %ux%u at %d,%d, picture %ux%u", source_width, source_height, origin_x, origin_y,
+				width, height);
 		return true;
 	}
 
@@ -260,8 +271,20 @@ struct Duplication {
 		begin_write(header);
 		const uint8_t *source = static_cast<const uint8_t *>(pixels);
 		for (uint32_t row = 0; row < height; row++) {
-			memcpy(data + static_cast<size_t>(row) * dest_pitch, source + static_cast<size_t>(row) * source_pitch, dest_pitch);
+			const uint8_t *from = source + static_cast<size_t>(row) * scale * source_pitch;
+			uint8_t *to = data + static_cast<size_t>(row) * dest_pitch;
+			if (scale == 1) {
+				memcpy(to, from, dest_pitch);
+				continue;
+			}
+			// Every scale-th pixel: enough to read and click a prompt.
+			const uint32_t *in = reinterpret_cast<const uint32_t *>(from);
+			uint32_t *out = reinterpret_cast<uint32_t *>(to);
+			for (uint32_t x = 0; x < width; x++) {
+				out[x] = in[x * scale];
+			}
 		}
+		header->scale = scale;
 		header->width = width;
 		header->height = height;
 		header->pitch = dest_pitch;

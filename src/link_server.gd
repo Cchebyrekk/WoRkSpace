@@ -70,6 +70,10 @@ var _state_sent: Dictionary = {}
 var _recording := false
 var _recording_sent: Dictionary = {}
 var _next_secure_frame := 0.0
+## Pictures of the secure desktop sent while it is up (a line for the first, and
+## for none after a few tries: 29.10.2026 the prompt never showed in the headset).
+var _secure_sent := 0
+var _secure_tries := 0
 ## The secure desktop's picture goes at most this often (JPEG, a few hundred KB).
 const SECURE_FRAME_SEC := 0.25
 const SECURE_JPEG_QUALITY := 0.8
@@ -142,6 +146,9 @@ func _process(_delta: float) -> void:
 	if _connected():
 		_send_state(secure)
 		_send_recording()
+		if not secure:
+			_secure_sent = 0
+			_secure_tries = 0
 		if secure and now >= _next_secure_frame:
 			_next_secure_frame = now + SECURE_FRAME_SEC
 			_send_secure_frame()
@@ -371,12 +378,17 @@ func _send_recording() -> void:
 
 
 func _send_secure_frame() -> void:
-	if not _secure.update():
-		return
-	var image: Image = _secure.get_image()
+	_secure_tries += 1
+	var image: Image = _secure.get_image() if _secure.update() else null
 	if image == null:
+		if _secure_sent == 0 and _secure_tries == 10:
+			print("[link] защищённый стол: картинки от агента нет")
 		return
-	_send(LinkProtocol.secure_frame(image.save_jpg_to_buffer(SECURE_JPEG_QUALITY), _secure.get_frame_origin(), _secure.get_frame_size()))
+	if _secure_sent == 0:
+		print("[link] защищённый стол: шлю картинку %s" % image.get_size())
+	_secure_sent += 1
+	_send(LinkProtocol.secure_frame(image.save_jpg_to_buffer(SECURE_JPEG_QUALITY), _secure.get_frame_origin(), _secure.get_frame_size(),
+			_secure.get_frame_scale()))
 
 
 ## The pointer is in pixels of one monitor; the cursor wants the virtual desktop.

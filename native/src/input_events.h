@@ -60,7 +60,9 @@ static_assert(sizeof(StatusRecord) == 8, "the pipe carries these records as they
 // The secure desktop's picture, shared from the agent to the app through a named
 // memory section (the agent captures it with Desktop Duplication, which only
 // SYSTEM on the Winlogon desktop can do; WGC cannot). A whole desktop, so the
-// section is sized for the largest monitor and the real size is in the header.
+// section is sized for the largest picture and the real size is in the header; a
+// larger monitor is shrunk by a whole factor (29.10.2026: a 4632x3576 primary was
+// refused, and UAC never showed).
 constexpr const wchar_t *SECURE_FRAME_SECTION = L"Global\\WoRkPlaceSecureFrame";
 constexpr uint32_t SECURE_FRAME_MAGIC = 0x53465057; // "WPFS"
 constexpr uint32_t SECURE_FRAME_MAX_WIDTH = 3840;
@@ -77,7 +79,7 @@ struct SecureFrameHeader {
 	uint32_t pitch; // bytes per row of the BGRA data
 	int32_t origin_x; // the captured monitor's top-left on the virtual desktop
 	int32_t origin_y;
-	uint32_t reserved;
+	uint32_t scale; // monitor pixels per picture pixel each way (0 from an older agent: 1)
 };
 
 constexpr size_t SECURE_FRAME_BYTES =

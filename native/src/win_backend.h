@@ -98,7 +98,7 @@ bool secure_desktop_active();
 // origin. False if there is no agent, no frame yet, or nothing new since
 // `last_sequence` (which it updates). `out` is a plain byte buffer to avoid Godot
 // types here.
-bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y,
+bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y, int32_t &scale,
 		std::vector<uint8_t> &out);
 
 // Records one keyboard shortcut from the physical keyboard (a low-level hook, so

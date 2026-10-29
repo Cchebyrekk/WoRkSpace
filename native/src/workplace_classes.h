@@ -157,6 +157,7 @@ class SecureDesktop : public RefCounted {
 	Ref<Image> image;
 	Vector2i frame_size;
 	Vector2i frame_origin;
+	int32_t frame_scale = 1;
 
 protected:
 	static void _bind_methods();
@@ -170,6 +171,8 @@ public:
 	// The captured monitor's size in pixels and its top-left on the virtual desktop.
 	Vector2i get_frame_size() const;
 	Vector2i get_frame_origin() const;
+	// Monitor pixels per picture pixel (a monitor over 3840x2160 comes shrunk).
+	int32_t get_frame_scale() const;
 };
 
 } // namespace godot

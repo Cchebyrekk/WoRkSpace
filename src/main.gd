@@ -584,6 +584,9 @@ var _secure := SecureDesktop.new()
 var _secure_viewport: SubViewport
 var _secure_rect: TextureRect
 var _secure_layer: OpenXRCompositionLayerQuad
+## Its hole in the scene on the Compatibility renderer (the headset), where Godot's
+## own hole punch leaves the walls over the prompt (29.10.2026: not seen at all).
+var _secure_hole: MeshInstance3D
 var _secure_shown := false
 ## The quad's world transform and size (m) while shown, for mapping the laser onto it.
 var _secure_quad_xf := Transform3D.IDENTITY
@@ -591,6 +594,8 @@ var _secure_quad_size := Vector2.ZERO
 ## The captured monitor: top-left on the virtual desktop and size in pixels.
 var _secure_origin := Vector2i.ZERO
 var _secure_pixels := Vector2i.ZERO
+## Monitor pixels per picture pixel: a monitor over 3840x2160 comes shrunk.
+var _secure_scale := 1
 ## The mouse button the secure cursor holds, or NONE.
 var _secure_button := HandGestures.Click.NONE
 ## Which pointer pressed `_secure_button`: it alone can let go of it.
@@ -1639,6 +1644,8 @@ func _keep_world_in_place() -> void:
 		panel.place(panel.placement)
 	if _secure_shown:
 		_secure_layer.global_transform = _secure_quad_xf
+		if _secure_hole != null:
+			_secure_hole.global_transform = _secure_quad_xf
 
 
 ## The orientation dots and the floor follow the user: rebuilt when the user has
@@ -6770,9 +6777,16 @@ func _build_secure_desktop() -> void:
 	# punched through it, so hands, rays and menus draw over the prompt (at 100 it
 	# covered them).
 	_secure_layer.sort_order = -1
-	_secure_layer.enable_hole_punch = true
 	_secure_layer.visible = false
 	_origin.add_child(_secure_layer)
+	if RenderingServer.get_current_rendering_method() == "gl_compatibility":
+		_secure_hole = MeshInstance3D.new()
+		_secure_hole.mesh = QuadMesh.new()
+		_secure_hole.material_override = ScreenPanel.hole_material()
+		_secure_hole.visible = false
+		add_child(_secure_hole)
+	else:
+		_secure_layer.enable_hole_punch = true
 
 
 ## Polls the agent for the secure desktop (UAC, lock screen, Ctrl+Alt+Del). Shows
@@ -6789,6 +6803,7 @@ func _update_secure_desktop() -> void:
 	if _secure_desktop and _secure.update():
 		_secure_pixels = _secure.get_frame_size()
 		_secure_origin = _secure.get_frame_origin()
+		_secure_scale = _secure.get_frame_scale()
 		if _secure_viewport.size != _secure_pixels:
 			_secure_viewport.size = _secure_pixels
 		_secure_rect.texture = _secure.get_texture()
@@ -6800,7 +6815,10 @@ func _update_secure_desktop() -> void:
 		_release_cursor_button()
 	if want != _secure_shown:
 		_secure_shown = want
+		print("[secure] окно %s" % ("показано %s" % _secure_pixels if want else "убрано"))
 		_secure_layer.visible = want
+		if _secure_hole != null:
+			_secure_hole.visible = want
 		_secure_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if want else SubViewport.UPDATE_DISABLED
 		if not want:
 			_release_secure_button()
@@ -6828,6 +6846,9 @@ func _place_secure_quad() -> void:
 	_secure_quad_xf = Transform3D(basis, center)
 	_secure_layer.global_transform = _secure_quad_xf
 	_secure_layer.quad_size = _secure_quad_size
+	if _secure_hole != null:
+		(_secure_hole.mesh as QuadMesh).size = _secure_quad_size
+		_secure_hole.global_transform = _secure_quad_xf
 
 
 ## Where the pointer's ray meets the quad: distance (or -1), and the 0..1 spot.
@@ -6896,8 +6917,9 @@ func _update_secure_cursor() -> void:
 	if owner < 0:
 		return
 	var pointer := _pointers[owner]
-	var spot := (hits[owner] * Vector2(_secure_pixels)).floor()
-	var pixel := _secure_origin + Vector2i(clampi(int(spot.x), 0, _secure_pixels.x - 1), clampi(int(spot.y), 0, _secure_pixels.y - 1))
+	var monitor := _secure_pixels * _secure_scale
+	var spot := (hits[owner] * Vector2(monitor)).floor()
+	var pixel := _secure_origin + Vector2i(clampi(int(spot.x), 0, monitor.x - 1), clampi(int(spot.y), 0, monitor.y - 1))
 	MouseInput.move_to(pixel)
 	if _secure_button == HandGestures.Click.NONE and pointer.just_pressed and pointer.button != HandGestures.Click.NONE:
 		_secure_button = pointer.button

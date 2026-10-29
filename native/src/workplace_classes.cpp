@@ -399,6 +399,7 @@ void SecureDesktop::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_image"), &SecureDesktop::get_image);
 	ClassDB::bind_method(D_METHOD("get_frame_size"), &SecureDesktop::get_frame_size);
 	ClassDB::bind_method(D_METHOD("get_frame_origin"), &SecureDesktop::get_frame_origin);
+	ClassDB::bind_method(D_METHOD("get_frame_scale"), &SecureDesktop::get_frame_scale);
 }
 
 bool SecureDesktop::update() {
@@ -407,8 +408,9 @@ bool SecureDesktop::update() {
 	int32_t height = 0;
 	int32_t origin_x = 0;
 	int32_t origin_y = 0;
+	int32_t scale = 1;
 	uint32_t sequence = last_sequence;
-	if (!workplace::read_secure_frame(sequence, width, height, origin_x, origin_y, buffer)) {
+	if (!workplace::read_secure_frame(sequence, width, height, origin_x, origin_y, scale, buffer)) {
 		return false;
 	}
 	last_sequence = sequence;
@@ -427,6 +429,7 @@ bool SecureDesktop::update() {
 	}
 	frame_size = Vector2i(width, height);
 	frame_origin = Vector2i(origin_x, origin_y);
+	frame_scale = scale;
 	return true;
 }
 
@@ -444,6 +447,10 @@ Vector2i SecureDesktop::get_frame_size() const {
 
 Vector2i SecureDesktop::get_frame_origin() const {
 	return frame_origin;
+}
+
+int32_t SecureDesktop::get_frame_scale() const {
+	return frame_scale;
 }
 
 } // namespace godot

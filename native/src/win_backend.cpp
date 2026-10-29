@@ -434,7 +434,7 @@ bool open_secure_section() {
 
 } // namespace
 
-bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y,
+bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height, int32_t &origin_x, int32_t &origin_y, int32_t &scale,
 		std::vector<uint8_t> &out) {
 	if (!open_secure_section()) {
 		return false;
@@ -471,6 +471,7 @@ bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height,
 		}
 		int32_t ox = header->origin_x;
 		int32_t oy = header->origin_y;
+		uint32_t frame_scale = header->scale;
 		out.resize(static_cast<size_t>(w) * h * 4);
 		const uint8_t *source = reinterpret_cast<const uint8_t *>(header + 1);
 		for (uint32_t row = 0; row < h; row++) {
@@ -490,6 +491,7 @@ bool read_secure_frame(uint32_t &last_sequence, int32_t &width, int32_t &height,
 			height = static_cast<int32_t>(h);
 			origin_x = ox;
 			origin_y = oy;
+			scale = frame_scale == 0 ? 1 : static_cast<int32_t>(frame_scale);
 			return true;
 		}
 	}

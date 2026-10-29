@@ -173,7 +173,7 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	panel._surface = MeshInstance3D.new()
 	panel._surface.material_override = surface_material
 	if panel._video:
-		panel._surface.material_override = _video_hole()
+		panel._surface.material_override = hole_material()
 	panel._surface.visible = false
 	panel.add_child(panel._surface)
 	return panel
@@ -272,11 +272,12 @@ func _set_video_convex(convex: bool) -> void:
 		_surface.material_override = _video_material
 		capture.call(&"attach_texture", _external, _surface)
 	else:
-		_surface.material_override = _video_hole()
+		_surface.material_override = hole_material()
 		capture.call(&"attach_layer", layer)
 
 
-static func _video_hole() -> ShaderMaterial:
+## The headset's hole under a layer (see VIDEO_HOLE_SHADER), also for main.gd's UAC quad.
+static func hole_material() -> ShaderMaterial:
 	if _hole_material == null:
 		_hole_material = ShaderMaterial.new()
 		_hole_material.shader = Shader.new()

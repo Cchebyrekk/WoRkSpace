@@ -2062,7 +2062,7 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem({"t": "call", "target": "vdd", "op": "apply", "args": 3}) != "", "протокол: аргументы не списком отвергнуты")
 	_check(LinkProtocol.problem(LinkProtocol.event("topology", "finished", [true, "arranged", ""])) == "", "протокол: событие правильное")
 	_check(LinkProtocol.problem(LinkProtocol.pc_state(true, false, true)) == "", "протокол: состояние ПК правильное")
-	_check(LinkProtocol.problem(LinkProtocol.secure_frame(PackedByteArray([1, 2]), Vector2i.ZERO, Vector2i(10, 10))) == "",
+	_check(LinkProtocol.problem(LinkProtocol.secure_frame(PackedByteArray([1, 2]), Vector2i.ZERO, Vector2i(10, 10), 2)) == "",
 			"протокол: кадр защищённого стола правильный")
 	_check(LinkProtocol.problem(LinkProtocol.settings_message("[ray]
 x=1

@@ -33,3 +33,7 @@ func get_frame_size() -> Vector2i:
 
 func get_frame_origin() -> Vector2i:
 	return PcLink.secure_origin
+
+
+func get_frame_scale() -> int:
+	return PcLink.secure_scale

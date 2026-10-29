@@ -59,7 +59,7 @@ const FIELDS := {
 	"event": ["target", "name", "args"],
 	"pc_state": ["agent", "secure", "vdd_installed"],
 	"vdd_config": ["text"],
-	"secure_frame": ["jpg", "x", "y", "w", "h"],
+	"secure_frame": ["jpg", "x", "y", "w", "h", "s"],
 	"thumb": ["key", "jpg"],
 	"bye": [],
 }
@@ -169,8 +169,9 @@ static func vdd_config(text: String) -> Dictionary:
 
 
 ## A picture of the secure desktop (JPEG) and where it is on the virtual desktop.
-static func secure_frame(jpg: PackedByteArray, origin: Vector2i, size: Vector2i) -> Dictionary:
-	return {"t": "secure_frame", "jpg": jpg, "x": origin.x, "y": origin.y, "w": size.x, "h": size.y}
+## `scale`: monitor pixels per picture pixel (SecureDesktop.get_frame_scale).
+static func secure_frame(jpg: PackedByteArray, origin: Vector2i, size: Vector2i, scale: int) -> Dictionary:
+	return {"t": "secure_frame", "jpg": jpg, "x": origin.x, "y": origin.y, "w": size.x, "h": size.y, "s": scale}
 
 
 ## A small picture of monitor `key` (JPEG), for the plane of groups (slice o5c);
