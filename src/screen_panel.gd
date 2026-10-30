@@ -22,6 +22,8 @@ var monitor_name := ""
 ## monitor's device path, which stays the same when the driver restarts (the
 ## \\.\DISPLAYnn names change); the name if the path is not known.
 var monitor_key := ""
+## The monitor's index in ScreenCapture.list_monitors() when the panel was made.
+var monitor_index := -1
 ## The monitor's rectangle on the Windows virtual desktop, in pixels.
 var monitor_rect := Rect2i()
 var primary := false
@@ -75,13 +77,44 @@ var _external: ExternalTexture
 var _video_convex := false
 ## Within main.gd's render radius (the last layer_shown).
 var _in_range := true
+## Branch pc-render: the PC draws the headset's eyes itself, without OpenXR, so
+## no composition layer is shown — every panel is its mesh with its viewport's
+## picture, as a convex one is (the layers stay, empty, for the code that moves them).
+static var mesh_only := false
+## With mesh_only: the picture with mipmaps (PanelMips), refreshed with the viewport;
+## the generation of it the material has (0: still the viewport's own picture).
+var _mips: PanelMips
+var _mips_generation := 0
+## With mesh_only (the hybrid, 30.10.2026): the headset shows the monitor's own
+## stream on a layer behind the PC's picture, as variant 1 does, and the PC's
+## picture is see-through over it — this mesh, a little in front of the panel's,
+## zeroes the alpha there (the colour stays: where the headset has no layer yet,
+## or the hole and the layer part at a quick turn, the PC's picture of the panel
+## shows). RemoteHost sends the alpha along with the eyes. Subtracting: blend_mul
+## with ALPHA 0 changed nothing on the Mobile renderer (it mixes the colour to
+## white by the alpha first), so no hole was ever opened and only the PC's picture
+## was seen (30.10.2026); subtracting black at alpha 1 leaves the colour and takes
+## the alpha to 0.
+var _hole: MeshInstance3D
+const HOLE_LIFT := 0.003
+const REMOTE_HOLE_SHADER := """
+shader_type spatial;
+render_mode blend_sub, unshaded, cull_disabled, shadows_disabled, depth_draw_never;
+void fragment() {
+	ALBEDO = vec3(0.0);
+	ALPHA = 1.0;
+}
+"""
+static var _remote_hole_material: ShaderMaterial
 ## The decoder gives sRGB colours; the scene is drawn in linear ones.
 const VIDEO_CONVEX_SHADER := """
 shader_type spatial;
 render_mode unshaded, cull_disabled;
 uniform samplerExternalOES picture;
+// The picture's share of the decoder's buffer (padded: 3680 for 3664, 30.10.2026).
+uniform vec2 crop = vec2(1.0);
 void fragment() {
-	vec3 c = texture(picture, UV).rgb;
+	vec3 c = texture(picture, UV * crop).rgb;
 	ALBEDO = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
 }
 """
@@ -101,6 +134,10 @@ static var _hole_material: ShaderMaterial
 var _video_material: ShaderMaterial
 var _rendered_frame := 0
 var _active_until := 0.0
+## The last session_visible refresh got: when the session (or, with mesh_only, the
+## headset) comes, a still monitor is drawn once more — it gets no new capture
+## frame, and its mipmaps were never made: it stayed white (30.10.2026).
+var _was_visible := false
 var _grips := {}
 var _grip_label: Label3D
 ## The panel's back: a dark plate a little behind it, flat or curved like it.
@@ -128,6 +165,7 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	var path := str(monitor.get("path", ""))
 	panel.monitor_key = key_of(path) if path != "" else panel.monitor_name
 	panel.monitor_rect = Rect2i(monitor["position"], new_capture.get_size())
+	panel.monitor_index = monitor_index
 	panel.primary = monitor["primary"]
 	panel._origin = origin
 	panel._hole_punch = hole_punch
@@ -172,6 +210,16 @@ static func create(monitor_index: int, monitor: Dictionary, origin: XROrigin3D, 
 	surface_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	surface_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	surface_material.albedo_texture = panel._viewport.get_texture()
+	if mesh_only:
+		panel._mips = PanelMips.new()
+		if _remote_hole_material == null:
+			_remote_hole_material = ShaderMaterial.new()
+			_remote_hole_material.shader = Shader.new()
+			_remote_hole_material.shader.code = REMOTE_HOLE_SHADER
+		panel._hole = MeshInstance3D.new()
+		panel._hole.material_override = _remote_hole_material
+		panel._hole.visible = false
+		panel.add_child(panel._hole)
 	panel._surface = MeshInstance3D.new()
 	panel._surface.material_override = surface_material
 	if panel._video:
@@ -187,7 +235,7 @@ func update_back(head: Vector3, shown: bool) -> void:
 	if _back == null or placement == null:
 		return
 	_back.visible = shown and (head - placement.transform.origin).dot(placement.transform.basis.z) < 0.0
-	_surface.visible = shown and (placement.curvature < 0.0 or (_video and _hole_punch))
+	_surface.visible = shown and (placement.curvature < 0.0 or mesh_only or (_video and _hole_punch))
 
 
 ## The back plate's mesh in the panel's own frame (+Z towards the viewer): flat,
@@ -244,7 +292,7 @@ func _make_layer(curved: bool) -> void:
 		# On the Compatibility renderer the surface's picture came upside down
 		# (29.10.2026); the Meta vendors plugin turns it back (ignored elsewhere).
 		layer.set(&"XR_FB_composition_layer_image_layout/vertical_flip", true)
-	else:
+	elif not mesh_only:
 		layer.layer_viewport = _viewport
 	if _hole_punch:
 		# Behind the scene with a hole punched through it, so hands and rays draw over the panel.
@@ -354,7 +402,7 @@ func place(new_placement: PanelLayout.Placement) -> void:
 		_make_layer(curved)
 	# Convex (on a wall or a column, slice l): drawn as a mesh (_surface); its quad
 	# layer stays, empty and without a hole, so the panel keeps its place in the list.
-	var convex := placement.curvature < 0.0
+	var convex := placement.curvature < 0.0 or mesh_only
 	# A video layer stays as it is: its surface has no texture for the convex mesh.
 	if not _video and convex == (layer.layer_viewport != null):
 		layer.layer_viewport = null if convex else _viewport
@@ -390,6 +438,9 @@ func place(new_placement: PanelLayout.Placement) -> void:
 			_surface_shape = _back_shape
 			_surface.mesh = back_mesh(placement.size, placement.curvature, distance, 0.0, true)
 		_surface.global_transform = placement.transform
+		if _hole != null:
+			_hole.mesh = _surface.mesh
+			_hole.global_transform = placement.transform * Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, HOLE_LIFT))
 	elif _surface.visible:
 		_surface.visible = false
 	for grip: int in _grips:
@@ -479,14 +530,55 @@ func refresh(session_visible: bool, copy_frames: bool, now: float) -> void:
 	if copy_frames:
 		capture.update()
 	var frame := capture.get_frame_count()
+	if session_visible and not _was_visible:
+		_active_until = now + ACTIVE_HOLD_SEC
+	_was_visible = session_visible
 	if frame != _rendered_frame:
 		_rendered_frame = frame
 		_active_until = now + ACTIVE_HOLD_SEC
 	if _video:
 		return  # The decoder draws into the layer itself; the viewport stays idle.
 	var mode := SubViewport.UPDATE_ALWAYS if session_visible and now < _active_until else SubViewport.UPDATE_DISABLED
+	# The mipmaps follow the viewport (one frame behind: copied before this frame draws it).
+	if _mips != null and _mips.generation != _mips_generation:
+		_mips_generation = _mips.generation
+		var material := _surface.material_override as StandardMaterial3D
+		material.albedo_texture = null
+		material.albedo_texture = _mips.texture
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	if _mips != null and (mode == SubViewport.UPDATE_ALWAYS or _viewport.render_target_update_mode == SubViewport.UPDATE_ALWAYS):
+		RenderingServer.call_on_render_thread(_mips.update.bind(_viewport.get_texture().get_rid()))
 	if _viewport.render_target_update_mode != mode:
 		_viewport.render_target_update_mode = mode
+
+
+## With mesh_only: the layer the headset would show this panel's stream on, for
+## RemoteHost — {} when there is none (out of range, or convex: no layer is drawn
+## from outside, the PC's picture stays). The transform is the origin's (the
+## headset's reference space).
+func remote_layer() -> Dictionary:
+	if not _in_range or not _surface.visible or placement == null or placement.curvature < 0.0:
+		return {}
+	var result := {"key": monitor_key, "xf": layer.transform}
+	if layer is OpenXRCompositionLayerCylinder:
+		var cylinder := layer as OpenXRCompositionLayerCylinder
+		result["kind"] = "cylinder"
+		result["radius"] = cylinder.radius
+		result["angle"] = cylinder.central_angle
+		result["aspect"] = cylinder.aspect_ratio
+	else:
+		result["kind"] = "quad"
+		result["size"] = (layer as OpenXRCompositionLayerQuad).quad_size
+	return result
+
+
+## With mesh_only: whether the PC's picture is see-through over this panel (the
+## headset shows its stream there).
+func set_remote_hole(on: bool) -> void:
+	if _hole != null:
+		var want := on and not remote_layer().is_empty()
+		if _hole.visible != want:
+			_hole.visible = want
 
 
 ## Whether the layer is redrawn on every frame now (its picture is changing).
@@ -547,6 +639,8 @@ func set_thumbnail_live(live: bool) -> void:
 
 
 func close() -> void:
+	if _mips != null:
+		RenderingServer.call_on_render_thread(_mips.release)
 	capture.stop()
 	layer.queue_free()
 	queue_free()  # the grips are children

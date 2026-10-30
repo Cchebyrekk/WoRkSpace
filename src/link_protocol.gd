@@ -24,6 +24,14 @@ const VIDEO_KBPS := 12000
 const VIDEO_KBPS_RANGE := Vector2i(2000, 60000)
 const VIDEO_FPS := 60
 const VIDEO_FPS_RANGE := Vector2i(20, 90)
+## Branch pc-render: the PC that draws the headset's eyes answers and listens on
+## its own ports (the monitors' link server may run beside it).
+const REMOTE_DISCOVERY_PORT := 47901
+const REMOTE_CONTROL_PORT := 47902
+const REMOTE_EYES_PORT := 47903
+## The hybrid (30.10.2026): each monitor's own stream on this + its index (the
+## format of VIDEO_PORT's), shown by the headset on a layer behind the eyes.
+const REMOTE_SCREENS_PORT := 47904
 const ASK := "WoRkPlace?"
 const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.
@@ -54,6 +62,11 @@ const FIELDS := {
 	"ping": ["time"],
 	"pong": ["time"],
 	"video_options": ["kbps", "fps"],
+	# Branch pc-render: the headset's poses (each frame) and the PC's stream of its eyes.
+	"tracking": ["id", "head", "head_ok", "eyes", "fov", "hands", "controllers"],
+	"eyes": ["port", "w", "h"],
+	## The screens' layers the headset shows from the eyes' picture of pose `pose` on.
+	"layers": ["pose", "layers"],
 	"video_stats": ["streams", "watched", "fps", "mbps", "encode_ms"],
 	"videos": ["videos"],
 	"pointer": ["key", "x", "y"],

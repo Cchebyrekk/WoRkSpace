@@ -16,6 +16,7 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.HashMap;
+import java.util.TreeMap;
 
 /**
  * The headset side of the own video link (slice o3): receives the PC's H.264
@@ -72,6 +73,19 @@ public final class VideoReceiver {
 	private Image frame;
 	private Image previousFrame;
 	private long framePointer;
+	/**
+	 * Branch pc-render: the pose id the eyes' picture was drawn with, by its
+	 * presentation time (µs), for frames gone to the reader; and that of the frame
+	 * textureFrame returned last.
+	 */
+	private final TreeMap<Long, Integer> posesByTime = new TreeMap<>();
+	private volatile int framePose;
+	/**
+	 * The decoder's buffer, which can be wider than the picture (3680 for 3664,
+	 * 30.10.2026): sampled whole, the picture shrank towards its left edge.
+	 */
+	private volatile int bufferWidth;
+	private volatile int bufferHeight;
 	/** EGLImage of each of the reader's buffers (by HardwareBuffer id), made once. */
 	private final HashMap<Long, Long> images = new HashMap<>();
 
@@ -96,6 +110,12 @@ public final class VideoReceiver {
 		return receiver == null ? 0 : receiver.takeFrame();
 	}
 
+	/** The pose id of the frame textureFrame returned last (eyes' stream, branch pc-render). */
+	public static int textureFramePose(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.framePose;
+	}
+
 	public static int textureWidth(int id) {
 		VideoReceiver receiver = get(id);
 		return receiver == null ? 0 : receiver.width;
@@ -104,6 +124,17 @@ public final class VideoReceiver {
 	public static int textureHeight(int id) {
 		VideoReceiver receiver = get(id);
 		return receiver == null ? 0 : receiver.height;
+	}
+
+	/** The width of the buffer textureFrame's picture is in (0 before the first). */
+	public static int textureBufferWidth(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.bufferWidth;
+	}
+
+	public static int textureBufferHeight(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.bufferHeight;
 	}
 
 	/** Starts receiving into `surface`; a receiver already running under `id` is stopped first. */
@@ -276,6 +307,13 @@ public final class VideoReceiver {
 		Image image;
 		try {
 			image = reader.acquireLatestImage();
+			if (image != null) {
+				Integer pose = posesByTime.get(image.getTimestamp() / 1000);
+				if (pose != null) {
+					framePose = pose;
+				}
+				posesByTime.headMap(image.getTimestamp() / 1000).clear();
+			}
 		} catch (IllegalStateException e) {
 			return framePointer;
 		}
@@ -291,6 +329,8 @@ public final class VideoReceiver {
 		if (buffer == null) {
 			return framePointer;
 		}
+		bufferWidth = buffer.getWidth();
+		bufferHeight = buffer.getHeight();
 		Long made = images.get(buffer.getId());
 		if (made == null) {
 			made = HardwareBuffers.image(buffer);
@@ -348,18 +388,21 @@ public final class VideoReceiver {
 			width = input.readInt();
 			height = input.readInt();
 			int fps = input.readInt();
-			if (version != 2) {
+			// 3, 4: the PC-drawn eyes (branch pc-render) with a pose id per frame; 4 is HEVC.
+			boolean withPose = version == 3 || version == 4;
+			String mime = version == 4 ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC;
+			if (version != 2 && !withPose) {
 				throw new IllegalStateException("версия видео " + version);
 			}
 
-			MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
+			MediaFormat format = MediaFormat.createVideoFormat(mime, width, height);
 			format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
 			// No KEY_PRIORITY 0 / KEY_OPERATING_RATE: with them the Quest 3S reserved
 			// realtime capacity and refused the 7th decoder (NO_MEMORY, slice o4).
 			// Qualcomm's own switch for the same; unknown keys are ignored.
 			format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1);
 			try {
-				decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+				decoder = MediaCodec.createDecoderByType(mime);
 				Surface output = surface;
 				if (output == null) {
 					// Texture mode: 4 buffers, 2 held for Godot, 2 for the decoder.
@@ -389,6 +432,7 @@ public final class VideoReceiver {
 				int length = input.readInt();
 				long time = input.readLong();
 				long capturedUs = input.readLong();
+				long pose = withPose ? input.readInt() & 0xffffffffL : 0;
 				int flags = input.readByte();
 				if ((flags & 2) != 0) {
 					addClockSample(time, capturedUs); // the clock's answer: our time, the PC's
@@ -418,7 +462,7 @@ public final class VideoReceiver {
 				ByteBuffer buffer = decoder.getInputBuffer(index);
 				buffer.clear();
 				buffer.put(frame, 0, length);
-				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs });
+				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs, pose });
 				decoder.queueInputBuffer(index, 0, length, time, key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
 				drain(decoder, info, queuedAt);
 			}
@@ -468,6 +512,14 @@ public final class VideoReceiver {
 					if (now - firstShownNanos > WARMUP_NS) {
 						addLatency((queued[1] / 1000 + offset - queued[2]) / 1e3, (now / 1000 + offset - queued[2]) / 1e3,
 								decodeMs);
+					}
+				}
+			}
+			if (queued != null && reader != null) {
+				synchronized (this) {
+					posesByTime.put(info.presentationTimeUs, (int) queued[3]);
+					while (posesByTime.size() > 64) {
+						posesByTime.pollFirstEntry();
 					}
 				}
 			}

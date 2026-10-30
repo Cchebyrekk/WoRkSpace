@@ -61,8 +61,9 @@ struct StreamStats {
 // fps (u32 each); then per frame u32 length, u64 sample time in microseconds
 // (since the stream started, unique per frame), u64 capture time of its picture
 // (clock_us; a picture encoded again keeps it, 0 for one captured before the
-// client came; slice o7: the headset measures the latency from it), u8 flags (1 = key frame) and the Annex B H.264
-// bytes. No more than `fps` new pictures a second are encoded. The headset
+// client came; slice o7: the headset measures the latency from it), only in the
+// eyes' stream (version 3, branch pc-render) u32 pose id — the headset's pose
+// they were drawn with, u8 flags (1 = key frame) and the Annex B H.264 bytes. No more than `fps` new pictures a second are encoded. The headset
 // sends messages of 9 bytes, u8 type and u64 (slice o7): 1 — its clock; the
 // answer comes in the frame stream as length 0, u64 that clock, u64 clock_us now,
 // flags 2, and the headset sets its clock by the PC's to about a millisecond;
@@ -77,6 +78,17 @@ public:
 
 	// Returns once the capture, the encoder and the listening socket are up.
 	virtual bool start(void *monitor_handle, int32_t port, int32_t bitrate_kbps, int32_t fps, std::string &error) = 0;
+	// Branch pc-render: streams pictures Godot draws (both eyes side by side)
+	// instead of a monitor. Two shared textures, opened on Godot's D3D12 device
+	// (external_texture: ID3D12Resource, R8G8B8A8, width x height): Godot copies a
+	// picture into one, then external_submit signals Godot's queue, and the stream
+	// encodes it once the GPU is done.
+	// The picture is width x height; it is encoded scaled to out_width x out_height
+	// (drawn larger and scaled down, text stays sharper).
+	virtual bool start_external(void *d3d12_device, void *d3d12_queue, int32_t width, int32_t height, int32_t out_width,
+			int32_t out_height, int32_t port, int32_t bitrate_kbps, int32_t fps, std::string &error) = 0;
+	virtual void *external_texture(int32_t slot) const = 0;
+	virtual void external_submit(int32_t slot, uint32_t pose_id) = 0;
 	virtual void stop() = 0;
 	virtual bool running() const = 0;
 	virtual StreamStats stats() const = 0;

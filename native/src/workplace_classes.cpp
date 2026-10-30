@@ -36,6 +36,138 @@ void ScreenStreamer::_bind_methods() {
 	ClassDB::bind_static_method("ScreenStreamer", D_METHOD("clock_usec"), &ScreenStreamer::clock_usec);
 }
 
+void EyeStreamer::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("start", "eye_width", "eye_height", "out_eye_width", "out_eye_height", "port",
+			"bitrate_kbps", "fps"), &EyeStreamer::start);
+	ClassDB::bind_method(D_METHOD("stop"), &EyeStreamer::stop);
+	ClassDB::bind_method(D_METHOD("is_running"), &EyeStreamer::is_running);
+	ClassDB::bind_method(D_METHOD("copy_eyes", "render_target_texture"), &EyeStreamer::copy_eyes);
+	ClassDB::bind_method(D_METHOD("submit", "pose_id"), &EyeStreamer::submit);
+	ClassDB::bind_method(D_METHOD("get_target"), &EyeStreamer::get_target);
+	ClassDB::bind_method(D_METHOD("mark_written"), &EyeStreamer::mark_written);
+	ClassDB::bind_method(D_METHOD("get_stats"), &EyeStreamer::get_stats);
+	ClassDB::bind_method(D_METHOD("get_last_error"), &EyeStreamer::get_last_error);
+}
+
+EyeStreamer::~EyeStreamer() {
+	stop();
+}
+
+bool EyeStreamer::start(int p_eye_width, int p_eye_height, int p_out_eye_width, int p_out_eye_height, int p_port,
+		int p_bitrate_kbps, int p_fps) {
+	stop();
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	RenderingDevice *rendering_device = rendering_server->get_rendering_device();
+	if (rendering_device == nullptr || rendering_server->get_current_rendering_driver_name() != String("d3d12")) {
+		last_error = "the D3D12 rendering driver is required";
+		return false;
+	}
+	uint64_t device = rendering_device->get_driver_resource(RenderingDevice::DRIVER_RESOURCE_LOGICAL_DEVICE, RID(), 0);
+	uint64_t queue = rendering_device->get_driver_resource(RenderingDevice::DRIVER_RESOURCE_COMMAND_QUEUE, RID(), 0);
+	if (device == 0 || queue == 0) {
+		last_error = "could not get the D3D12 device or queue from the RenderingDevice";
+		return false;
+	}
+	eye_width = p_eye_width & ~1;
+	eye_height = p_eye_height & ~1;
+	backend = workplace::StreamBackend::create();
+	std::string error;
+	if (!backend->start_external(reinterpret_cast<void *>(device), reinterpret_cast<void *>(queue), eye_width * 2,
+				eye_height, (p_out_eye_width & ~1) * 2, p_out_eye_height & ~1, p_port, p_bitrate_kbps, p_fps, error)) {
+		last_error = String::utf8(error.c_str());
+		delete backend;
+		backend = nullptr;
+		return false;
+	}
+	for (int i = 0; i < 2; i++) {
+		slots[i] = rendering_device->texture_create_from_extension(RenderingDevice::TEXTURE_TYPE_2D,
+				RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM, RenderingDevice::TEXTURE_SAMPLES_1,
+				RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT | RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
+						RenderingDevice::TEXTURE_USAGE_STORAGE_BIT,
+				reinterpret_cast<uint64_t>(backend->external_texture(i)), eye_width * 2, eye_height, 1, 1);
+		if (!slots[i].is_valid()) {
+			last_error = "texture_create_from_extension failed";
+			stop();
+			return false;
+		}
+	}
+	last_error = "";
+	return true;
+}
+
+void EyeStreamer::stop() {
+	RenderingServer *rendering_server = RenderingServer::get_singleton();
+	RenderingDevice *rendering_device = rendering_server != nullptr ? rendering_server->get_rendering_device() : nullptr;
+	for (int i = 0; i < 2; i++) {
+		if (slots[i].is_valid() && rendering_device != nullptr) {
+			rendering_device->free_rid(slots[i]);
+		}
+		slots[i] = RID();
+	}
+	if (backend) {
+		backend->stop();
+		delete backend;
+		backend = nullptr;
+	}
+	copied = false;
+}
+
+bool EyeStreamer::is_running() const {
+	return backend && backend->running();
+}
+
+void EyeStreamer::copy_eyes(const RID &p_render_target_texture) {
+	if (!backend || !slots[slot].is_valid() || !p_render_target_texture.is_valid()) {
+		return;
+	}
+	RenderingDevice *rendering_device = RenderingServer::get_singleton()->get_rendering_device();
+	for (int eye = 0; eye < 2; eye++) {
+		rendering_device->texture_copy(p_render_target_texture, slots[slot], Vector3(), Vector3(eye * eye_width, 0, 0),
+				Vector3(eye_width, eye_height, 1), 0, 0, eye, 0);
+	}
+	copied = true;
+}
+
+RID EyeStreamer::get_target() const {
+	return backend ? slots[slot] : RID();
+}
+
+void EyeStreamer::mark_written() {
+	copied = backend != nullptr;
+}
+
+void EyeStreamer::submit(int p_pose_id) {
+	if (!backend || !copied) {
+		return;
+	}
+	backend->external_submit(slot, static_cast<uint32_t>(p_pose_id));
+	slot = 1 - slot;
+	copied = false;
+}
+
+Dictionary EyeStreamer::get_stats() const {
+	Dictionary result;
+	if (!backend) {
+		return result;
+	}
+	workplace::StreamStats stats = backend->stats();
+	result["frames_captured"] = static_cast<int64_t>(stats.frames_captured);
+	result["frames_encoded"] = static_cast<int64_t>(stats.frames_encoded);
+	result["frames_sent"] = static_cast<int64_t>(stats.frames_sent);
+	result["bytes_sent"] = static_cast<int64_t>(stats.bytes_sent);
+	result["encode_ms"] = stats.encode_ms;
+	result["encode_ms_sum"] = stats.encode_ms_sum;
+	result["size"] = Vector2i(stats.width, stats.height);
+	result["encoder"] = String::utf8(stats.encoder.c_str());
+	result["client"] = String::utf8(stats.client.c_str());
+	result["error"] = String::utf8(stats.error.c_str());
+	return result;
+}
+
+String EyeStreamer::get_last_error() const {
+	return last_error;
+}
+
 int64_t ScreenStreamer::clock_usec() {
 	return static_cast<int64_t>(workplace::StreamBackend::clock_us());
 }

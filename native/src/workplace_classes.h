@@ -87,6 +87,43 @@ public:
 	static int64_t clock_usec();
 };
 
+// Branch pc-render: streams what Godot draws for the headset (both eyes side by
+// side) like ScreenStreamer streams a monitor. Each frame: copy_eyes with the
+// render target (a 2-layer array) while the frame is drawn, then submit once
+// it went to the GPU (RenderingServer.frame_post_draw). D3D12 only.
+class EyeStreamer : public RefCounted {
+	GDCLASS(EyeStreamer, RefCounted)
+
+	workplace::StreamBackend *backend = nullptr;
+	String last_error;
+	// The two shared textures as Godot sees them; the one copied into this frame.
+	RID slots[2];
+	int32_t slot = 0;
+	bool copied = false;
+	int32_t eye_width = 0;
+	int32_t eye_height = 0;
+
+protected:
+	static void _bind_methods();
+
+public:
+	~EyeStreamer();
+
+	// The size of one eye as drawn and as encoded; the stream is twice as wide.
+	bool start(int p_eye_width, int p_eye_height, int p_out_eye_width, int p_out_eye_height, int p_port,
+			int p_bitrate_kbps, int p_fps);
+	void stop();
+	bool is_running() const;
+	void copy_eyes(const RID &p_render_target_texture);
+	// The texture to write this frame's picture into yourself (a compute shader,
+	// 2x eye size, RGBA8, storage); then mark_written instead of copy_eyes.
+	RID get_target() const;
+	void mark_written();
+	void submit(int p_pose_id);
+	Dictionary get_stats() const;
+	String get_last_error() const;
+};
+
 // Moves the real Windows cursor and presses its buttons. Static methods only.
 class MouseInput : public Object {
 	GDCLASS(MouseInput, Object)

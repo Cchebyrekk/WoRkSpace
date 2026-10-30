@@ -611,6 +611,11 @@ const SECURE_QUAD_DISTANCE := 1.3
 var _log_timer := 0.0
 var _xr_ready := false
 var _xr: OpenXRInterface
+## Branch pc-render: set (any value) to draw the headset's eyes here — launch with
+## `--xr-mode on` (Godot builds its two-eye shaders only then; OpenXR itself fails
+## without Link and stays out of the way).
+const REMOTE_ENV := "WORKPLACE_REMOTE"
+var _remote: RemoteHost
 ## One live panel per Windows monitor, in the order of ScreenCapture.list_monitors().
 var _panels: Array[ScreenPanel] = []
 ## What the monitor list looked like when the panels were built; a change rebuilds them.
@@ -1143,6 +1148,15 @@ func _ready() -> void:
 	print("[input] агент ввода: ", "подключён" if MouseInput.is_agent_connected() else "нет (окна администратора и UAC недоступны)")
 
 	var xr: XRInterface = XRServer.find_interface("OpenXR")
+	# Branch pc-render: the headset sends its poses and shows what is drawn here.
+	if OS.get_environment(REMOTE_ENV) != "":
+		print("[xr] режим «рисует ПК»: OpenXR не нужен, позы — от шлема")
+		ScreenPanel.mesh_only = true
+		_remote = RemoteHost.new()
+		add_child(_remote)
+		_remote.headset_joined.connect(_on_xr_event.bind(&"session_focussed"))
+		_remote.headset_left.connect(_on_xr_event.bind(&"session_stopping"))
+		xr = _remote.xr if _remote.start() else null
 	if xr == null or not xr.is_initialized():
 		push_error("[xr] OpenXR не инициализирован. Шлем подключён через Link и Link активен?")
 		_status.text = "OpenXR не инициализирован"
@@ -4005,6 +4019,8 @@ func _update_panels(delta: float) -> void:
 	var copy_frames := not _diag.has("nocopy")
 	var now := Time.get_ticks_msec() / 1000.0
 	var head := _camera.global_position
+	if _remote != null:
+		_remote.panels = _panels
 	for panel in _panels:
 		# Beyond the render radius a panel is neither drawn nor fed new pictures;
 		# the monitor stays in Windows as it is.
@@ -4091,7 +4107,7 @@ func _rebuild_panels() -> void:
 	_pending_monitor_signature = ""
 	if _diag.has("nocapture") or _diag.has("nolayer"):
 		return
-	var hole_punch := not _diag.has("nohole")
+	var hole_punch := not _diag.has("nohole") and not ScreenPanel.mesh_only
 	for i in monitors.size():
 		var panel := ScreenPanel.create(i, monitors[i], _origin, hole_punch)
 		if panel != null:

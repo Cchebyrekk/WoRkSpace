@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <d3d11_4.h>
+#include <d3d12.h>
 #include <dxgi1_6.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -48,6 +49,9 @@ namespace capture = winrt::Windows::Graphics::Capture;
 namespace directx = winrt::Windows::Graphics::DirectX;
 
 constexpr uint32_t STREAM_VERSION = 2;
+// The eyes' stream (branch pc-render): each frame header also has the pose id.
+// Version 4: the same, HEVC instead of H.264.
+constexpr uint32_t EYES_STREAM_VERSION = 4;
 // NV12 frames handed to the encoder: it works asynchronously and may still be
 // reading one while the next is being written.
 constexpr int SURFACES = 4;
@@ -115,10 +119,11 @@ void put_u64(std::vector<uint8_t> &out, uint64_t value) {
 	}
 }
 
-// Whether Annex B bytes carry a sequence parameter set (NAL type 7).
-bool has_sps(const uint8_t *data, size_t size) {
+// Whether Annex B bytes carry a sequence parameter set (H.264 NAL type 7, HEVC 33).
+bool has_sps(const uint8_t *data, size_t size, bool hevc) {
 	for (size_t i = 0; i + 3 < size; i++) {
-		if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 && (data[i + 3] & 0x1f) == 7) {
+		if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 &&
+				(hevc ? ((data[i + 3] >> 1) & 0x3f) == 33 : (data[i + 3] & 0x1f) == 7)) {
 			return true;
 		}
 	}
@@ -186,6 +191,27 @@ class MfStream : public StreamBackend {
 	winrt::com_ptr<ID3D11Texture2D> picture; // the last captured frame, BGRA
 	bool have_picture = false;
 	uint64_t picture_time_us = 0; // when `picture` was captured (StreamBackend::clock_us)
+	uint32_t picture_pose = 0; // the headset's pose an external picture was drawn with
+
+	// External pictures (start_external, branch pc-render).
+	bool external = false;
+	int external_out_width = 0;
+	int external_out_height = 0;
+	ID3D12Device *d3d12_device = nullptr;
+	ID3D12CommandQueue *d3d12_queue = nullptr;
+	winrt::com_ptr<ID3D11Texture2D> shared[2];
+	winrt::com_ptr<ID3D12Resource> shared_d3d12[2];
+	winrt::com_ptr<ID3D11Fence> fence;
+	winrt::com_ptr<ID3D12Fence> fence_d3d12;
+	uint64_t fence_value = 0; // Godot's thread
+	struct Submitted {
+		int32_t slot = -1;
+		uint64_t fence_value = 0;
+		uint32_t pose = 0;
+		uint64_t time_us = 0;
+	};
+	std::mutex submitted_mutex;
+	Submitted submitted;
 	winrt::com_ptr<ID3D11VideoDevice> video_device;
 	winrt::com_ptr<ID3D11VideoContext> video_context;
 	winrt::com_ptr<ID3D11VideoProcessorEnumerator> processor_enum;
@@ -208,6 +234,7 @@ class MfStream : public StreamBackend {
 		LONGLONG time;
 		std::chrono::steady_clock::time_point input;
 		uint64_t captured_us;
+		uint32_t pose;
 	};
 	std::deque<InFlight> in_flight;
 
@@ -226,8 +253,42 @@ class MfStream : public StreamBackend {
 public:
 	~MfStream() override { stop(); }
 
-	bool start(void *monitor_handle, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps, std::string &error) override {
+	bool start_external(void *p_device, void *p_queue, int32_t p_width, int32_t p_height, int32_t p_out_width,
+			int32_t p_out_height, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps, std::string &error) override {
 		stop();
+		external = true;
+		d3d12_device = static_cast<ID3D12Device *>(p_device);
+		d3d12_queue = static_cast<ID3D12CommandQueue *>(p_queue);
+		capture_width = p_width & ~1;
+		capture_height = p_height & ~1;
+		external_out_width = p_out_width & ~1;
+		external_out_height = p_out_height & ~1;
+		return start(nullptr, p_port, p_bitrate_kbps, p_fps, error);
+	}
+
+	void *external_texture(int32_t slot) const override {
+		return slot >= 0 && slot < 2 ? shared_d3d12[slot].get() : nullptr;
+	}
+
+	// Godot's thread, after the frame with the copy went to its queue.
+	void external_submit(int32_t slot, uint32_t pose_id) override {
+		if (!fence_d3d12 || !d3d12_queue || slot < 0 || slot > 1) {
+			return;
+		}
+		fence_value++;
+		d3d12_queue->Signal(fence_d3d12.get(), fence_value);
+		{
+			std::lock_guard<std::mutex> lock(submitted_mutex);
+			submitted = { slot, fence_value, pose_id, StreamBackend::clock_us() };
+		}
+		SetEvent(frame_event);
+	}
+
+	bool start(void *monitor_handle, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps, std::string &error) override {
+		if (monitor_handle != nullptr) {
+			stop();
+			external = false;
+		}
 		monitor = static_cast<HMONITOR>(monitor_handle);
 		port = p_port;
 		bitrate_kbps = p_bitrate_kbps;
@@ -325,7 +386,82 @@ private:
 		shared_stats.error = what;
 	}
 
+	// The device on Godot's adapter, the shared textures and the fence (branch pc-render).
+	void open_external() {
+		LUID luid = d3d12_device->GetAdapterLuid();
+		winrt::com_ptr<IDXGIFactory4> factory;
+		check(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())), "DXGI factory");
+		winrt::com_ptr<IDXGIAdapter1> adapter;
+		check(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(adapter.put())), "Godot's adapter");
+		check(D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+					  D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
+					  D3D11_SDK_VERSION, device.put(), nullptr, context.put()),
+				"D3D11CreateDevice");
+		context.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
+		width = std::min(external_out_width, MAX_SIDE) & ~1;
+		height = std::min(external_out_height, MAX_SIDE) & ~1;
+
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = static_cast<UINT>(capture_width);
+		desc.Height = static_cast<UINT>(capture_height);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		check(device->CreateTexture2D(&desc, nullptr, picture.put()), "picture texture");
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+		// Godot writes the shared ones from a compute shader (the foveated warp).
+		desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+		for (int i = 0; i < 2; i++) {
+			check(device->CreateTexture2D(&desc, nullptr, shared[i].put()), "shared texture");
+			HANDLE handle = nullptr;
+			check(shared[i].as<IDXGIResource1>()->CreateSharedHandle(nullptr,
+						  DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handle),
+					"shared texture handle");
+			HRESULT opened = d3d12_device->OpenSharedHandle(handle, IID_PPV_ARGS(shared_d3d12[i].put()));
+			CloseHandle(handle);
+			check(opened, "shared texture on D3D12");
+		}
+		check(device.as<ID3D11Device5>()->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(fence.put())), "fence");
+		HANDLE handle = nullptr;
+		check(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &handle), "fence handle");
+		HRESULT opened = d3d12_device->OpenSharedHandle(handle, IID_PPV_ARGS(fence_d3d12.put()));
+		CloseHandle(handle);
+		check(opened, "fence on D3D12");
+		frame_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		std::lock_guard<std::mutex> lock(stats_mutex);
+		shared_stats.width = width;
+		shared_stats.height = height;
+	}
+
+	// The newest picture Godot submitted, once its GPU work is done.
+	bool take_external() {
+		Submitted taken;
+		{
+			std::lock_guard<std::mutex> lock(submitted_mutex);
+			taken = submitted;
+			submitted.slot = -1;
+		}
+		if (taken.slot < 0) {
+			return false;
+		}
+		check(context.as<ID3D11DeviceContext4>()->Wait(fence.get(), taken.fence_value), "fence wait");
+		context->CopyResource(picture.get(), shared[taken.slot].get());
+		have_picture = true;
+		picture_time_us = taken.time_us;
+		picture_pose = taken.pose;
+		std::lock_guard<std::mutex> lock(stats_mutex);
+		shared_stats.frames_captured++;
+		return true;
+	}
+
 	void open_capture() {
+		if (external) {
+			open_external();
+			return;
+		}
 		check(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
 					  D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
 					  D3D11_SDK_VERSION, device.put(), nullptr, context.put()),
@@ -428,7 +564,9 @@ private:
 
 	void open_encoder() {
 		MFT_REGISTER_TYPE_INFO input{ MFMediaType_Video, MFVideoFormat_NV12 };
-		MFT_REGISTER_TYPE_INFO output{ MFMediaType_Video, MFVideoFormat_H264 };
+		// The eyes' stream (branch pc-render) is HEVC: the same picture keeps more
+		// detail at a bitrate; the monitors' stay H.264 (the main branch's headset app).
+		MFT_REGISTER_TYPE_INFO output{ MFMediaType_Video, external ? MFVideoFormat_HEVC : MFVideoFormat_H264 };
 		IMFActivate **activates = nullptr;
 		UINT32 count = 0;
 		check(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, &input, &output,
@@ -475,7 +613,7 @@ private:
 		winrt::com_ptr<IMFMediaType> out_type;
 		check(MFCreateMediaType(out_type.put()), "output type");
 		out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-		out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+		out_type->SetGUID(MF_MT_SUBTYPE, external ? MFVideoFormat_HEVC : MFVideoFormat_H264);
 		out_type->SetUINT32(MF_MT_AVG_BITRATE, static_cast<UINT32>(bitrate_kbps) * 1000);
 		MFSetAttributeSize(out_type.get(), MF_MT_FRAME_SIZE, width, height);
 		MFSetAttributeRatio(out_type.get(), MF_MT_FRAME_RATE, fps, 1);
@@ -484,7 +622,8 @@ private:
 		// Constrained Baseline: no frame reordering at all. With High the Quest's
 		// decoder held each frame until the next one came, so typed letters showed
 		// only with the next change (26.10.2026).
-		out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_ConstrainedBase);
+		out_type->SetUINT32(MF_MT_MPEG2_PROFILE,
+				external ? static_cast<UINT32>(eAVEncH265VProfile_Main_420_8) : static_cast<UINT32>(eAVEncH264VProfile_ConstrainedBase));
 		out_type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
 		out_type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
 		check(encoder->SetOutputType(0, out_type.get(), 0), "encoder output type");
@@ -589,6 +728,9 @@ private:
 
 	// Copies the newest captured frame into `picture`; older ones are dropped.
 	bool take_frame() {
+		if (external) {
+			return take_external();
+		}
 		capture::Direct3D11CaptureFrame newest{ nullptr };
 		for (;;) {
 			capture::Direct3D11CaptureFrame frame = frame_pool.TryGetNextFrame();
@@ -691,7 +833,7 @@ private:
 		check(encoder->ProcessInput(0, sample.get(), 0), "encoder input");
 		need_input--;
 		// A picture from before this client came is no measure of the latency.
-		in_flight.push_back({ time, now, picture_time_us >= client_since_us ? picture_time_us : 0 });
+		in_flight.push_back({ time, now, picture_time_us >= client_since_us ? picture_time_us : 0, picture_pose });
 	}
 
 	void pump_events() {
@@ -740,9 +882,11 @@ private:
 		}
 		double encode_ms = 0.0;
 		uint64_t captured_us = 0;
+		uint32_t pose = 0;
 		if (!in_flight.empty() && in_flight.front().time == time) {
 			encode_ms = std::chrono::duration<double, std::milli>(now - in_flight.front().input).count();
 			captured_us = in_flight.front().captured_us;
+			pose = in_flight.front().pose;
 			in_flight.pop_front();
 		}
 		bool key = MFGetAttributeUINT32(sample.get(), MFSampleExtension_CleanPoint, 0) != 0;
@@ -751,12 +895,15 @@ private:
 		BYTE *data = nullptr;
 		DWORD size = 0;
 		check(buffer->Lock(&data, nullptr, &size), "lock encoded buffer");
-		bool prefix = key && !sequence_header.empty() && !has_sps(data, size);
+		bool prefix = key && !sequence_header.empty() && !has_sps(data, size, external);
 		std::vector<uint8_t> packet;
-		packet.reserve(21 + size + (prefix ? sequence_header.size() : 0));
+		packet.reserve(25 + size + (prefix ? sequence_header.size() : 0));
 		put_u32(packet, static_cast<uint32_t>(size + (prefix ? sequence_header.size() : 0)));
 		put_u64(packet, static_cast<uint64_t>(time / 10));
 		put_u64(packet, captured_us);
+		if (external) {
+			put_u32(packet, pose);
+		}
 		packet.push_back(key ? 1 : 0);
 		if (prefix) {
 			packet.insert(packet.end(), sequence_header.begin(), sequence_header.end());
@@ -795,7 +942,7 @@ private:
 		DWORD timeout_ms = 3000;
 		setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms));
 		std::vector<uint8_t> header{ 'W', 'R', 'K', 'V' };
-		put_u32(header, STREAM_VERSION);
+		put_u32(header, external ? EYES_STREAM_VERSION : STREAM_VERSION);
 		put_u32(header, static_cast<uint32_t>(width));
 		put_u32(header, static_cast<uint32_t>(height));
 		put_u32(header, static_cast<uint32_t>(fps));
@@ -832,6 +979,9 @@ private:
 				put_u32(answer, 0);
 				put_u64(answer, value);
 				put_u64(answer, StreamBackend::clock_us());
+				if (external) {
+					put_u32(answer, 0);
+				}
 				answer.push_back(2);
 				send_all(answer);
 			} else if (message[0] == 2) {
@@ -951,6 +1101,12 @@ private:
 		picture = nullptr;
 		staging = nullptr;
 		have_picture = false;
+		for (int i = 0; i < 2; i++) {
+			shared[i] = nullptr;
+			shared_d3d12[i] = nullptr;
+		}
+		fence = nullptr;
+		fence_d3d12 = nullptr;
 		winrt_device = nullptr;
 		context = nullptr;
 		device = nullptr;

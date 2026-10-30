@@ -151,8 +151,13 @@ func update_textures() -> void:
 			continue
 		var texture: ExternalTexture = screen["texture"]
 		if screen["buffer"] == 0:
-			texture.set_size(Vector2(_receiver.textureWidth(screen["id"]), _receiver.textureHeight(screen["id"])))
-			print("[video] %s: выпуклый экран получил первый кадр" % key)
+			var picture := Vector2(_receiver.textureWidth(screen["id"]), _receiver.textureHeight(screen["id"]))
+			var padded := Vector2(_receiver.textureBufferWidth(screen["id"]), _receiver.textureBufferHeight(screen["id"]))
+			texture.set_size(picture)
+			var mesh := screen["layer"] as MeshInstance3D
+			if mesh != null and mesh.material_override is ShaderMaterial and padded.x > 0.0 and padded.y > 0.0:
+				(mesh.material_override as ShaderMaterial).set_shader_parameter(&"crop", picture / padded)
+			print("[video] %s: выпуклый экран получил первый кадр (%s в буфере %s)" % [key, picture, padded])
 		screen["buffer"] = buffer
 		texture.set_external_buffer_id(buffer)
 
