@@ -18,6 +18,14 @@ var monitors: Array = []
 var monitors_changed := false
 ## The last ping's round trip, -1 until one came back.
 var rtt_ms := -1.0
+## What the PC's streams did lately (LinkProtocol.video_stats), {} until heard.
+var pc_video_stats: Dictionary = {}
+## The video the user wants (HeadsetOptions); sent on connecting, and once it
+## stays the same VIDEO_SETTLE_SEC after a change (each send restarts every
+## stream on the PC: stepping the bitrate up restarted them a dozen times, slice o7).
+var video_kbps := LinkProtocol.VIDEO_KBPS
+var video_fps := LinkProtocol.VIDEO_FPS
+const VIDEO_SETTLE_SEC := 1.5
 ## The streams the PC offers (LinkProtocol.video: port, key, w, h each);
 ## `videos_changed` is set when the list is new.
 var videos: Array = []
@@ -41,6 +49,9 @@ var _started := 0.0
 var _last_heard := 0.0
 var _next_ping := 0.0
 var _greeted := false
+var _video_sent := Vector2i(-1, -1)
+var _video_wanted := Vector2i(-1, -1)
+var _video_wanted_since := 0.0
 
 
 func _init(device: String) -> void:
@@ -201,6 +212,8 @@ func _connected(now: float) -> void:
 				settings_changed = true
 			"pong":
 				rtt_ms = (now - float(message["time"])) * 1000.0
+			"video_stats":
+				pc_video_stats = message
 			"bye":
 				_reset("ПК закрылся")
 	if _channel == null:
@@ -210,6 +223,16 @@ func _connected(now: float) -> void:
 	elif now >= _next_ping:
 		_next_ping = now + LinkProtocol.PING_SEC
 		_channel.put_var(LinkProtocol.ping(now))
+	# Only the world's settings (the defaults before it are not the user's: a
+	# restart of every stream for nothing).
+	var wanted := Vector2i(video_kbps, video_fps)
+	if wanted != _video_wanted:
+		_video_wanted = wanted
+		_video_wanted_since = now
+	var settled := _video_sent.x < 0 or now - _video_wanted_since >= VIDEO_SETTLE_SEC
+	if _greeted and HeadsetOptions.current != null and _video_sent != wanted and settled:
+		_video_sent = wanted
+		_channel.put_var(LinkProtocol.video_options(video_kbps, video_fps))
 
 
 func _take_monitors(list: Array) -> void:
@@ -226,6 +249,8 @@ func _reset(why: String) -> void:
 	_channel = null
 	_greeted = false
 	rtt_ms = -1.0
+	_video_sent = Vector2i(-1, -1)
+	pc_video_stats = {}
 	# The monitors stay (slice o6): without them the world took the PC's monitors
 	# as gone and dropped every screen at each break; the next welcome brings the
 	# list again. The streams are gone with the connection.

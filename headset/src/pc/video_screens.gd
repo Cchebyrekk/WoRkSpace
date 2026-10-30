@@ -87,6 +87,9 @@ func poll(now: float, camera: Camera3D) -> void:
 			_stop(_attached[key])
 			_attached[key].erase("failures")
 			_attached[key].erase("retry_at")
+		# Learnt again: while every stream starts anew the old decoders may not be
+		# let go yet (slice o7: after a few bitrate changes only 2 were left live).
+		_decoder_limit = 1 << 30
 	# A stream that ended (the PC restarted it, the connection broke) leaves its
 	# panel frozen while it still counts as live (26.10.2026): it starts again,
 	# later each time it fails. A decoder refused means the headset has no more:

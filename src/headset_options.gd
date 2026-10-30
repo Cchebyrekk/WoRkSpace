@@ -14,6 +14,13 @@ var live_screens := 6
 ## How the headset reaches the PC: either way, only the USB cable (adb reverse,
 ## which the PC's link server sets up itself), or only Wi-Fi.
 var link_mode := LINK_AUTO
+## The video of every screen (slice o7): megabits a second of each stream and
+## new pictures a second; the PC restarts its streams when either changes.
+var video_mbps := 12.0
+var video_fps := 60
+## A line under the view: the latency from the PC's capture to the decoder, and
+## what the PC's encoder and the headset's decoders take.
+var video_stats := 0
 
 ## The options of the world now running (main.gd sets it); null before that.
 static var current: HeadsetOptions

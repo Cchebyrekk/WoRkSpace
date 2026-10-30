@@ -18,7 +18,12 @@ const CONTROL_PORT := 47802
 const VIDEO_PORT := 47803
 const VIDEO_MAGIC := "WRKV"
 const VIDEO_HEADER_SIZE := 20
-const VIDEO_FRAME_HEADER_SIZE := 13
+const VIDEO_FRAME_HEADER_SIZE := 21
+## The video the headset asks for (slice o7, its settings): defaults and limits.
+const VIDEO_KBPS := 12000
+const VIDEO_KBPS_RANGE := Vector2i(2000, 60000)
+const VIDEO_FPS := 60
+const VIDEO_FPS_RANGE := Vector2i(20, 90)
 const ASK := "WoRkPlace?"
 const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.
@@ -48,6 +53,8 @@ const FIELDS := {
 	"monitors": ["monitors"],
 	"ping": ["time"],
 	"pong": ["time"],
+	"video_options": ["kbps", "fps"],
+	"video_stats": ["streams", "watched", "fps", "mbps", "encode_ms"],
 	"videos": ["videos"],
 	"pointer": ["key", "x", "y"],
 	"button": ["b", "down"],
@@ -188,6 +195,18 @@ static func pong(time: float) -> Dictionary:
 	return {"t": "pong", "time": time}
 
 
+## The bitrate and the frame rate the headset wants every stream at (slice o7).
+static func video_options(kbps: int, fps: int) -> Dictionary:
+	return {"t": "video_options", "kbps": clampi(kbps, VIDEO_KBPS_RANGE.x, VIDEO_KBPS_RANGE.y),
+			"fps": clampi(fps, VIDEO_FPS_RANGE.x, VIDEO_FPS_RANGE.y)}
+
+
+## What the PC's streams did lately (slice o7): pictures a second over all
+## watched streams, megabits a second, the slowest encode.
+static func video_stats(streams: int, watched: int, fps: float, mbps: float, encode_ms: float) -> Dictionary:
+	return {"t": "video_stats", "streams": streams, "watched": watched, "fps": fps, "mbps": mbps, "encode_ms": encode_ms}
+
+
 ## One monitor as the headset sees it: `key` is the PC's stable id
 ## (ScreenPanel.key_of), the rectangle is in desktop pixels.
 static func monitor(key: String, name: String, position: Vector2i, size: Vector2i, primary: bool) -> Dictionary:
@@ -235,6 +254,8 @@ static func problem(message: Variant) -> String:
 		return "secure_frame без картинки"
 	if type == "settings" and not message["text"] is String:
 		return "settings не текст"
+	if type == "video_options" and not (message["kbps"] is int and message["fps"] is int):
+		return "video_options с плохими полями"
 	if type == "wheel" and not (message["up"] is int and message["right"] is int):
 		return "wheel с плохими полями"
 	if type == "keys":

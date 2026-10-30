@@ -13,10 +13,10 @@ extends Node
 
 ## How often the monitor list is looked at for changes.
 const MONITORS_CHECK_SEC := 2.0
-const VIDEO_BITRATE_KBPS := 12000
-const VIDEO_FPS := 60
-## How often a running stream reports into the log.
-const VIDEO_LOG_SEC := 10.0
+## How often the headset hears what the streams did (slice o7); every
+## VIDEO_LOG_EVERY-th time it also goes into the log.
+const VIDEO_STATS_SEC := 2.0
+const VIDEO_LOG_EVERY := 5
 
 var _discovery := PacketPeerUDP.new()
 var _server := TCPServer.new()
@@ -53,8 +53,12 @@ var _next_adb := 0.0
 ## Monitor key -> its ScreenStreamer.
 var _streamers: Dictionary = {}
 var _next_video_log := 0.0
-## Monitor key -> its stats at the last log line.
+var _video_reports := 0
+## Monitor key -> its stats at the last report.
 var _video_logged: Dictionary = {}
+## The headset's video settings (slice o7: «Битрейт», «Кадров в секунду»).
+var _video_kbps := LinkProtocol.VIDEO_KBPS
+var _video_fps := LinkProtocol.VIDEO_FPS
 ## Mouse buttons the headset holds down: released when it goes away.
 var _buttons_down: Dictionary = {}
 ## Keys the headset holds down (Ctrl for zoom): let go when it goes away.
@@ -236,6 +240,14 @@ func _serve(now: float) -> void:
 					_keys_down.erase(message["vk"])
 			"ping":
 				_send(LinkProtocol.pong(message["time"]))
+			"video_options":
+				var options := LinkProtocol.video_options(message["kbps"], message["fps"])
+				if options["kbps"] != _video_kbps or options["fps"] != _video_fps:
+					_video_kbps = options["kbps"]
+					_video_fps = options["fps"]
+					print("[video] шлем просит %d кбит/с, %d к/с" % [_video_kbps, _video_fps])
+					if not _streamers.is_empty():
+						_start_videos()
 			"bye":
 				_drop("шлем попрощался")
 	if _channel != null and now - _last_heard > LinkProtocol.LINK_TIMEOUT_SEC:
@@ -417,18 +429,18 @@ func _start_videos() -> void:
 		var monitor: Dictionary = _monitors[i]
 		var streamer := ScreenStreamer.new()
 		var port := LinkProtocol.VIDEO_PORT + i
-		if not streamer.start(i, port, VIDEO_BITRATE_KBPS, VIDEO_FPS):
+		if not streamer.start(i, port, _video_kbps, _video_fps):
 			print("[video] %s не запустился: %s" % [monitor["name"], streamer.get_last_error()])
 			continue
 		var stats := streamer.get_stats()
 		_streamers[monitor["key"]] = streamer
 		_video_logged[monitor["key"]] = stats
 		videos.append(LinkProtocol.video(port, monitor["key"], stats["size"]))
-	_next_video_log = Time.get_ticks_msec() / 1000.0 + VIDEO_LOG_SEC
+	_next_video_log = Time.get_ticks_msec() / 1000.0 + VIDEO_STATS_SEC
 	if not _streamers.is_empty():
 		var first: ScreenStreamer = _streamers.values()[0]
 		print("[video] потоков %d из %d: %s, %d кбит/с, %d к/с" % [_streamers.size(), _monitors.size(),
-				first.get_stats()["encoder"], VIDEO_BITRATE_KBPS, VIDEO_FPS])
+				first.get_stats()["encoder"], _video_kbps, _video_fps])
 	_send(LinkProtocol.videos_message(videos))
 
 
@@ -442,7 +454,8 @@ func _stop_videos() -> void:
 	print("[video] остановлены")
 
 
-## One log line for all streams: what the headset gets, summed up.
+## What the headset gets, summed up over all streams: to the headset every
+## VIDEO_STATS_SEC, into the log every VIDEO_LOG_EVERY-th time.
 func _watch_videos(now: float) -> void:
 	for key: String in _streamers.keys():
 		var streamer: ScreenStreamer = _streamers[key]
@@ -451,11 +464,12 @@ func _watch_videos(now: float) -> void:
 			_streamers.erase(key)
 	if now < _next_video_log:
 		return
-	var seconds := VIDEO_LOG_SEC + now - _next_video_log
-	_next_video_log = now + VIDEO_LOG_SEC
+	var seconds := VIDEO_STATS_SEC + now - _next_video_log
+	_next_video_log = now + VIDEO_STATS_SEC
 	var sent := 0
 	var bytes := 0
 	var watched := 0
+	# The slowest stream's average encode (a busy GPU shows here first).
 	var slowest := 0.0
 	for key: String in _streamers:
 		var stats: Dictionary = _streamers[key].get_stats()
@@ -463,10 +477,15 @@ func _watch_videos(now: float) -> void:
 		sent += stats["frames_sent"] - before["frames_sent"]
 		bytes += stats["bytes_sent"] - before["bytes_sent"]
 		watched += 1 if stats["client"] != "" else 0
-		slowest = maxf(slowest, stats["encode_ms"])
+		var encoded: int = stats["frames_encoded"] - before["frames_encoded"]
+		if encoded > 0:
+			slowest = maxf(slowest, (stats["encode_ms_sum"] - before["encode_ms_sum"]) / encoded)
 		_video_logged[key] = stats
-	print("[video] шлем смотрит %d из %d: отправлено %.0f к/с, %.1f Мбит/с, кодирование до %.1f мс" % [watched,
-			_streamers.size(), sent / seconds, bytes * 8.0 / seconds / 1e6, slowest])
+	_send(LinkProtocol.video_stats(_streamers.size(), watched, sent / seconds, bytes * 8.0 / seconds / 1e6, slowest))
+	_video_reports += 1
+	if _video_reports % VIDEO_LOG_EVERY == 0:
+		print("[video] шлем смотрит %d из %d: отправлено %.0f к/с, %.1f Мбит/с, кодирование в среднем до %.1f мс" % [
+				watched, _streamers.size(), sent / seconds, bytes * 8.0 / seconds / 1e6, slowest])
 
 
 ## True if the list differs from the one the headset was last told about.

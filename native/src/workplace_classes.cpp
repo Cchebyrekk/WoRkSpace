@@ -33,6 +33,11 @@ void ScreenStreamer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_last_error"), &ScreenStreamer::get_last_error);
 	ClassDB::bind_method(D_METHOD("request_snapshot", "width"), &ScreenStreamer::request_snapshot);
 	ClassDB::bind_method(D_METHOD("get_snapshot"), &ScreenStreamer::get_snapshot);
+	ClassDB::bind_static_method("ScreenStreamer", D_METHOD("clock_usec"), &ScreenStreamer::clock_usec);
+}
+
+int64_t ScreenStreamer::clock_usec() {
+	return static_cast<int64_t>(workplace::StreamBackend::clock_us());
 }
 
 ScreenStreamer::~ScreenStreamer() {
@@ -81,6 +86,7 @@ Dictionary ScreenStreamer::get_stats() const {
 	result["frames_sent"] = static_cast<int64_t>(stats.frames_sent);
 	result["bytes_sent"] = static_cast<int64_t>(stats.bytes_sent);
 	result["encode_ms"] = stats.encode_ms;
+	result["encode_ms_sum"] = stats.encode_ms_sum;
 	result["size"] = Vector2i(stats.width, stats.height);
 	result["encoder"] = String::utf8(stats.encoder.c_str());
 	result["client"] = String::utf8(stats.client.c_str());

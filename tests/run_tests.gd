@@ -2032,6 +2032,11 @@ func _test_link_protocol() -> void:
 	_check(LinkProtocol.problem(LinkProtocol.hello("Quest 3S")) == "", "протокол: привет шлема правильный")
 	_check(LinkProtocol.problem(LinkProtocol.ping(1.5)) == "" and LinkProtocol.problem(LinkProtocol.pong(1.5)) == "",
 			"протокол: пинг и понг правильные")
+	var asked := LinkProtocol.video_options(500, 500)
+	_check(LinkProtocol.problem(asked) == "" and asked["kbps"] == LinkProtocol.VIDEO_KBPS_RANGE.x
+			and asked["fps"] == LinkProtocol.VIDEO_FPS_RANGE.y, "протокол: видео в пределах")
+	_check(LinkProtocol.problem({"t": "video_options", "kbps": "x", "fps": 60}) != "", "протокол: плохой битрейт отвергнут")
+	_check(LinkProtocol.problem(LinkProtocol.video_stats(10, 6, 120.0, 30.5, 4.2)) == "", "протокол: сводка видео правильная")
 	_check(LinkProtocol.problem({"t": "hello", "v": 99, "device": "x"}) != "", "протокол: чужая версия отвергнута")
 	_check(LinkProtocol.problem({"t": "welcome", "v": LinkProtocol.VERSION, "pc": "x"}) != "", "протокол: без мониторов отвергнуто")
 	_check(LinkProtocol.problem({"t": "jump"}) != "", "протокол: неизвестный тип отвергнут")

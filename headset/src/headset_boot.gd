@@ -17,6 +17,11 @@ const WAIT_FOR_PC_SEC := 4.0
 ## eyes says so: the screens stay with their last picture and seemed frozen.
 const LOST_NOTICE_SEC := 1.5
 const LOST_NOTICE_OFFSET := Vector3(0.0, -0.18, -0.9)
+## The video's latency and load (slice o7): read this often, shown under the view
+## when «Показывать задержку» is on, logged every VIDEO_LOG_EVERY-th time.
+const VIDEO_STATS_SEC := 2.0
+const VIDEO_LOG_EVERY := 5
+const VIDEO_STATS_OFFSET := Vector3(0.0, -0.3, -0.9)
 
 var _link: HeadsetLink
 var _main: Node3D
@@ -24,6 +29,12 @@ var _started := 0.0
 var _lost_notice: Label3D
 ## Since when the link is down (-1 while up).
 var _lost_since := -1.0
+var _video_label: Label3D
+var _video_text := ""
+var _next_video_stats := 0.0
+var _video_reports := 0
+## com.workplace.headset.VideoReceiver (its latency), null off Android.
+var _receiver: Variant = null
 
 
 func _ready() -> void:
@@ -35,6 +46,8 @@ func _ready() -> void:
 	VddConfig.remote_text = _vdd_config_text
 	VddConfig.remote_write = _write_vdd_config
 	_started = Time.get_ticks_msec() / 1000.0
+	if OS.get_name() == "Android":
+		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
 
 
 func _start_main() -> void:
@@ -110,6 +123,57 @@ func _process(_delta: float) -> void:
 	PcLink.screens.poll(now, get_viewport().get_camera_3d())
 	PcLink.screens.update_textures()
 	_update_lost_notice(now)
+	var options := HeadsetOptions.current
+	if options != null:
+		_link.video_kbps = roundi(options.video_mbps * 1000.0)
+		_link.video_fps = options.video_fps
+	_update_video_stats(now, options != null and options.video_stats != 0)
+
+
+## Every VIDEO_STATS_SEC: what the PC's streams and this headset's decoders did,
+## and the latency of new pictures from the PC capturing them.
+func _update_video_stats(now: float, shown: bool) -> void:
+	if now >= _next_video_stats:
+		_next_video_stats = now + VIDEO_STATS_SEC
+		_video_text = _describe_video()
+		_video_reports += 1
+		if _video_reports % VIDEO_LOG_EVERY == 0 and PcLink.connected():
+			print("[video] ", _video_text.replace("\n", "; "))
+	var camera := get_viewport().get_camera_3d()
+	if shown and camera != null and (_video_label == null or _video_label.get_parent() != camera):
+		if _video_label != null:
+			_video_label.queue_free()
+		_video_label = Label3D.new()
+		_video_label.pixel_size = 0.0007
+		_video_label.font_size = 32
+		_video_label.outline_size = 8
+		_video_label.modulate = Color(0.75, 0.95, 1.0)
+		_video_label.no_depth_test = true
+		_video_label.render_priority = 20
+		_video_label.position = VIDEO_STATS_OFFSET
+		camera.add_child(_video_label)
+	if is_instance_valid(_video_label):
+		_video_label.visible = shown and PcLink.connected()
+		_video_label.text = _video_text
+
+
+func _describe_video() -> String:
+	var lines: Array[String] = []
+	var report: String = _receiver.latencyReport() if _receiver != null else ""
+	if report != "":
+		# count arrived shown shownMax decode decodeMax (VideoReceiver.latencyReport)
+		var v := report.split(" ")
+		lines.append("от захвата на ПК: принят %.0f мс, декодирован %.0f мс (худший %.0f), ±%.0f мс" % [
+				float(v[1]), float(v[2]), float(v[3]), float(_receiver.clockErrorMs())])
+		lines.append("декодер %.1f мс (худший %.0f); новых картинок %.0f/с" % [float(v[4]), float(v[5]),
+				float(v[0]) / VIDEO_STATS_SEC])
+	elif _receiver != null:
+		lines.append("задержка: нет новых картинок" if float(_receiver.clockErrorMs()) >= 0.0 else "задержка: часы ещё не сверены")
+	var pc := _link.pc_video_stats
+	if not pc.is_empty():
+		lines.append("ПК: смотрю %d из %d, %.0f к/с, %.1f Мбит/с, кодирование %.1f мс; %d кбит/с × %d к/с" % [
+				pc["watched"], pc["streams"], pc["fps"], pc["mbps"], pc["encode_ms"], _link.video_kbps, _link.video_fps])
+	return "\n".join(lines)
 
 
 func _update_lost_notice(now: float) -> void:

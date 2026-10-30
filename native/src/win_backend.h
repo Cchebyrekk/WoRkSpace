@@ -46,6 +46,7 @@ struct StreamStats {
 	uint64_t frames_sent = 0;
 	uint64_t bytes_sent = 0;
 	double encode_ms = 0.0; // the last frame, from input to output of the encoder
+	double encode_ms_sum = 0.0; // all frames so far (an average over a time: its change / frames_encoded's)
 	int32_t width = 0;
 	int32_t height = 0;
 	std::string encoder; // the hardware encoder's name
@@ -57,10 +58,20 @@ struct StreamStats {
 // are turned into NV12 on the GPU, encoded by the hardware H.264 encoder (Media
 // Foundation) and sent to one TCP client. Everything runs on its own thread.
 // Wire format, all integers big-endian: on connect "WRKV", version, width, height,
-// fps (u32 each); then per frame u32 length, u64 capture time in microseconds,
-// u8 flags (1 = key frame) and the Annex B H.264 bytes.
+// fps (u32 each); then per frame u32 length, u64 sample time in microseconds
+// (since the stream started, unique per frame), u64 capture time of its picture
+// (clock_us; a picture encoded again keeps it, 0 for one captured before the
+// client came; slice o7: the headset measures the latency from it), u8 flags (1 = key frame) and the Annex B H.264
+// bytes. No more than `fps` new pictures a second are encoded. The headset
+// sends messages of 9 bytes, u8 type and u64 (slice o7): 1 — its clock; the
+// answer comes in the frame stream as length 0, u64 that clock, u64 clock_us now,
+// flags 2, and the headset sets its clock by the PC's to about a millisecond;
+// 2 — frames received so far: once these come, no more than a few frames are on
+// the way at a time (a slow network then gets fewer frames, not a growing queue).
 class StreamBackend {
 public:
+	// The clock of the capture times: microseconds of QueryPerformanceCounter.
+	static uint64_t clock_us();
 	static StreamBackend *create();
 	virtual ~StreamBackend() = default;
 

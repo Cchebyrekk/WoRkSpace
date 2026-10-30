@@ -73,7 +73,8 @@ public:
 	void stop();
 	// False also when the stream thread stopped by itself; get_stats() then has "error".
 	bool is_running() const;
-	// frames_captured, frames_encoded, frames_sent, bytes_sent, encode_ms, size,
+	// frames_captured, frames_encoded, frames_sent, bytes_sent, encode_ms (the
+	// last frame), encode_ms_sum (all so far), size,
 	// encoder, client ("" without a headset), error.
 	Dictionary get_stats() const;
 	String get_last_error() const;
@@ -81,6 +82,9 @@ public:
 	// get_snapshot() returns it as an RGBA8 image (null until it is there).
 	void request_snapshot(int p_width);
 	Ref<Image> get_snapshot();
+	// The clock of the frames' capture times, microseconds (slice o7: the headset
+	// sets its clock by it to measure the latency).
+	static int64_t clock_usec();
 };
 
 // Moves the real Windows cursor and presses its buttons. Static methods only.

@@ -47,7 +47,7 @@ namespace {
 namespace capture = winrt::Windows::Graphics::Capture;
 namespace directx = winrt::Windows::Graphics::DirectX;
 
-constexpr uint32_t STREAM_VERSION = 1;
+constexpr uint32_t STREAM_VERSION = 2;
 // NV12 frames handed to the encoder: it works asynchronously and may still be
 // reading one while the next is being written.
 constexpr int SURFACES = 4;
@@ -56,8 +56,13 @@ constexpr int SURFACES = 4;
 constexpr auto REFRESH = std::chrono::milliseconds(1000);
 // After a new picture the same one is encoded again this many times, this far
 // apart: a decoder that keeps one frame back then shows the new one at once.
+// Slice o7: the Quest's decoder held each frame ~20 ms, until the next came
+// (measured); the first repeat goes right after, not a frame later.
 constexpr int PUSH_REPEATS = 2;
-constexpr auto PUSH_INTERVAL = std::chrono::milliseconds(17);
+constexpr auto PUSH_INTERVAL = std::chrono::milliseconds(3);
+// Frames encoded or sent but not yet received by the headset, at most (when it
+// reports them): over Wi-Fi at 30 Mbit/s a queue of seconds built up (slice o7).
+constexpr size_t MAX_IN_AIR = 6;
 // The longest side H.264 hardware encoders take.
 constexpr int MAX_SIDE = 4096;
 
@@ -180,6 +185,7 @@ class MfStream : public StreamBackend {
 
 	winrt::com_ptr<ID3D11Texture2D> picture; // the last captured frame, BGRA
 	bool have_picture = false;
+	uint64_t picture_time_us = 0; // when `picture` was captured (StreamBackend::clock_us)
 	winrt::com_ptr<ID3D11VideoDevice> video_device;
 	winrt::com_ptr<ID3D11VideoContext> video_context;
 	winrt::com_ptr<ID3D11VideoProcessorEnumerator> processor_enum;
@@ -196,11 +202,23 @@ class MfStream : public StreamBackend {
 	winrt::com_ptr<ICodecAPI> codec;
 	std::vector<uint8_t> sequence_header;
 	int need_input = 0;
-	std::deque<std::chrono::steady_clock::time_point> in_flight;
+	// Frames in the encoder, oldest first: matched to its output by sample time
+	// (one the encoder dropped is skipped, not taken for the next).
+	struct InFlight {
+		LONGLONG time;
+		std::chrono::steady_clock::time_point input;
+		uint64_t captured_us;
+	};
+	std::deque<InFlight> in_flight;
 
 	SOCKET listener = INVALID_SOCKET;
 	SOCKET client = INVALID_SOCKET;
 	bool want_key_frame = false;
+	// Frames sent to this client, and how many it said it has (slice o7).
+	uint64_t sent_to_client = 0;
+	uint64_t client_since_us = 0;
+	uint64_t acked = 0;
+	bool acks_seen = false;
 	// While shutting down: encoded frames are dropped, not sent.
 	bool draining = false;
 	std::chrono::steady_clock::time_point started;
@@ -528,10 +546,15 @@ private:
 
 	void loop() {
 		auto last_input = std::chrono::steady_clock::now() - REFRESH;
+		auto last_picture = last_input; // the last new picture encoded
 		bool fresh = false;
 		int pushes = 0;
+		// New pictures at most `fps` a second (slice o7: the user's setting); a
+		// little early is still in time, WGC frames come unevenly.
+		auto interval = std::chrono::microseconds(900'000 / std::max(fps, 1));
 		while (!stopping) {
 			accept_client();
+			read_headset();
 			pump_events();
 			if (WaitForSingleObject(frame_event, 0) == WAIT_OBJECT_0) {
 				fresh = take_frame() || fresh;
@@ -540,12 +563,20 @@ private:
 				make_snapshot(snapshot_width.exchange(0));
 			}
 			auto now = std::chrono::steady_clock::now();
+			// Repeats do not wait for the frame rate (one that finds a new picture
+			// takes it along, which then counts as new).
 			bool push = pushes > 0 && now - last_input >= PUSH_INTERVAL;
-			bool due = fresh || want_key_frame || push || now - last_input >= REFRESH;
-			if (client != INVALID_SOCKET && have_picture && need_input > 0 && due) {
+			bool due = (fresh && now - last_picture >= interval) || want_key_frame || push || now - last_input >= REFRESH;
+			bool room = !acks_seen || in_flight.size() + (sent_to_client - acked) < MAX_IN_AIR;
+			if (client != INVALID_SOCKET && have_picture && need_input > 0 && due && room) {
 				encode_picture();
-				pushes = fresh ? PUSH_REPEATS : (push ? pushes - 1 : 0);
-				fresh = false;
+				if (fresh) {
+					pushes = PUSH_REPEATS;
+					last_picture = now;
+					fresh = false;
+				} else if (push) {
+					pushes--;
+				}
 				last_input = now;
 				continue;
 			}
@@ -580,6 +611,8 @@ private:
 		D3D11_BOX box{ 0, 0, 0, static_cast<UINT>(capture_width), static_cast<UINT>(capture_height), 1 };
 		context->CopySubresourceRegion(picture.get(), 0, 0, 0, 0, texture.get(), 0, &box);
 		have_picture = true;
+		// QPC in 100 ns units, the clock of clock_us.
+		picture_time_us = static_cast<uint64_t>(newest.SystemRelativeTime().count() / 10);
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		shared_stats.frames_captured++;
 		return true;
@@ -657,7 +690,8 @@ private:
 		}
 		check(encoder->ProcessInput(0, sample.get(), 0), "encoder input");
 		need_input--;
-		in_flight.push_back(now);
+		// A picture from before this client came is no measure of the latency.
+		in_flight.push_back({ time, now, picture_time_us >= client_since_us ? picture_time_us : 0 });
 	}
 
 	void pump_events() {
@@ -699,14 +733,19 @@ private:
 			return;
 		}
 		auto now = std::chrono::steady_clock::now();
+		LONGLONG time = 0;
+		sample->GetSampleTime(&time);
+		while (!in_flight.empty() && in_flight.front().time < time) {
+			in_flight.pop_front();
+		}
 		double encode_ms = 0.0;
-		if (!in_flight.empty()) {
-			encode_ms = std::chrono::duration<double, std::milli>(now - in_flight.front()).count();
+		uint64_t captured_us = 0;
+		if (!in_flight.empty() && in_flight.front().time == time) {
+			encode_ms = std::chrono::duration<double, std::milli>(now - in_flight.front().input).count();
+			captured_us = in_flight.front().captured_us;
 			in_flight.pop_front();
 		}
 		bool key = MFGetAttributeUINT32(sample.get(), MFSampleExtension_CleanPoint, 0) != 0;
-		LONGLONG time = 0;
-		sample->GetSampleTime(&time);
 		winrt::com_ptr<IMFMediaBuffer> buffer;
 		check(sample->ConvertToContiguousBuffer(buffer.put()), "encoded buffer");
 		BYTE *data = nullptr;
@@ -714,9 +753,10 @@ private:
 		check(buffer->Lock(&data, nullptr, &size), "lock encoded buffer");
 		bool prefix = key && !sequence_header.empty() && !has_sps(data, size);
 		std::vector<uint8_t> packet;
-		packet.reserve(13 + size + (prefix ? sequence_header.size() : 0));
+		packet.reserve(21 + size + (prefix ? sequence_header.size() : 0));
 		put_u32(packet, static_cast<uint32_t>(size + (prefix ? sequence_header.size() : 0)));
 		put_u64(packet, static_cast<uint64_t>(time / 10));
+		put_u64(packet, captured_us);
 		packet.push_back(key ? 1 : 0);
 		if (prefix) {
 			packet.insert(packet.end(), sequence_header.begin(), sequence_header.end());
@@ -724,9 +764,13 @@ private:
 		packet.insert(packet.end(), data, data + size);
 		buffer->Unlock();
 		bool sent = !draining && send_all(packet);
+		if (sent) {
+			sent_to_client++;
+		}
 		std::lock_guard<std::mutex> lock(stats_mutex);
 		shared_stats.frames_encoded++;
 		shared_stats.encode_ms = encode_ms;
+		shared_stats.encode_ms_sum += encode_ms;
 		if (sent) {
 			shared_stats.frames_sent++;
 			shared_stats.bytes_sent += packet.size();
@@ -756,6 +800,10 @@ private:
 		put_u32(header, static_cast<uint32_t>(height));
 		put_u32(header, static_cast<uint32_t>(fps));
 		want_key_frame = true;
+		sent_to_client = 0;
+		client_since_us = StreamBackend::clock_us();
+		acked = 0;
+		acks_seen = false;
 		char ip[INET_ADDRSTRLEN] = {};
 		inet_ntop(AF_INET, &address.sin_addr, ip, sizeof(ip));
 		{
@@ -763,6 +811,34 @@ private:
 			shared_stats.client = std::string(ip) + ":" + std::to_string(ntohs(address.sin_port));
 		}
 		send_all(header);
+	}
+
+	// The headset's messages (slice o7): clock pings, answered at once on this
+	// thread like the frames (so the answer never lands inside a frame), and how
+	// many frames it has.
+	void read_headset() {
+		u_long waiting = 0;
+		while (client != INVALID_SOCKET && ioctlsocket(client, FIONREAD, &waiting) == 0 && waiting >= 9) {
+			uint8_t message[9];
+			if (recv(client, reinterpret_cast<char *>(message), 9, 0) != 9) {
+				return;
+			}
+			uint64_t value = 0;
+			for (int i = 1; i < 9; i++) {
+				value = value << 8 | message[i];
+			}
+			if (message[0] == 1) {
+				std::vector<uint8_t> answer;
+				put_u32(answer, 0);
+				put_u64(answer, value);
+				put_u64(answer, StreamBackend::clock_us());
+				answer.push_back(2);
+				send_all(answer);
+			} else if (message[0] == 2) {
+				acked = value;
+				acks_seen = true;
+			}
+		}
 	}
 
 	bool send_all(const std::vector<uint8_t> &bytes) {
@@ -891,6 +967,15 @@ private:
 };
 
 } // namespace
+
+uint64_t StreamBackend::clock_us() {
+	LARGE_INTEGER counter;
+	LARGE_INTEGER frequency;
+	QueryPerformanceCounter(&counter);
+	QueryPerformanceFrequency(&frequency);
+	return static_cast<uint64_t>(counter.QuadPart / frequency.QuadPart * 1'000'000 +
+			counter.QuadPart % frequency.QuadPart * 1'000'000 / frequency.QuadPart);
+}
 
 StreamBackend *StreamBackend::create() {
 	return new MfStream();

@@ -173,6 +173,9 @@ const TUNABLES := [
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["headset", "live_screens", "Живых экранов", 1.0, "", 1.0, 1.0, 16.0],
 	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 2.0],
+	["headset", "video_mbps", "Битрейт экрана", 1.0, "Мбит/с", 2.0, 2.0, 60.0],
+	["headset", "video_fps", "Кадров в секунду", 1.0, "", 6.0, 30.0, 90.0],
+	["headset", "video_stats", "Показывать задержку", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "flight_sec", "Перелёт к месту", 1.0, "с", 0.1, 0.0, 2.0],
@@ -227,7 +230,7 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"live_screens": 2, "link_mode": 2,
+	"live_screens": 2, "link_mode": 2, "video_mbps": 2, "video_fps": 2, "video_stats": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
 	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
 	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7, "edit_step": 7, "edit_turn_degrees": 7,
@@ -8120,6 +8123,8 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "да (экспериментально)" if value >= 0.5 else "нет, только масштаб"
 	elif tunable[1] == "link_mode":
 		return HeadsetOptions.link_mode_name(roundi(value))
+	elif tunable[1] == "video_stats":
+		return "да" if value >= 0.5 else "нет"
 	elif tunable[1] == "live_screens":
 		return "%d (больше 6 — проверить)" % roundi(value) if value > 6.5 else "%d" % roundi(value)
 	elif tunable[1] == "handles_mode":

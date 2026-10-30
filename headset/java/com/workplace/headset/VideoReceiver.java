@@ -10,9 +10,11 @@ import android.view.Surface;
 
 import java.io.BufferedInputStream;
 import java.io.DataInputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 
 /**
@@ -28,6 +30,26 @@ public final class VideoReceiver {
 
 	/** Screen id (chosen by the caller) -> its receiver. */
 	private static final HashMap<Integer, VideoReceiver> receivers = new HashMap<>();
+	/**
+	 * The PC's capture clock minus this headset's (System.nanoTime in µs), slice
+	 * o7: each receiver pings the PC's stream every CLOCK_PING_MS; of the newest
+	 * CLOCK_SAMPLES answers (all receivers) the one with the shortest round trip
+	 * sets it. Until the first answer no latency is measured.
+	 */
+	private static final long CLOCK_PING_MS = 1000;
+	private static final int CLOCK_SAMPLES = 30;
+	private static final ArrayDeque<long[]> clockSamples = new ArrayDeque<>();
+	private static volatile long clockOffsetUs;
+	private static volatile boolean clockKnown;
+	private static volatile double clockErrorMs = -1;
+	/** Latency of new pictures since the last latencyReport, summed over every receiver. */
+	private static final Object latencyLock = new Object();
+	private static long latencyCount;
+	private static double arrivedSumMs;
+	private static double shownSumMs;
+	private static double shownMaxMs;
+	private static double decodeSumMs;
+	private static double decodeMaxMs;
 
 	private Thread thread;
 	private Socket socket;
@@ -37,6 +59,10 @@ public final class VideoReceiver {
 	private volatile long framesShown;
 	private volatile long bytesReceived;
 	private volatile double decodeMs;
+	/** Capture time of the last picture counted in the latency (decoder thread only). */
+	private long lastCapturedUs = -1;
+	private long firstShownNanos;
+	private static final long WARMUP_NS = 1_500_000_000L;
 	private volatile int width;
 	private volatile int height;
 	/** The decoder could not be made or started (the Quest ran out of decoders), not the network. */
@@ -158,6 +184,75 @@ public final class VideoReceiver {
 		return receiver == null ? 0 : receiver.decodeMs;
 	}
 
+	/** How far off the clock may be (half the best round trip), -1 until set. */
+	public static double clockErrorMs() {
+		return clockErrorMs;
+	}
+
+	/** A message to the PC's stream: 1 — our clock (a ping), 2 — frames received. */
+	private static void tell(OutputStream toPc, int type, long value) throws java.io.IOException {
+		byte[] message = new byte[9];
+		message[0] = (byte) type;
+		for (int i = 0; i < 8; i++) {
+			message[1 + i] = (byte) (value >>> (56 - 8 * i));
+		}
+		toPc.write(message);
+		toPc.flush();
+	}
+
+	private static void addClockSample(long sentUs, long pcUs) {
+		long backUs = System.nanoTime() / 1000;
+		synchronized (clockSamples) {
+			clockSamples.addLast(new long[] { backUs - sentUs, pcUs - (sentUs + backUs) / 2 });
+			if (clockSamples.size() > CLOCK_SAMPLES) {
+				clockSamples.removeFirst();
+			}
+			long[] best = null;
+			for (long[] sample : clockSamples) {
+				if (best == null || sample[0] < best[0]) {
+					best = sample;
+				}
+			}
+			clockOffsetUs = best[1];
+			clockErrorMs = best[0] / 2000.0;
+			clockKnown = true;
+		}
+	}
+
+	/**
+	 * What the new pictures went through since the last call, over every receiver:
+	 * "count arrived shown shownMax decode decodeMax" (ms, averages unless max;
+	 * arrived and shown are from the PC capturing the picture to it being read
+	 * from the network / leaving the decoder). Empty while the clock is not set.
+	 */
+	public static String latencyReport() {
+		synchronized (latencyLock) {
+			String report = "";
+			if (clockKnown && latencyCount > 0) {
+				report = latencyCount + " " + arrivedSumMs / latencyCount + " " + shownSumMs / latencyCount + " "
+						+ shownMaxMs + " " + decodeSumMs / latencyCount + " " + decodeMaxMs;
+			}
+			latencyCount = 0;
+			arrivedSumMs = 0;
+			shownSumMs = 0;
+			shownMaxMs = 0;
+			decodeSumMs = 0;
+			decodeMaxMs = 0;
+			return report;
+		}
+	}
+
+	private static void addLatency(double arrivedMs, double shownMs, double decodeMs) {
+		synchronized (latencyLock) {
+			latencyCount++;
+			arrivedSumMs += arrivedMs;
+			shownSumMs += shownMs;
+			shownMaxMs = Math.max(shownMaxMs, shownMs);
+			decodeSumMs += decodeMs;
+			decodeMaxMs = Math.max(decodeMaxMs, decodeMs);
+		}
+	}
+
 	/** Does not wait: closing the socket ends the thread, which releases the decoder. */
 	private void halt() {
 		running = false;
@@ -241,6 +336,8 @@ public final class VideoReceiver {
 			connection.setReceiveBufferSize(1 << 20);
 			connection.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
 			DataInputStream input = new DataInputStream(new BufferedInputStream(connection.getInputStream(), 1 << 16));
+			OutputStream toPc = connection.getOutputStream();
+			long nextClockPing = 0;
 
 			byte[] magic = new byte[4];
 			input.readFully(magic);
@@ -251,7 +348,7 @@ public final class VideoReceiver {
 			width = input.readInt();
 			height = input.readInt();
 			int fps = input.readInt();
-			if (version != 1) {
+			if (version != 2) {
 				throw new IllegalStateException("версия видео " + version);
 			}
 
@@ -281,12 +378,23 @@ public final class VideoReceiver {
 			status = "показываю " + width + "×" + height;
 
 			MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-			HashMap<Long, Long> queuedAt = new HashMap<>();
+			HashMap<Long, long[]> queuedAt = new HashMap<>();
 			byte[] frame = new byte[1 << 20];
 			while (running) {
+				long nowMs = System.nanoTime() / 1_000_000;
+				if (nowMs >= nextClockPing) {
+					nextClockPing = nowMs + CLOCK_PING_MS;
+					tell(toPc, 1, System.nanoTime() / 1000);
+				}
 				int length = input.readInt();
 				long time = input.readLong();
-				boolean key = (input.readByte() & 1) != 0;
+				long capturedUs = input.readLong();
+				int flags = input.readByte();
+				if ((flags & 2) != 0) {
+					addClockSample(time, capturedUs); // the clock's answer: our time, the PC's
+					continue;
+				}
+				boolean key = (flags & 1) != 0;
 				if (length <= 0 || length > MAX_FRAME_BYTES) {
 					throw new IllegalStateException("кадр " + length + " байт");
 				}
@@ -294,8 +402,11 @@ public final class VideoReceiver {
 					frame = new byte[length * 2];
 				}
 				input.readFully(frame, 0, length);
+				// The PC keeps only a few frames on the way (slice o7): it hears of each one here.
+				tell(toPc, 2, framesReceived + 1);
+				long arrived = System.nanoTime();
 				framesReceived++;
-				bytesReceived += length + 13;
+				bytesReceived += length + 21;
 
 				int index;
 				while ((index = decoder.dequeueInputBuffer(5000)) < 0) {
@@ -307,7 +418,7 @@ public final class VideoReceiver {
 				ByteBuffer buffer = decoder.getInputBuffer(index);
 				buffer.clear();
 				buffer.put(frame, 0, length);
-				queuedAt.put(time, System.nanoTime());
+				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs });
 				decoder.queueInputBuffer(index, 0, length, time, key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
 				drain(decoder, info, queuedAt);
 			}
@@ -333,15 +444,32 @@ public final class VideoReceiver {
 		}
 	}
 
-	private void drain(MediaCodec decoder, MediaCodec.BufferInfo info, HashMap<Long, Long> queuedAt) {
+	private void drain(MediaCodec decoder, MediaCodec.BufferInfo info, HashMap<Long, long[]> queuedAt) {
 		int index;
 		while ((index = decoder.dequeueOutputBuffer(info, 0)) != MediaCodec.INFO_TRY_AGAIN_LATER) {
 			if (index < 0) {
 				continue; // The output format or buffers changed; nothing to show yet.
 			}
-			Long queued = queuedAt.remove(info.presentationTimeUs);
+			long[] queued = queuedAt.remove(info.presentationTimeUs);
 			if (queued != null) {
-				decodeMs = (System.nanoTime() - queued) / 1e6;
+				long now = System.nanoTime();
+				decodeMs = (now - queued[0]) / 1e6;
+				// A picture encoded again (to push the decoder, or the refresh) keeps
+				// its capture time: only its first frame counts.
+				// Neither a picture from before this connection (0) nor the first
+				// WARMUP_NS after the first frame out: a new decoder starting held
+				// frames up to 3 s, which is no latency of the link (slice o7).
+				if (firstShownNanos == 0) {
+					firstShownNanos = now;
+				}
+				if (clockKnown && queued[2] != 0 && queued[2] != lastCapturedUs) {
+					lastCapturedUs = queued[2];
+					long offset = clockOffsetUs;
+					if (now - firstShownNanos > WARMUP_NS) {
+						addLatency((queued[1] / 1000 + offset - queued[2]) / 1e3, (now / 1000 + offset - queued[2]) / 1e3,
+								decodeMs);
+					}
+				}
 			}
 			decoder.releaseOutputBuffer(index, true);
 			framesShown++;

@@ -14,6 +14,8 @@ var _keys := 0
 var _bytes := 0
 var _first_key := false
 var _sps := false
+var _last_captured := -1
+var _latency_ms: Array[float] = []
 
 
 func _initialize() -> void:
@@ -39,6 +41,12 @@ func _process(_delta: float) -> bool:
 		print("[probe] кадров %d (ключевых %d), %.1f Мбит/с, первый ключевой: %s, SPS: %s" % [_frames, _keys,
 				_bytes * 8.0 / 4.0 / 1e6, _first_key, _sps])
 		print("[probe] итог ПК: ", _streamer.get_stats())
+		if not _latency_ms.is_empty():
+			var sorted := _latency_ms.duplicate()
+			sorted.sort()
+			print("[probe] от захвата до приёма на ПК: картинок %d, в среднем %.1f мс, медиана %.1f, худшее %.1f" % [
+					sorted.size(), sorted.reduce(func(a: float, b: float) -> float: return a + b, 0.0) / sorted.size(),
+					sorted[sorted.size() / 2], sorted[-1]])
 		_streamer.stop()
 		return true
 	return false
@@ -52,12 +60,18 @@ func _parse() -> void:
 		print("[probe] заголовок %s версия %d %dx%d %d к/с" % [magic, _u32(4), _u32(8), _u32(12), _u32(16)])
 		_buffer = _buffer.slice(20)
 		_header_seen = true
-	while _buffer.size() >= 13:
+	var header := LinkProtocol.VIDEO_FRAME_HEADER_SIZE
+	while _buffer.size() >= header:
 		var length := _u32(0)
-		if _buffer.size() < 13 + length:
+		if _buffer.size() < header + length:
 			return
-		var key := _buffer[12] == 1
-		var data := _buffer.slice(13, 13 + length)
+		var key := _buffer[header - 1] == 1
+		var data := _buffer.slice(header, header + length)
+		# From the capture to here, on this PC: the encoder and the socket (slice o7).
+		var captured := (_u32(12) << 32) | _u32(16)
+		if captured != _last_captured:
+			_last_captured = captured
+			_latency_ms.append((ScreenStreamer.clock_usec() - captured) / 1000.0)
 		if _frames == 0:
 			_first_key = key
 			for i in range(0, data.size() - 4):
@@ -67,7 +81,7 @@ func _parse() -> void:
 		_frames += 1
 		_keys += 1 if key else 0
 		_bytes += length
-		_buffer = _buffer.slice(13 + length)
+		_buffer = _buffer.slice(header + length)
 
 
 func _u32(at: int) -> int:
