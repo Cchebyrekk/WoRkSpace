@@ -33,7 +33,7 @@ VR-приложение для работы с ПК на Windows: монитор
 - Остальные `src/*.gd` — чистые классы с тестами (жесты, позы, курсор, раскладки, стена/столб `WallLayout`, мир `WorldLayout`, меню, сеть мест `PlaceNetwork`, группы экранов `DesktopGroups`, редактор мира `WorldEdit`). Логику класть туда, в `main.gd` — связывание и узлы.
 - Система меняется внешними процессами: `DisplayTopology` → `tools/display_topology.ps1` (CCD: раскладка, подключение экранов, режимы, окна; асинхронно, `busy`, по окончании `idle`); `VddControl` → задача `WoRkPlaceVddHelper` (`tools/vdd_helper.ps1` от администратора, файлы в `%ProgramData%\WoRkPlace\vdd`).
 - Нативный модуль (`native/src`): `ScreenCapture`, `MouseInput` (ввод, запись сочетаний и текста с клавиатуры, связь с агентом), `GlobalHotkey`, `SecureDesktop`; агент SYSTEM `native/agent` → `bin/workplace_agent.exe`. Код Windows/WinRT — только в `win_backend.cpp` (C++20), заголовки Godot и Windows не смешивать.
-- Git: после принятого среза — коммит и тег `slice-<буква>` (есть `slice-a`, `e`–`l`, `n1`, `n2`, `o1`–`o4`, `o5a`–`o5d`, `o6`); на GitHub (`origin`, `Cchebyrekk/WoRkSpace`) — только по просьбе. README (для людей, по-русски) обновлять при закрытии среза.
+- Git: после принятого среза — коммит и тег `slice-<буква>` (есть `slice-a`, `e`–`l`, `n1`, `n2`, `o1`–`o4`, `o5a`–`o5d`, `o6`, `o7`); на GitHub (`origin`, `Cchebyrekk/WoRkSpace`) — только по просьбе. README (для людей, по-русски) обновлять при закрытии среза.
 
 ## Журналы — читать самому после каждой проверки в шлеме
 
