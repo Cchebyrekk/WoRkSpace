@@ -52,6 +52,8 @@ const CALLS := {
 	"vdd_config": ["write"],
 	"keyboard": ["start_key_recording", "stop_key_recording", "start_text_recording"],
 	"thumbs": ["start", "stop"],
+	# Branch all-modes: «Режим работы» chosen in the headset (WorkMode).
+	"app": ["work_mode"],
 }
 
 ## Message types and the fields each must carry.
@@ -161,6 +163,8 @@ static func key(virtual_key: int, down: bool) -> Dictionary:
 	return {"t": "key", "vk": virtual_key, "down": down}
 
 
+## Branch all-modes: the PC's file is the only one. The PC sends it when the
+## headset says hello; the headset sends it back whenever its world saves.
 ## The PC app's settings file (user://settings.cfg) as text, for the headset to
 ## take over once (slice o5).
 static func settings_message(text: String) -> Dictionary:

@@ -171,6 +171,7 @@ const TUNABLES := [
 	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
 	["world", "option_lists", "Выбор вариантов в настройках", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
+	["headset", "work_mode", "Режим работы", 1.0, "", 1.0, 0.0, 2.0],
 	["headset", "live_screens", "Живых экранов", 1.0, "", 1.0, 1.0, 16.0],
 	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 2.0],
 	["headset", "video_mbps", "Битрейт экрана", 1.0, "Мбит/с", 2.0, 2.0, 60.0],
@@ -230,7 +231,7 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"live_screens": 2, "link_mode": 2, "video_mbps": 2, "video_fps": 2, "video_stats": 2,
+	"work_mode": 2, "live_screens": 2, "link_mode": 2, "video_mbps": 2, "video_fps": 2, "video_stats": 2,
 	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
 	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
 	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7, "edit_step": 7, "edit_turn_degrees": 7,
@@ -1102,6 +1103,10 @@ var _ray_pitch_down_deg := RAY_PITCH_DOWN_DEG
 var _ray_yaw_right_deg := RAY_YAW_RIGHT_DEG
 ## Seconds until the next reconnect attempt; negative while the session is healthy.
 var _reconnect_timer := -1.0
+## «Режим работы» switches this long after its last change (− / + pass the modes
+## between), unless it is set back; -1 while none is due.
+const WORK_MODE_SWITCH_SEC := 3.0
+var _work_mode_switch_in := -1.0
 var _last_session_state := -1
 var _hand_trackers_seen := false
 var _hand_trackers_missing_sec := 0.0
@@ -1127,6 +1132,10 @@ func _ready() -> void:
 	_build_split_grips()
 	_build_settings_panel()
 	_load_settings()
+	_headset_options.work_mode = WorkMode.current()
+	# The one started last wins: the watchdog stops what it runs for another mode.
+	if not OS.has_feature("android") and DisplayServer.get_name() != "headless":
+		WorkMode.write(_headset_options.work_mode)
 	_refresh_floor_label()
 	_sync_menu_editor()
 	_update_ray_info()
@@ -1209,6 +1218,7 @@ func _process(delta: float) -> void:
 		return
 	if not _xr_ready:
 		return
+	_update_work_mode_switch(delta)
 	_update_startup_probe(delta)
 	_update_first_recenter(delta)
 	_update_shader_warm_up()
@@ -6105,6 +6115,31 @@ func _on_xr_event(event: StringName) -> void:
 		_schedule_reconnect()
 
 
+## Counts down a «Режим работы» change; at the end the PC switches (in the
+## headset: asks the PC to) and this app ends.
+func _update_work_mode_switch(delta: float) -> void:
+	if _work_mode_switch_in < 0.0:
+		return
+	var shown := ceilf(_work_mode_switch_in)
+	_work_mode_switch_in -= delta
+	if _work_mode_switch_in >= 0.0:
+		if ceilf(_work_mode_switch_in) != shown:
+			_refresh_settings_panel()
+		return
+	var mode := _headset_options.work_mode
+	_headset_options.work_mode = WorkMode.current()
+	_refresh_settings_panel()
+	if WorkMode.remote_switch.is_valid():
+		# In the headset: the PC switches; the headset app follows by itself
+		# (headset_root.gd finds what the PC runs).
+		var problem: String = WorkMode.remote_switch.call(mode)
+		if problem != "":
+			print("[mode] режим не переключён: ", problem)
+		return
+	WorkMode.switch_to(mode)
+	_quit(false)
+
+
 func _schedule_reconnect() -> void:
 	if _reconnect_timer < 0.0:
 		_reconnect_timer = XR_RESTART_DELAY_SEC
@@ -6114,6 +6149,11 @@ func _restart_app(attempt: int) -> void:
 	if OS.has_feature("android"):
 		# In the headset (slice o5) there is no Quest Link to lose and no PowerShell.
 		print("[xr] перезапуск в шлеме не нужен, пропускаю (попытка %d)" % attempt)
+		return
+	if OS.get_environment(WorkMode.WATCHED_ENV) != "":
+		# Run by the watchdog (WorkMode.PC_DRAWS): it starts this again.
+		print("[xr] перезапуск: выхожу, сторож запустит снова (попытка %d)" % attempt)
+		get_tree().quit()
 		return
 	print("[xr] перезапускаю приложение, попытка %d" % attempt)
 	OS.set_environment(XR_RETRY_ENV, str(attempt))
@@ -6291,6 +6331,14 @@ func _save_settings() -> void:
 	var error := config.save(SETTINGS_PATH)
 	if error != OK:
 		print("[settings] не удалось сохранить: ", error_string(error))
+	_settings_written()
+
+
+## In the headset the settings file is the PC's (branch all-modes): every save
+## goes there too, so each work mode has the same settings and arrangements.
+func _settings_written() -> void:
+	if HeadsetOptions.settings_saved.is_valid():
+		HeadsetOptions.settings_saved.call()
 
 
 ## Shows which hand ray is in use and how ours is set up.
@@ -7921,6 +7969,7 @@ func _resume_slot_load() -> void:
 	var pending: Variant = config.get_value("layouts", "pending")
 	config.erase_section_key("layouts", "pending")
 	config.save(SETTINGS_PATH)
+	_settings_written()
 	if pending is Dictionary:
 		_slot_loading = pending
 		_slot_load_steps = 10
@@ -7933,6 +7982,7 @@ func _finish_slot_load() -> void:
 	if config.load(SETTINGS_PATH) == OK and config.has_section_key("layouts", "pending"):
 		config.erase_section_key("layouts", "pending")
 		config.save(SETTINGS_PATH)
+		_settings_written()
 
 
 ## Saved monitor keys -> the current monitors' keys: the same monitor where it is
@@ -8053,6 +8103,9 @@ func _set_tunable(index: int, raw: float, save: bool) -> void:
 		print("[settings] %s: %s" % [tunable[2], _settings_values[index].text])
 		if tunable[1] == "wall_resolution":
 			_apply_wall_resolutions()
+		if tunable[1] == "work_mode":
+			_work_mode_switch_in = WORK_MODE_SWITCH_SEC if roundi(value) != WorkMode.current() else -1.0
+			_refresh_settings_panel()
 
 
 ## The settings sliders: a pinch (or trigger) that starts on one takes it; while
@@ -8151,6 +8204,10 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "да (экспериментально)" if value >= 0.5 else "нет, только масштаб"
 	elif tunable[1] == "link_mode":
 		return HeadsetOptions.link_mode_name(roundi(value))
+	elif tunable[1] == "work_mode":
+		if _work_mode_switch_in >= 0.0:
+			return "%s — через %.0f с" % [WorkMode.name_of(roundi(value)), ceilf(_work_mode_switch_in)]
+		return WorkMode.name_of(roundi(value))
 	elif tunable[1] == "video_stats":
 		return "да" if value >= 0.5 else "нет"
 	elif tunable[1] == "live_screens":

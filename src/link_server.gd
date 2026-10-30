@@ -230,6 +230,8 @@ func _serve(now: float) -> void:
 					_buttons_down.erase(message["b"])
 			"call":
 				_run_call(message["target"], message["op"], message["args"])
+			"settings":
+				_save_settings(message["text"])
 			"wheel", "keys":
 				_input.push(message)
 			"key":
@@ -311,6 +313,27 @@ func _reverse_over_usb() -> void:
 
 ## Runs what the headset asked for; LinkProtocol.problem has already checked
 ## that it is on the list.
+## The headset's world saved (branch all-modes): its file becomes the PC's, the
+## one every work mode reads. Written next to it first, so a broken transfer
+## never leaves half a file.
+func _save_settings(text: String) -> void:
+	var check := ConfigFile.new()
+	if check.parse(text) != OK:
+		print("[settings] от шлема пришёл не файл настроек, не сохраняю")
+		return
+	var temporary := "user://settings.cfg.new"
+	var file := FileAccess.open(temporary, FileAccess.WRITE)
+	if file == null:
+		print("[settings] не записать настройки шлема: %d" % FileAccess.get_open_error())
+		return
+	file.store_string(text)
+	file.close()
+	var error := DirAccess.rename_absolute(ProjectSettings.globalize_path(temporary),
+			ProjectSettings.globalize_path("user://settings.cfg"))
+	if error != OK:
+		print("[settings] не заменить settings.cfg: ", error_string(error))
+
+
 func _run_call(target: String, op: String, args: Array) -> void:
 	print("[link] шлем просит %s.%s" % [target, op])
 	match target:
@@ -326,6 +349,12 @@ func _run_call(target: String, op: String, args: Array) -> void:
 			var problem := VddConfig.write(wanted)
 			_event("vdd_config", "written", [problem])
 			_send_vdd_config()
+		"app":
+			# The headset's world ends with the link; its app finds what runs next.
+			var mode: int = args[0] if not args.is_empty() and args[0] is int else -1
+			if mode >= WorkMode.OPENXR and mode <= WorkMode.PC_DRAWS and mode != WorkMode.HEADSET_WORLD:
+				WorkMode.switch_to(mode)
+				get_tree().quit()
 		"thumbs":
 			_thumbs_on = op == "start"
 			_next_thumbs = 0.0

@@ -1,4 +1,5 @@
 # The link server starts by itself when the user signs in to Windows (slice o7).
+# Branch all-modes: the watchdog runs what the chosen work mode needs (see link_server_watch.ps1).
 # Run by hand once, no admin needed:
 #   .\tools\install_link_server_autostart.ps1             install or update
 #   .\tools\install_link_server_autostart.ps1 -Uninstall  remove again

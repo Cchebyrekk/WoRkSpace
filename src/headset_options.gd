@@ -21,9 +21,15 @@ var video_fps := 60
 ## A line under the view: the latency from the PC's capture to the decoder, and
 ## what the PC's encoder and the headset's decoders take.
 var video_stats := 0
+## WorkMode: shown as the mode this process runs in (main.gd sets it on start);
+## a change switches after a pause (main.gd, WORK_MODE_SWITCH_SEC).
+var work_mode := WorkMode.OPENXR
 
 ## The options of the world now running (main.gd sets it); null before that.
 static var current: HeadsetOptions
+## In the headset app (headset_boot.gd, a method, not a lambda): main.gd has
+## written its settings file, which goes to the PC (branch all-modes).
+static var settings_saved := Callable()
 
 
 static func link_mode_name(mode: int) -> String:

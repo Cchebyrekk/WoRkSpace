@@ -4,11 +4,13 @@ extends Node3D
 ## to the PC module go over the link through the stand-ins in src/pc/.
 
 const MAIN_SCRIPT := "res://shared/main.gd"
-## The PC app's settings are taken over once (the user's wish, 26.10.2026: "all
-## the settings as they were"); after that the headset keeps its own. This file
-## says when it happened; without it the next PC settings are taken again.
+## The settings and arrangements are the PC's (branch all-modes, 30.10.2026: the
+## user wants one app with the same arrangements in every work mode; until then
+## they were taken over once, 26.10.2026, and then the headset kept its own).
+## The file here is a copy: the PC's comes at every hello and replaces it, every
+## save of the world goes to the PC. A save without the PC is sent once it is
+## back, before its copy is taken.
 const SETTINGS_PATH := "user://settings.cfg"
-const IMPORTED_MARK := "user://pc_settings_imported.txt"
 ## The world waits for the PC (its monitors and the driver's list, slice o5b:
 ## «Разрешение по клетке» took an empty list for "the driver has none") at most
 ## this long, then starts without it.
@@ -33,6 +35,8 @@ var _video_label: Label3D
 var _video_text := ""
 var _next_video_stats := 0.0
 var _video_reports := 0
+## A save not yet at the PC.
+var _settings_unsent := false
 ## com.workplace.headset.VideoReceiver (its latency), null off Android.
 var _receiver: Variant = null
 
@@ -45,6 +49,8 @@ func _ready() -> void:
 	PcLink.screens = VideoScreens.new()
 	VddConfig.remote_text = _vdd_config_text
 	VddConfig.remote_write = _write_vdd_config
+	WorkMode.remote_switch = _switch_work_mode
+	HeadsetOptions.settings_saved = _send_settings
 	_started = Time.get_ticks_msec() / 1000.0
 	if OS.get_name() == "Android":
 		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
@@ -67,20 +73,36 @@ func _restart_main(why: String) -> void:
 	_start_main()
 
 
-## Writes the PC's settings over the headset's.
+## Writes the PC's settings over the copy here; false if they are the same.
 func _import_settings(text: String) -> bool:
+	if text == FileAccess.get_file_as_string(SETTINGS_PATH):
+		return false
 	var file := FileAccess.open(SETTINGS_PATH, FileAccess.WRITE)
 	if file == null:
 		print("[settings] не удалось записать настройки ПК: %d" % FileAccess.get_open_error())
 		return false
 	file.store_string(text)
 	file.close()
-	var mark := FileAccess.open(IMPORTED_MARK, FileAccess.WRITE)
-	if mark != null:
-		mark.store_string("%s %s\n" % [Time.get_datetime_string_from_system(), _link.pc_name])
-		mark.close()
-	print("[settings] настройки ПК %s перенесены (%d байт)" % [_link.pc_name, text.length()])
+	print("[settings] настройки ПК %s взяты (%d байт)" % [_link.pc_name, text.length()])
 	return true
+
+
+## HeadsetOptions.settings_saved: the world wrote its file, it goes to the PC.
+func _send_settings() -> void:
+	var text := FileAccess.get_file_as_string(SETTINGS_PATH)
+	_settings_unsent = text == "" or not PcLink.connected()
+	if not _settings_unsent:
+		_link.send(LinkProtocol.settings_message(text))
+
+
+## For headset_root.gd: whether the PC's link server is there.
+func connected() -> bool:
+	return PcLink.connected()
+
+
+## WorkMode.remote_switch: the PC's link server switches and ends.
+func _switch_work_mode(mode: int) -> String:
+	return "" if PcLink.call_pc("app", "work_mode", [mode]) else "нет связи с ПК"
 
 
 func _vdd_config_text() -> String:
@@ -105,7 +127,10 @@ func _process(_delta: float) -> void:
 	var fresh_settings := false
 	if _link.settings_changed:
 		_link.settings_changed = false
-		if not FileAccess.file_exists(IMPORTED_MARK):
+		if _settings_unsent:
+			print("[settings] сохранённое без ПК отправляю на ПК")
+			_send_settings()
+		else:
 			fresh_settings = _import_settings(_link.pc_settings)
 	if _main == null:
 		var pc_ready := PcLink.connected() and PcLink.has_vdd_config and not _link.monitors.is_empty()
@@ -204,6 +229,18 @@ func _update_lost_notice(now: float) -> void:
 		if show:
 			_lost_notice.text = "Нет связи с ПК (%.0f с) — %s\nэкраны показывают последний кадр" % [now - _lost_since,
 					_link.describe()]
+
+
+## headset_root.gd swaps to the other mode: nothing of this one may stay.
+func _exit_tree() -> void:
+	if PcLink.screens != null:
+		PcLink.screens.stop_all()
+	if _link != null:
+		_link.close()
+	VddConfig.remote_text = Callable()
+	VddConfig.remote_write = Callable()
+	WorkMode.remote_switch = Callable()
+	HeadsetOptions.settings_saved = Callable()
 
 
 func _notification(what: int) -> void:

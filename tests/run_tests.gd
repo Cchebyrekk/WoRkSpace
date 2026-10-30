@@ -35,6 +35,7 @@ func _init() -> void:
 	_test_desktop_groups()
 	_test_world_edit()
 	_test_link_protocol()
+	_test_work_mode()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -2082,3 +2083,13 @@ x=1
 	# PC module's classes live in headset/src/pc.
 	for stand_in: String in ["mouse_input", "screen_capture", "global_hotkey", "secure_desktop", "display_topology", "vdd_control"]:
 		_check(FileAccess.file_exists("res://headset/src/pc/%s.gd" % stand_in), "шлем: подмена %s есть" % stand_in)
+
+
+func _test_work_mode() -> void:
+	_check(WorkMode.parse("2
+") == WorkMode.PC_DRAWS, "режим: читается из файла")
+	_check(WorkMode.parse(" 0 ") == WorkMode.OPENXR, "режим: пробелы не мешают")
+	_check(WorkMode.parse("3") == -1 and WorkMode.parse("") == -1 and WorkMode.parse("x") == -1, "режим: чужое не принимается")
+	_check(WorkMode.current() == WorkMode.OPENXR, "режим: без WORKPLACE_REMOTE — OpenXR на ПК")
+	_check(WorkMode.name_of(WorkMode.HEADSET_WORLD) == "мир в шлеме", "режим: имя")
+	_check(LinkProtocol.CALLS.has("app") and "work_mode" in LinkProtocol.CALLS["app"], "режим: шлем может попросить ПК")

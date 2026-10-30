@@ -197,6 +197,18 @@ func _process(_delta: float) -> void:
 		_pictures = 0
 
 
+## For headset_root.gd: whether a PC that draws is there.
+func connected() -> bool:
+	return _channel != null
+
+
+## headset_root.gd swaps to the other mode.
+func _exit_tree() -> void:
+	if _screens != null:
+		_reset("режим сменился")
+	_udp.close()
+
+
 func _describe() -> String:
 	if _channel == null:
 		return "Ищу ПК, который рисует…" if _tcp == null else "Подключаюсь к %s…" % _pc_address
