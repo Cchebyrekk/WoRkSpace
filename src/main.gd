@@ -589,6 +589,8 @@ var _secure_rect: TextureRect
 var _secure_layer: OpenXRCompositionLayerQuad
 ## Its hole in the scene on the Compatibility renderer (the headset), where Godot's
 ## own hole punch leaves the walls over the prompt (29.10.2026: not seen at all).
+## With the PC drawing the headset's eyes (ScreenPanel.mesh_only, branch
+## pc-render) the prompt itself: no layer is drawn there, and UAC was not seen.
 var _secure_hole: MeshInstance3D
 var _secure_shown := false
 ## The quad's world transform and size (m) while shown, for mapping the laser onto it.
@@ -6800,7 +6802,17 @@ func _build_secure_desktop() -> void:
 	_secure_layer.sort_order = -1
 	_secure_layer.visible = false
 	_origin.add_child(_secure_layer)
-	if RenderingServer.get_current_rendering_method() == "gl_compatibility":
+	if ScreenPanel.mesh_only:
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		material.albedo_texture = _secure_viewport.get_texture()
+		_secure_hole = MeshInstance3D.new()
+		_secure_hole.mesh = QuadMesh.new()
+		_secure_hole.material_override = material
+		_secure_hole.visible = false
+		add_child(_secure_hole)
+	elif RenderingServer.get_current_rendering_method() == "gl_compatibility":
 		_secure_hole = MeshInstance3D.new()
 		_secure_hole.mesh = QuadMesh.new()
 		_secure_hole.material_override = ScreenPanel.hole_material()
