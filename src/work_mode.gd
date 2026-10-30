@@ -75,6 +75,10 @@ static func switch_to(mode: int) -> void:
 	OS.create_process("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
 			"-File", tools.path_join("link_server_watch.ps1")])
 	if mode == OPENXR:
-		var command := "Start-Sleep -Seconds %d; Start-Process -FilePath '%s' -ArgumentList '--path','%s'" % [
+		# As after a lost Link session (main.gd's XR_RETRY_ENV): the headset is
+		# seldom in Link yet when this is chosen in it (30.10.2026 the app found no
+		# OpenXR once and stopped), so it starts again until the runtime is there.
+		var command := ("Start-Sleep -Seconds %d; $env:WORKPLACE_XR_RETRY = '1'; " +
+				"Start-Process -FilePath '%s' -ArgumentList '--path','%s'") % [
 			OPENXR_START_DELAY_SEC, OS.get_executable_path(), ProjectSettings.globalize_path("res://").trim_suffix("/")]
 		OS.create_process("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", command])
