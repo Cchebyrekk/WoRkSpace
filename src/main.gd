@@ -3763,7 +3763,7 @@ func _update_cursor() -> void:
 		var nearest := INF
 		for panel in _panels:
 			# Hidden (beyond the render radius) or beyond the interaction radius: no clicks.
-			if not panel.layer.visible:
+			if not panel.is_drawn():
 				continue
 			var distance := panel.hit_distance(pointer.origin, pointer.direction)
 			if _world.interact_radius > 0.0 and distance > _world.interact_radius:

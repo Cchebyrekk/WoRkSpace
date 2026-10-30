@@ -73,6 +73,8 @@ var _video := false
 ## viewport. `_video_convex` says the panel is in that state now.
 var _external: ExternalTexture
 var _video_convex := false
+## Within main.gd's render radius (the last layer_shown).
+var _in_range := true
 ## The decoder gives sRGB colours; the scene is drawn in linear ones.
 const VIDEO_CONVEX_SHADER := """
 shader_type spatial;
@@ -259,7 +261,15 @@ func _make_layer(curved: bool) -> void:
 ## Whether the layer is drawn for a panel `in_range` (main.gd's render radius): a
 ## headset panel shown on its convex mesh keeps its layer hidden.
 func layer_shown(in_range: bool) -> bool:
+	_in_range = in_range
 	return in_range and not _video_convex
+
+
+## Whether the panel is drawn (within the render radius), on its layer or its
+## convex mesh: rays and clicks go only to these. Not `layer.visible`: a headset
+## convex panel hides its layer, and the ray went through it (30.10.2026).
+func is_drawn() -> bool:
+	return _in_range
 
 
 ## Moves a headset panel's stream between its layer and its convex mesh (see _external).
