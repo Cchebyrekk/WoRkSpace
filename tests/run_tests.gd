@@ -37,6 +37,7 @@ func _init() -> void:
 	_test_link_protocol()
 	_test_work_mode()
 	_test_player_pose()
+	_test_virtual_keyboard()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -2068,7 +2069,7 @@ func _test_link_protocol() -> void:
 			and LinkProtocol.problem(LinkProtocol.thumb("MTT1337#1", PackedByteArray([1]))) == "", "протокол: миниатюры")
 	_check(LinkProtocol.problem({"t": "call", "target": "vdd", "op": "apply", "args": 3}) != "", "протокол: аргументы не списком отвергнуты")
 	_check(LinkProtocol.problem(LinkProtocol.event("topology", "finished", [true, "arranged", ""])) == "", "протокол: событие правильное")
-	_check(LinkProtocol.problem(LinkProtocol.pc_state(true, false, true)) == "", "протокол: состояние ПК правильное")
+	_check(LinkProtocol.problem(LinkProtocol.pc_state(true, false, true, 0x0419)) == "", "протокол: состояние ПК правильное")
 	_check(LinkProtocol.problem(LinkProtocol.secure_frame(PackedByteArray([1, 2]), Vector2i.ZERO, Vector2i(10, 10), 2)) == "",
 			"протокол: кадр защищённого стола правильный")
 	_check(LinkProtocol.problem(LinkProtocol.settings_message("[ray]
@@ -2133,3 +2134,47 @@ func _test_player_pose() -> void:
 	_check(MenuSet.with_action([{"items": ["copy"]}], "settings", "center")[0]["items"] == ["copy", "settings"], "меню: без «Центр» — в конец первой со свободным местом")
 	_check(MenuSet.with_action([full], "settings", "center") == [full], "меню: места нет — не добавляется")
 	_check(MenuSet.default_menus().all(func(m: Dictionary) -> bool: return m["items"].size() <= MenuSet.MAX_ITEMS), "меню: по умолчанию не больше восьми")
+
+
+func _test_virtual_keyboard() -> void:
+	var list := VirtualKeyboard.keys()
+	var size := VirtualKeyboard.extent()
+	_check(is_equal_approx(size.x, 15.0 * VirtualKeyboard.UNIT), "клавиатура: ширина 15 клавиш")
+	var index_of := func(label: String) -> int:
+		for i in list.size():
+			if list[i][0] == label:
+				return i
+		return -1
+	var q: int = index_of.call("Q")
+	_check(VirtualKeyboard.key_at((list[q][3] as Rect2).get_center()) == q, "клавиатура: по середине Q — Q")
+	_check(VirtualKeyboard.key_at(Vector2(size.x, 0.0)) == -1, "клавиатура: за краем — ничего")
+	var board := VirtualKeyboard.new()
+	_check(board.press(q, 0.0) == PackedInt32Array([0x51]), "клавиатура: Q шлёт Q")
+	board.release()
+	_check(board.press(index_of.call("Ctrl"), 0.0).is_empty(), "клавиатура: Ctrl ждёт следующую клавишу")
+	_check(board.press(index_of.call("C"), 0.0) == PackedInt32Array([0x11, 0x43]), "клавиатура: Ctrl, затем C — Ctrl+C")
+	board.release()
+	_check(board.press(index_of.call("C"), 0.0) == PackedInt32Array([0x43]), "клавиатура: Ctrl отпущен после клавиши")
+	board.press(index_of.call("Ctrl"), 0.0)
+	board.press(index_of.call("Shift"), 0.0)
+	_check(board.press(index_of.call("Esc"), 0.0) == PackedInt32Array([0x11, 0x10, 0x1B]), "клавиатура: Ctrl, Shift, Esc — три клавиши")
+	board.release()
+	board.press(index_of.call("Shift"), 0.0)
+	board.press(index_of.call("Alt"), 0.0)
+	_check(board.press(index_of.call("Alt"), 0.0) == PackedInt32Array([0x10, 0x12]), "клавиатура: Shift, Alt, Alt ещё раз — Shift+Alt")
+	_check(board.held.is_empty(), "клавиатура: после Shift+Alt ничего не зажато")
+	var up: Rect2 = list[index_of.call("↑")][3]
+	var down_arrow: Rect2 = list[index_of.call("↓")][3]
+	_check(is_equal_approx(up.get_center().x, down_arrow.get_center().x) and up.position.y > down_arrow.position.y,
+			"клавиатура: ↑ над ↓")
+	board.press(index_of.call("Shift"), 0.0)
+	var backspace: int = index_of.call("⌫")
+	board.press(backspace, 1.0)
+	_check(board.hold(1.2).is_empty(), "клавиатура: повтор не сразу")
+	_check(board.hold(1.6) == PackedInt32Array([0x10, 0x08]), "клавиатура: удержание повторяет то же сочетание")
+	board.release()
+	_check(board.hold(3.0).is_empty(), "клавиатура: отпущена — не повторяет")
+	_check(board.press(index_of.call("Яз"), 0.0) == PackedInt32Array([0x5B, 0x20]), "клавиатура: «Яз» — Win+Space")
+	_check(VirtualKeyboard.is_russian(0x0419) and not VirtualKeyboard.is_russian(0x0409), "клавиатура: 0x0419 — русская, 0x0409 — нет")
+	_check(VirtualKeyboard.label_of(q, true) == "Й" and VirtualKeyboard.label_of(q, false) == "Q", "клавиатура: Q/Й по раскладке")
+	_check(VirtualKeyboard.label_of(index_of.call("1"), true) == "1", "клавиатура: у цифр раскладка не меняет подпись")

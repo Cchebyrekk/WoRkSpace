@@ -14,6 +14,8 @@ static var handlers: Dictionary = {}
 static var agent := false
 static var secure := false
 static var vdd_installed := false
+## The PC's keyboard layout (language id, 0x0409 until the PC says).
+static var layout := 0x0409
 ## The driver's settings file as the PC last sent it.
 static var vdd_config := ""
 static var has_vdd_config := false
@@ -102,6 +104,7 @@ static func dispatch() -> void:
 				agent = message["agent"]
 				secure = message["secure"]
 				vdd_installed = message["vdd_installed"]
+				layout = message["layout"]
 			"vdd_config":
 				vdd_config = message["text"]
 				has_vdd_config = true

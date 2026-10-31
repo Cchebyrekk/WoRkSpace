@@ -77,6 +77,10 @@ static func set_key(virtual_key: int, pressed: bool) -> void:
 	PcLink.send(LinkProtocol.key(virtual_key, pressed))
 
 
+static func get_keyboard_layout() -> int:
+	return PcLink.layout
+
+
 static func is_agent_connected() -> bool:
 	return PcLink.agent
 

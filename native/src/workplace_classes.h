@@ -174,6 +174,7 @@ public:
 	// Windows virtual-key codes pressed in order and released in reverse, e.g. [0x11, 0x5A] for Ctrl+Z.
 	static void press_keys(const PackedInt32Array &p_virtual_keys);
 	static void set_key(int p_virtual_key, bool p_pressed);
+	static int get_keyboard_layout();
 	// True while input goes through workplace_agent.exe (elevated windows, secure desktop).
 	static bool is_agent_connected();
 	// True while the agent reports the secure desktop up (UAC, lock screen, Ctrl+Alt+Del). Poll each frame.

@@ -36,7 +36,7 @@ agent_env.Append(CPPPATH=["src/"])
 agent_env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN", "UNICODE", "_UNICODE"])
 agent_env.Append(CXXFLAGS=["/std:c++17", "/EHsc", "/MT", "/O2", "/W3"])
 agent_env.Append(LINKFLAGS=["/SUBSYSTEM:WINDOWS", "/ENTRY:wmainCRTStartup"])
-agent_env.Append(LIBS=["user32", "advapi32", "wtsapi32", "d3d11", "dxgi"])
+agent_env.Append(LIBS=["user32", "advapi32", "wtsapi32", "d3d11", "dxgi", "sas"])
 agent = agent_env.Program(
     "../bin/workplace_agent.exe",
     [

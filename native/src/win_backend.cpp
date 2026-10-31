@@ -394,6 +394,13 @@ void deliver(const InputRecord *records, size_t count) {
 
 } // namespace
 
+uint32_t keyboard_layout() {
+	// The layout of the window that takes the keys: each thread has its own.
+	HWND window = GetForegroundWindow();
+	DWORD thread = window != nullptr ? GetWindowThreadProcessId(window, nullptr) : 0;
+	return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(GetKeyboardLayout(thread)) & 0xFFFF);
+}
+
 bool agent_connected() {
 	std::lock_guard<std::mutex> lock(agent_mutex);
 	return open_agent_pipe();
@@ -524,6 +531,23 @@ void key_event(uint16_t virtual_key, bool down) {
 }
 
 void press_keys(const std::vector<uint16_t> &virtual_keys) {
+	// Ctrl+Alt+Del in any order: the secure attention sequence, only the agent can.
+	auto has = [&](std::initializer_list<uint16_t> any) {
+		for (uint16_t key : virtual_keys) {
+			for (uint16_t wanted : any) {
+				if (key == wanted) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+	if (virtual_keys.size() == 3 && has({ VK_CONTROL, VK_LCONTROL, VK_RCONTROL }) && has({ VK_MENU, VK_LMENU, VK_RMENU })
+			&& has({ VK_DELETE })) {
+		InputRecord record{ InputType::SAS, 0, 0 };
+		deliver(&record, 1);
+		return;
+	}
 	std::vector<InputRecord> records;
 	for (uint16_t key : virtual_keys) {
 		records.push_back({ InputType::KEY, key, 1 });

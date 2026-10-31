@@ -169,6 +169,9 @@ const TUNABLES := [
 	["world", "vignette", "Затемнение краёв при движении", 100.0, "%", 0.1, 0.0, 1.0],
 	["world", "grid", "Сетка точками", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
+	["world", "status_line", "Строка состояния", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "keyboard_bars", "Клавиатура: планки переноса и наклона", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "keyboard_click", "Клавиатура: звук нажатия", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "option_lists", "Выбор вариантов в настройках", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["headset", "work_mode", "Режим работы", 1.0, "", 1.0, 0.0, 2.0],
@@ -225,7 +228,7 @@ const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Ш�
 const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауза", "swipe_mode": "Смахивание и масштаб",
 	"drop": "Покой", "live_screens": "Своя связь (без Link)", "fist_curl": "Кулак и движение рукой",
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
-	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
+	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок", "status_line": "Вид и клавиатура",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
 	"wall_slide_hand": "У стены и столба", "outlines": "Контуры и ручки", "vignette": "Вид", "render_radius": "Дальность и стики", "flight_sec": "Сеть мест", "edit_step": "Редактор мира"}
 ## The value between − and + is at most this wide; longer text gets a smaller font (m).
@@ -237,7 +240,7 @@ const TUNABLE_TABS := {
 	"work_mode": 3, "live_screens": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3,
 	"grab_mode": 8, "move_mode": 8, "magnet": 8, "tilt_mode": 8, "monitor_menu": 8,
 	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "wall_resolution": 8, "outlines": 8, "sphere_handle": 8, "wall_size_handle": 8, "wall_bend_handle": 8, "wall_tilt_handle": 8, "split_handle": 8, "handles_mode": 8,
-	"vignette": 8, "grid": 8, "grid_step": 8, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
+	"vignette": 8, "grid": 8, "grid_step": 8, "status_line": 2, "keyboard_bars": 2, "keyboard_click": 2, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -415,6 +418,8 @@ class Pointer:
 	var pressed := false
 	var just_pressed := false
 	var hit_distance := INF
+	## On the keyboard in VR this frame (its keys, bars or back): no clicks behind it.
+	var on_keyboard := false
 	## Along the ray to the nearest screen panel this frame (INF if none): what is
 	## behind a screen cannot be pressed through it (slice o5, 26.10.2026: in the
 	## headset the settings panel stood behind the screens and took their clicks).
@@ -765,6 +770,56 @@ var _smooth_turn_peak := 0.0
 ## is gone): buttons before the user, each a seat's id or -1 for standing up;
 ## closed by a choice, by going SEAT_CHOICE_AWAY away or after SEAT_CHOICE_SEC.
 var _seat_choice_buttons: Array[VrButton] = []
+## The keyboard in VR (31.10.2026, VirtualKeyboard): under the rig, so it goes
+## along; moved by the bar below it, tilted by the bar above; kept in [keyboard].
+var _keyboard := VirtualKeyboard.new()
+var _keyboard_root: Node3D
+var _keyboard_keys: Array[StandardMaterial3D] = []
+var _keyboard_bars: Array[Node3D] = []
+## The keys' labels, shown in the layout Windows types with (checked every
+## KEYBOARD_LAYOUT_SEC while the keyboard is up).
+var _keyboard_labels: Array[Label3D] = []
+var _keyboard_russian := false
+var _keyboard_next_layout := 0.0
+const KEYBOARD_LAYOUT_SEC := 0.3
+var _keyboard_click: AudioStreamPlayer
+var _keyboard_open := false
+## Where it stands (rig space), which way it faces (yaw about up) and how far its
+## top leans away from the user.
+var _keyboard_place := Vector3(0.0, 1.0, -0.45)
+var _keyboard_yaw := 0.0
+var _keyboard_tilt_deg := 30.0
+var _keyboard_placed := false
+## The pointer carrying it (-1 none), "move", "tilt" or "fist" (31.10.2026: a fist
+## with the ray on it carries it in the hand, tilting with the wrist), and where
+## the drag began.
+var _keyboard_grab := -1
+var _keyboard_grab_kind := ""
+var _keyboard_grab_distance := 0.0
+var _keyboard_grab_offset := Vector3.ZERO
+var _keyboard_grab_pitch := 0.0
+var _keyboard_grab_tilt := 0.0
+var _keyboard_grab_hold := Transform3D.IDENTITY
+## Per pointer: the key its ray holds down, the key its index fingertip holds
+## down (-1 none), and whether the fingertip was in front of the keys last frame.
+var _keyboard_ray_key: Array[int] = [-1, -1]
+var _keyboard_tip_key: Array[int] = [-1, -1]
+var _keyboard_tip_front: Array[bool] = [false, false]
+## When each fingertip last let a key go: a tracking wobble right after does not
+## press it again (a modifier pressed twice is sent alone).
+var _keyboard_tip_released: Array[float] = [-1.0, -1.0]
+## The bars' height and how far they stand off the keys; a fingertip presses
+## a key once it goes this far through the keys' face and lets go back here.
+const KEYBOARD_BAR := 0.03
+const KEYBOARD_BAR_OFF := 0.035
+const KEYBOARD_POKE_DEPTH := 0.0
+const KEYBOARD_POKE_FRONT := 0.006
+const KEYBOARD_POKE_RELEASE := 0.012
+const KEYBOARD_POKE_AGAIN_SEC := 0.12
+const KEYBOARD_COLOR := Color(0.16, 0.18, 0.22)
+const KEYBOARD_COLOR_HOVER := Color(0.28, 0.32, 0.4)
+const KEYBOARD_COLOR_DOWN := Color(0.3, 0.75, 0.45)
+const KEYBOARD_COLOR_HELD := Color(0.75, 0.6, 0.2)
 var _seat_choice: Array = []
 var _seat_choice_from := Vector3.ZERO
 var _seat_choice_until := 0.0
@@ -1150,6 +1205,7 @@ func _ready() -> void:
 		pointer.engagement.settings = _engagement_settings
 	_build_helpers()
 	_build_seat_choice()
+	_build_keyboard()
 	_build_radius_handles()
 	_build_outlines()
 	_build_bend_slider()
@@ -1157,6 +1213,8 @@ func _ready() -> void:
 	_build_settings_panel()
 	_load_settings()
 	_settings_root.visible = _settings_open
+	_keyboard_root.visible = _keyboard_open
+	_apply_keyboard_place()
 	_headset_options.work_mode = WorkMode.current()
 	# The one started last wins: the watchdog stops what it runs for another mode.
 	if not OS.has_feature("android") and DisplayServer.get_name() != "headless":
@@ -1306,6 +1364,7 @@ func _process(delta: float) -> void:
 	_update_world_editor(delta)
 	_place_monitor_menu()
 	_update_screen_distances()
+	_update_keyboard()
 	_update_buttons(delta)
 	_update_sliders()
 	if _menu_editor != null:
@@ -1318,6 +1377,8 @@ func _process(delta: float) -> void:
 	_update_rays()
 	_probe_mark(5)
 
+	if _world.status_line < 1:
+		lines.clear()
 	if _secure_desktop:
 		lines.append("ЗАЩИЩЁННЫЙ РАБОЧИЙ СТОЛ (запрос администратора / экран блокировки) — виден через агента")
 	if _editing:
@@ -1326,7 +1387,10 @@ func _process(delta: float) -> void:
 		lines.append("РЕДАКТОР МИРА — кулак (grip) с лучом на заготовке: перенести; полочка слева: взять новую, бросить в «Удалить»; экраны не двигаются")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
-	lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
+	if _world.status_line >= 1:
+		lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
+	elif _vdd_message != "":
+		lines.append(_vdd_message)
 	_status.text = "\n".join(lines)
 	_probe_mark(6)
 
@@ -1839,6 +1903,333 @@ func _close_seat_choice() -> void:
 	_seat_choice = []
 	for button in _seat_choice_buttons:
 		button.visible = false
+
+
+## The keyboard's nodes: a dark back, a quad and a label per key (in the layout
+## Windows types with), the bars to move it (below) and tilt it (above).
+func _build_keyboard() -> void:
+	_keyboard_root = Node3D.new()
+	_origin.add_child(_keyboard_root)
+	var size := VirtualKeyboard.extent()
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = size + Vector2(0.02, 0.02)
+	var back := MeshInstance3D.new()
+	back.mesh = back_mesh
+	back.material_override = _flat_material(Color(0.05, 0.06, 0.09))
+	back.position = Vector3(0.0, 0.0, -0.002)
+	_keyboard_root.add_child(back)
+	for key: Array in VirtualKeyboard.keys():
+		var rect: Rect2 = key[3]
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = KEYBOARD_COLOR
+		var mesh := QuadMesh.new()
+		mesh.size = rect.size
+		var quad := MeshInstance3D.new()
+		quad.mesh = mesh
+		quad.material_override = material
+		quad.position = Vector3(rect.get_center().x, rect.get_center().y, 0.0)
+		_keyboard_root.add_child(quad)
+		_keyboard_keys.append(material)
+		var label := Label3D.new()
+		label.text = key[0]
+		label.pixel_size = 0.0006
+		label.font_size = 30 if (key[0] as String).length() <= 2 else 22
+		label.position = quad.position + Vector3(0.0, 0.0, 0.001)
+		_keyboard_root.add_child(label)
+		_keyboard_labels.append(label)
+	for bar: Array in [["перенести", -1.0], ["наклон", 1.0]]:
+		var holder := Node3D.new()
+		_keyboard_root.add_child(holder)
+		_keyboard_bars.append(holder)
+		var mesh := QuadMesh.new()
+		mesh.size = Vector2(size.x * 0.4, KEYBOARD_BAR)
+		var quad := MeshInstance3D.new()
+		quad.mesh = mesh
+		quad.material_override = _flat_material(Color(0.22, 0.26, 0.34))
+		quad.position = Vector3(0.0, bar[1] * (size.y * 0.5 + KEYBOARD_BAR_OFF), 0.0)
+		holder.add_child(quad)
+		var label := Label3D.new()
+		label.text = bar[0]
+		label.pixel_size = 0.0006
+		label.font_size = 22
+		label.position = quad.position + Vector3(0.0, 0.0, 0.001)
+		holder.add_child(label)
+	_keyboard_click = AudioStreamPlayer.new()
+	_keyboard_click.stream = _click_sound()
+	_keyboard_click.max_polyphony = 4
+	_keyboard_click.volume_db = -18.0
+	add_child(_keyboard_click)
+	_keyboard_root.visible = false
+
+
+## A short soft click: 14 ms of a low 900 Hz tone, eased in and dying away, with
+## a breath of noise (31.10.2026: the first, 2.2 kHz and sharp, was too loud).
+func _click_sound() -> AudioStreamWAV:
+	var rate := 44100
+	var count := int(rate * 0.014)
+	var data := PackedByteArray()
+	data.resize(count * 2)
+	var noise := RandomNumberGenerator.new()
+	noise.seed = 7
+	for i in count:
+		var ease_in := minf(float(i) / (rate * 0.0015), 1.0)
+		var fade := exp(-float(i) / (count * 0.22)) * ease_in * ease_in
+		var value := (sin(TAU * 900.0 * i / rate) * 0.85 + noise.randf_range(-0.12, 0.12)) * fade
+		data.encode_s16(i * 2, int(value * 20000.0))
+	var sound := AudioStreamWAV.new()
+	sound.format = AudioStreamWAV.FORMAT_16_BITS
+	sound.mix_rate = rate
+	sound.data = data
+	return sound
+
+
+func _set_keyboard_open(open: bool) -> void:
+	if open and (not _keyboard_placed or not _keyboard_in_view()):
+		_place_keyboard_in_front()
+	_keyboard_open = open
+	_keyboard_root.visible = open
+	if not open:
+		_release_keyboard()
+	_apply_keyboard_place()
+	print("[keyboard] клавиатура %s" % ("перед вами" if open else "убрана"))
+	_save_settings()
+
+
+func _keyboard_in_view() -> bool:
+	var to := _keyboard_root.global_position - _camera.global_position
+	return (-_camera.global_basis.z).angle_to(to) < deg_to_rad(50.0)
+
+
+## Low in front of the head, as a keyboard on a desk is, facing the user.
+func _place_keyboard_in_front() -> void:
+	var head := _camera.transform
+	var forward := -head.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.01:
+		forward = Vector3.FORWARD
+	forward = forward.normalized()
+	_keyboard_place = head.origin + forward * 0.45
+	_keyboard_place.y = maxf(head.origin.y - 0.45, 0.4)
+	_keyboard_yaw = atan2(-forward.x, -forward.z)
+	_keyboard_placed = true
+
+
+func _apply_keyboard_place() -> void:
+	# Its face (+Z) to the user, the top leaning away by the tilt.
+	var basis := Basis(Vector3.UP, _keyboard_yaw) * Basis(Vector3.RIGHT, -deg_to_rad(_keyboard_tilt_deg))
+	_keyboard_root.transform = Transform3D(basis, _keyboard_place)
+
+
+## The ray on the keyboard's face: (x, y) on it and the distance along the ray,
+## or z < 0 when it misses the keyboard with its bars.
+func _keyboard_ray_hit(pointer: Pointer, face: Transform3D) -> Vector3:
+	var inverse := face.affine_inverse()
+	var from := inverse * pointer.origin
+	var along := inverse.basis * pointer.direction
+	if along.z > -0.001:
+		return Vector3(0.0, 0.0, -1.0)
+	var t := -from.z / along.z
+	var at := from + along * t
+	var size := VirtualKeyboard.extent()
+	var reach := size.y * 0.5 + (KEYBOARD_BAR_OFF + KEYBOARD_BAR * 0.5 if _world.keyboard_bars >= 1 else 0.01)
+	if t < 0.0 or absf(at.x) > size.x * 0.5 + 0.01 or absf(at.y) > reach:
+		return Vector3(0.0, 0.0, -1.0)
+	return Vector3(at.x, at.y, t)
+
+
+## Which bar (if any) is at `at` on the face: "move" below the keys, "tilt" above.
+func _keyboard_bar_at(at: Vector2) -> String:
+	var size := VirtualKeyboard.extent()
+	if _world.keyboard_bars < 1 or absf(at.x) > size.x * 0.2:
+		return ""
+	var off := size.y * 0.5 + KEYBOARD_BAR_OFF
+	if absf(at.y + off) <= KEYBOARD_BAR * 0.5:
+		return "move"
+	if absf(at.y - off) <= KEYBOARD_BAR * 0.5:
+		return "tilt"
+	return ""
+
+
+## The keyboard each frame: rays press keys and carry it by its bars, index
+## fingertips press keys by touch; what it sends goes to the computer.
+func _update_keyboard() -> void:
+	for pointer in _pointers:
+		pointer.on_keyboard = false
+	if _keyboard_root == null or not _keyboard_root.visible:
+		return
+	for bar in _keyboard_bars:
+		bar.visible = _world.keyboard_bars >= 1
+	var now := Time.get_ticks_msec() / 1000.0
+	if now >= _keyboard_next_layout:
+		_keyboard_next_layout = now + KEYBOARD_LAYOUT_SEC
+		var russian := VirtualKeyboard.is_russian(MouseInput.get_keyboard_layout())
+		if russian != _keyboard_russian or _keyboard_labels[0].text == "":
+			_keyboard_russian = russian
+			for k in _keyboard_labels.size():
+				_keyboard_labels[k].text = VirtualKeyboard.label_of(k, russian)
+	var face := _keyboard_root.global_transform
+	var hovered := [-1, -1]
+	for i in 2:
+		var pointer := _pointers[i]
+		if _keyboard_grab == i:
+			var holding := _edit_holding(pointer) if _keyboard_grab_kind == "fist" else pointer.pressed
+			if pointer.active and holding:
+				_drag_keyboard(pointer)
+				pointer.on_keyboard = true
+				pointer.hit_distance = minf(pointer.hit_distance, _keyboard_grab_distance)
+				continue
+			_keyboard_grab = -1
+			print("[keyboard] %s" % ("наклон %.0f°" % _keyboard_tilt_deg if _keyboard_grab_kind == "tilt" else "перенесена, наклон %.0f°" % _keyboard_tilt_deg))
+			_save_settings()
+		_update_keyboard_tip(i, face, now)
+		if not pointer.active:
+			_keyboard_ray_up(i)
+			continue
+		var hit := _keyboard_ray_hit(pointer, face)
+		if hit.z < 0.0 or hit.z > pointer.screen_distance:
+			_keyboard_ray_up(i)
+			continue
+		pointer.on_keyboard = true
+		pointer.hit_distance = minf(pointer.hit_distance, hit.z)
+		var at := Vector2(hit.x, hit.y)
+		var key := VirtualKeyboard.key_at(at)
+		hovered[i] = key
+		if _keyboard_grab < 0 and _edit_hold_started(pointer):
+			_keyboard_ray_up(i)
+			_start_keyboard_drag(i, "fist", hit.z)
+		elif pointer.just_pressed:
+			var bar := _keyboard_bar_at(at)
+			if bar != "":
+				_start_keyboard_drag(i, bar, hit.z)
+			elif key >= 0:
+				_keyboard_ray_key[i] = key
+				_press_keyboard_key(key, now)
+		elif pointer.pressed and _keyboard_ray_key[i] >= 0:
+			if _keyboard.down == _keyboard_ray_key[i]:
+				_send_keys(_keyboard.hold(now))
+		else:
+			_keyboard_ray_up(i)
+	# The keys' colours: held down, a modifier waiting for the next key, under a ray.
+	var keys := VirtualKeyboard.keys()
+	for k in _keyboard_keys.size():
+		var color := KEYBOARD_COLOR
+		if k == _keyboard.down or k in _keyboard_ray_key or k in _keyboard_tip_key:
+			color = KEYBOARD_COLOR_DOWN
+		elif keys[k][2] in _keyboard.held:
+			color = KEYBOARD_COLOR_HELD
+		elif k in hovered:
+			color = KEYBOARD_COLOR_HOVER
+		_keyboard_keys[k].albedo_color = color
+
+
+## An index fingertip through the keys' face, coming from in front, presses the
+## key under it; back out of the face, it lets go.
+func _update_keyboard_tip(i: int, face: Transform3D, now: float) -> void:
+	var pointer := _pointers[i]
+	if pointer.mode != "рука" or pointer.hand_joints.size() != HandPose.JOINT_COUNT:
+		_keyboard_tip_up(i)
+		_keyboard_tip_front[i] = false
+		return
+	var tip := face.affine_inverse() * (_origin.global_transform * pointer.hand_joints[HandPose.FINGERS[1][3]])
+	var size := VirtualKeyboard.extent()
+	var over := absf(tip.x) <= size.x * 0.5 and absf(tip.y) <= size.y * 0.5
+	if _keyboard_tip_key[i] >= 0:
+		# Out, back off the face, or slid onto another key: let go.
+		if not over or tip.z > KEYBOARD_POKE_RELEASE or VirtualKeyboard.key_at(Vector2(tip.x, tip.y)) != _keyboard_tip_key[i]:
+			_keyboard_tip_up(i)
+		elif _keyboard.down == _keyboard_tip_key[i]:
+			_send_keys(_keyboard.hold(now))
+	elif over and tip.z <= KEYBOARD_POKE_DEPTH and _keyboard_tip_front[i] and now - _keyboard_tip_released[i] >= KEYBOARD_POKE_AGAIN_SEC:
+		var key := VirtualKeyboard.key_at(Vector2(tip.x, tip.y))
+		if key >= 0:
+			_keyboard_tip_key[i] = key
+			_press_keyboard_key(key, now)
+	# In front stays so until the fingertip goes through the face (31.10.2026: worked
+	# out afresh each frame, a finger slowing down just before the keys lost it and
+	# pressed nothing): through it, it has to come out again before the next press.
+	if not over or tip.z > 0.1:
+		_keyboard_tip_front[i] = false
+	elif tip.z > KEYBOARD_POKE_FRONT:
+		_keyboard_tip_front[i] = true
+	elif tip.z <= KEYBOARD_POKE_DEPTH:
+		_keyboard_tip_front[i] = false
+
+
+func _keyboard_ray_up(i: int) -> void:
+	if _keyboard_ray_key[i] >= 0 and _keyboard.down == _keyboard_ray_key[i]:
+		_keyboard.release()
+	_keyboard_ray_key[i] = -1
+
+
+func _keyboard_tip_up(i: int) -> void:
+	if _keyboard_tip_key[i] >= 0:
+		_keyboard_tip_released[i] = Time.get_ticks_msec() / 1000.0
+		if _keyboard.down == _keyboard_tip_key[i]:
+			_keyboard.release()
+	_keyboard_tip_key[i] = -1
+
+
+func _release_keyboard() -> void:
+	for i in 2:
+		_keyboard_ray_up(i)
+		_keyboard_tip_up(i)
+	_keyboard.held.clear()
+	_keyboard_grab = -1
+
+
+func _press_keyboard_key(key: int, now: float) -> void:
+	if _world.keyboard_click >= 1:
+		_keyboard_click.play()
+	_send_keys(_keyboard.press(key, now))
+
+
+func _send_keys(keys: PackedInt32Array) -> void:
+	if not keys.is_empty() and not _computer_locked():
+		MouseInput.press_keys(keys)
+
+
+func _start_keyboard_drag(i: int, kind: String, distance: float) -> void:
+	var pointer := _pointers[i]
+	_keyboard_grab = i
+	_keyboard_grab_kind = kind
+	_keyboard_grab_distance = distance
+	_keyboard_grab_offset = _keyboard_root.global_position - (pointer.origin + pointer.direction * distance)
+	_keyboard_grab_pitch = asin(clampf(pointer.direction.y, -1.0, 1.0))
+	_keyboard_grab_tilt = _keyboard_tilt_deg
+	_keyboard_grab_hold = _keyboard_hand_frame(pointer).affine_inverse() * _keyboard_root.global_transform
+
+
+## The hand as a frame for carrying: at the palm (the controller), looking along the ray.
+func _keyboard_hand_frame(pointer: Pointer) -> Transform3D:
+	var up := Vector3.UP if absf(pointer.direction.y) < 0.95 else Vector3.BACK
+	return Transform3D(Basis.looking_at(pointer.direction, up), _hand_point(pointer))
+
+
+## Moving: the keyboard goes with the ray's end, turned to face the user. Tilting:
+## the ray lowered leans its top away (twice the ray's turn), up to upright.
+func _drag_keyboard(pointer: Pointer) -> void:
+	if _keyboard_grab_kind == "fist":
+		# Held as it was in the hand, then made level (no roll): where its face looks
+		# gives the turn and the tilt.
+		var held := _origin.global_transform.affine_inverse() * _keyboard_hand_frame(pointer) * _keyboard_grab_hold
+		_keyboard_place = held.origin
+		var normal := held.basis.z.normalized()
+		_keyboard_tilt_deg = clampf(rad_to_deg(asin(clampf(normal.y, -1.0, 1.0))), 0.0, 90.0)
+		if Vector2(normal.x, normal.z).length_squared() > 0.0001:
+			_keyboard_yaw = atan2(normal.x, normal.z)
+	elif _keyboard_grab_kind == "move":
+		var at := pointer.origin + pointer.direction * _keyboard_grab_distance + _keyboard_grab_offset
+		var rig := _origin.global_transform.affine_inverse()
+		_keyboard_place = rig * at
+		var to_head := _camera.transform.origin - _keyboard_place
+		if Vector2(to_head.x, to_head.z).length_squared() > 0.0001:
+			_keyboard_yaw = atan2(to_head.x, to_head.z)
+	else:
+		var pitch := asin(clampf(pointer.direction.y, -1.0, 1.0))
+		_keyboard_tilt_deg = clampf(_keyboard_grab_tilt + rad_to_deg(_keyboard_grab_pitch - pitch) * 2.0, 0.0, 90.0)
+	_keyboard_placed = true
+	_apply_keyboard_place()
 
 
 ## The choice goes away when the user walks off or leaves it be.
@@ -3874,7 +4265,8 @@ func _update_cursor() -> void:
 		pointer.panel = null
 		# A pointer that carries a panel (or a sphere's radius) does not touch the
 		# cursor; nor does one on a monitor's menu.
-		if not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0 or pointer.slider != null or pointer.grip_menu:
+		if not pointer.active or pointer.grab_panel != null or pointer.radius_fixture >= 0 or pointer.slider != null or pointer.grip_menu \
+				or pointer.on_keyboard:
 			continue
 		var on_menu := _monitor_menu.hit_distance(pointer.origin, pointer.direction)
 		if on_menu >= 0.0:
@@ -6404,6 +6796,7 @@ func _load_settings() -> void:
 		_menus = menus
 	# «Настройки» came later (31.10.2026): menus arranged before get it too.
 	_menus = MenuSet.with_action(_menus, "settings", "center")
+	_menus = MenuSet.with_action(_menus, "keyboard", "save")
 	var own: Variant = config.get_value("menus", "custom", {})
 	if own is Dictionary:
 		MenuSet.custom = own
@@ -6422,6 +6815,13 @@ func _load_settings() -> void:
 	var pose: Variant = config.get_value("world", "player_pose", {})
 	_player_pose = pose if PlayerPose.is_valid(pose) else {}
 	_settings_open = bool(config.get_value("settings_panel", "open", true))
+	_keyboard_open = bool(config.get_value("keyboard", "open", false))
+	var place: Variant = config.get_value("keyboard", "place", null)
+	_keyboard_placed = place is Vector3
+	if _keyboard_placed:
+		_keyboard_place = place
+		_keyboard_yaw = float(config.get_value("keyboard", "yaw", 0.0))
+	_keyboard_tilt_deg = clampf(float(config.get_value("keyboard", "tilt", 30.0)), 0.0, 90.0)
 	var worlds: Variant = config.get_value("worlds", "list", [])
 	_worlds = worlds if worlds is Array else []
 	_world_index = clampi(int(config.get_value("worlds", "current", 0)), 0, maxi(_worlds.size() - 1, 0))
@@ -6460,6 +6860,11 @@ func _save_settings() -> void:
 	if not _player_pose.is_empty():
 		config.set_value("world", "player_pose", _player_pose)
 	config.set_value("settings_panel", "open", _settings_open)
+	config.set_value("keyboard", "open", _keyboard_open)
+	if _keyboard_placed:
+		config.set_value("keyboard", "place", _keyboard_place)
+		config.set_value("keyboard", "yaw", _keyboard_yaw)
+	config.set_value("keyboard", "tilt", _keyboard_tilt_deg)
 	# The open world keeps itself up to date in its slot.
 	if _worlds.is_empty():
 		_worlds.append({"name": WorldEdit.next_world_name([]), "data": {}})
@@ -6668,6 +7073,8 @@ func _run_menu_action(id: String) -> void:
 		_sit_or_stand()
 	elif id == "settings":
 		_set_settings_open(not _settings_open or not _settings_in_view())
+	elif id == "keyboard":
+		_set_keyboard_open(not _keyboard_open or not _keyboard_in_view())
 	elif id == "places":
 		if _map_open:
 			_close_map()
@@ -8413,7 +8820,7 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
 	elif tunable[1] == "stick_mode":
 		return ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
-	elif tunable[1] in ["grid", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "wall_tilt_handle", "split_handle"]:
+	elif tunable[1] in ["grid", "status_line", "keyboard_bars", "keyboard_click", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "wall_tilt_handle", "split_handle"]:
 		return "да" if value >= 0.5 else "нет"
 	elif tunable[1] == "option_lists":
 		return "списком" if value >= 0.5 else "нажатиями"

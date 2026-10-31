@@ -35,6 +35,8 @@ const ACTIONS := {
 	"world_edit": ["Редактор мира", []],
 	# 31.10.2026: the settings panel folds away and comes back in front of the user.
 	"settings": ["Настройки", []],
+	# 31.10.2026: the keyboard in VR, shown and hidden.
+	"keyboard": ["Клавиатура", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.
@@ -81,7 +83,7 @@ const MODE_TWO_LEVEL := 1
 
 static func default_menus() -> Array:
 	return [
-		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all", "save"]},
+		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all", "save", "keyboard"]},
 		{"name": "Окна", "items": ["alt_tab", "desktop", "minimize", "maximize", "close", "snap_left", "snap_right"]},
 		{"name": "Мир и система", "items": ["center", "settings", "stand_up", "places", "start", "explorer", "task_manager", "quit"]},
 	]

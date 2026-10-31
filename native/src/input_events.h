@@ -20,6 +20,10 @@ enum class InputType : uint32_t {
 	WHEEL = 3, // a: 120 is one notch, positive scrolls up
 	HWHEEL = 4, // a: 120 is one notch, positive scrolls right
 	KEY = 5, // a: virtual key; b: 1 down, 0 up
+	// Ctrl+Alt+Del (31.10.2026): SendInput cannot make it, the agent asks Windows with
+	// SendSAS (allowed only when the SoftwareSASGeneration policy lets services);
+	// SendInput skips it.
+	SAS = 6,
 };
 
 struct InputRecord {

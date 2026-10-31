@@ -461,6 +461,7 @@ void MouseInput::_bind_methods() {
 	ClassDB::bind_static_method("MouseInput", D_METHOD("scroll_horizontal", "delta"), &MouseInput::scroll_horizontal);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("press_keys", "virtual_keys"), &MouseInput::press_keys);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("set_key", "virtual_key", "pressed"), &MouseInput::set_key);
+	ClassDB::bind_static_method("MouseInput", D_METHOD("get_keyboard_layout"), &MouseInput::get_keyboard_layout);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("is_agent_connected"), &MouseInput::is_agent_connected);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("is_secure_desktop_active"), &MouseInput::is_secure_desktop_active);
 	ClassDB::bind_static_method("MouseInput", D_METHOD("start_key_recording"), &MouseInput::start_key_recording);
@@ -509,6 +510,10 @@ void MouseInput::press_keys(const PackedInt32Array &p_virtual_keys) {
 
 void MouseInput::set_key(int p_virtual_key, bool p_pressed) {
 	workplace::key_event(static_cast<uint16_t>(p_virtual_key), p_pressed);
+}
+
+int MouseInput::get_keyboard_layout() {
+	return static_cast<int>(workplace::keyboard_layout());
 }
 
 bool MouseInput::is_agent_connected() {

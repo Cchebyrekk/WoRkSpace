@@ -84,7 +84,7 @@ const FIELDS := {
 	"settings": ["text"],
 	"call": ["target", "op", "args"],
 	"event": ["target", "name", "args"],
-	"pc_state": ["agent", "secure", "vdd_installed"],
+	"pc_state": ["agent", "secure", "vdd_installed", "layout"],
 	"vdd_config": ["text"],
 	"secure_frame": ["jpg", "x", "y", "w", "h", "s"],
 	"thumb": ["key", "jpg"],
@@ -187,9 +187,11 @@ static func event(target: String, name: String, args: Array = []) -> Dictionary:
 
 
 ## What the headset cannot see itself: whether the input agent is there, whether
-## the secure desktop (UAC, lock screen) is up, whether the VDD helper is installed.
-static func pc_state(agent: bool, secure: bool, vdd_installed: bool) -> Dictionary:
-	return {"t": "pc_state", "agent": agent, "secure": secure, "vdd_installed": vdd_installed}
+## the secure desktop (UAC, lock screen) is up, whether the VDD helper is installed,
+## the keyboard layout Windows types with (language id; 31.10.2026, for the
+## keyboard in VR).
+static func pc_state(agent: bool, secure: bool, vdd_installed: bool, layout: int) -> Dictionary:
+	return {"t": "pc_state", "agent": agent, "secure": secure, "vdd_installed": vdd_installed, "layout": layout}
 
 
 ## The driver's settings file (VddConfig.PATH) as text, "" if there is none.
@@ -266,7 +268,8 @@ static func problem(message: Variant) -> String:
 			return "call: аргументы не список"
 	if type == "event" and not (message["target"] is String and message["name"] is String and message["args"] is Array):
 		return "event с плохими полями"
-	if type == "pc_state" and not (message["agent"] is bool and message["secure"] is bool and message["vdd_installed"] is bool):
+	if type == "pc_state" and not (message["agent"] is bool and message["secure"] is bool and message["vdd_installed"] is bool \
+			and message["layout"] is int):
 		return "pc_state с плохими полями"
 	if type == "vdd_config" and not message["text"] is String:
 		return "vdd_config не текст"

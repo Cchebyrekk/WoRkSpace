@@ -142,6 +142,9 @@ void mouse_wheel(int32_t delta); // 120 is one notch, positive scrolls up
 void mouse_hwheel(int32_t delta); // 120 is one notch, positive scrolls right
 // Presses the Windows virtual keys in order, then releases them in reverse (a shortcut such as Ctrl+Shift+Z).
 void press_keys(const std::vector<uint16_t> &virtual_keys);
+// The keyboard layout of the foreground window: its language id (0x0419 Russian,
+// 0x0409 English US), for the keyboard in VR to show the letters Windows types.
+uint32_t keyboard_layout();
 void key_event(uint16_t virtual_key, bool down);
 // Whether input goes through workplace_agent.exe (tries to connect at most every 2 s).
 bool agent_connected();

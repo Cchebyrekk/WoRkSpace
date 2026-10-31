@@ -412,10 +412,11 @@ func _send_vdd_config() -> void:
 
 
 func _send_state(secure: bool) -> void:
-	var state := {"agent": _input.agent_connected(), "secure": secure, "vdd_installed": _vdd.is_installed()}
+	var state := {"agent": _input.agent_connected(), "secure": secure, "vdd_installed": _vdd.is_installed(),
+			"layout": MouseInput.get_keyboard_layout()}
 	if state != _state_sent:
 		_state_sent = state
-		_send(LinkProtocol.pc_state(state["agent"], state["secure"], state["vdd_installed"]))
+		_send(LinkProtocol.pc_state(state["agent"], state["secure"], state["vdd_installed"], state["layout"]))
 
 
 ## What the keyboard recording has so far, when it changed.

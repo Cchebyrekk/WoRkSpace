@@ -21,6 +21,7 @@
 #include "input_events.h"
 
 #include <windows.h>
+#include <sas.h>
 
 #include <sddl.h>
 #include <wtsapi32.h>
@@ -294,7 +295,14 @@ void serve_client(HANDLE pipe) {
 				continue;
 			}
 			follow_input_desktop();
-			if (inject_input(records, count) == 0) {
+			for (size_t i = 0; i < count; i++) {
+				if (records[i].type == InputType::SAS) {
+					// FALSE: as a service, not as an Ease of Access program.
+					SendSAS(FALSE);
+					log(L"Ctrl+Alt+Del asked (SendSAS); nothing happens unless the SoftwareSASGeneration policy allows services");
+				}
+			}
+			if (inject_input(records, count) == 0 && records[0].type != InputType::SAS) {
 				log(L"SendInput took nothing on %s (%lu)", current_desktop_name.c_str(), GetLastError());
 			}
 			batches++;

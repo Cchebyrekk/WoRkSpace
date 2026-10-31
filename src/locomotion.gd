@@ -15,6 +15,14 @@ class Options:
 	## Not "move_mode": the settings tabs find their rows by property name, and
 	## PanelOptions has one by that name.
 	var travel_mode := 1
+	## The status line before the user (hands' joints, screens, ray; 31.10.2026:
+	## off by default, the user's wish). The modes' notices (pause, editing, the
+	## secure desktop) show either way.
+	var status_line := 0
+	## The keyboard in VR: its bars to move and tilt it shown (a fist carries it
+	## either way), and a click on each key (31.10.2026).
+	var keyboard_bars := 1
+	var keyboard_click := 1
 	## Top speed (m/s) and how far the hand moves from the centre to reach it (m).
 	var move_speed := 2.0
 	var hand_reach := 0.15
