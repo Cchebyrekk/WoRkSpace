@@ -172,6 +172,7 @@ const TUNABLES := [
 	["world", "status_line", "Строка состояния", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "keyboard_bars", "Клавиатура: планки переноса и наклона", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "keyboard_click", "Клавиатура: звук нажатия", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "hand_dots", "Точки на руках", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "option_lists", "Выбор вариантов в настройках", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["headset", "work_mode", "Режим работы", 1.0, "", 1.0, 0.0, 2.0],
@@ -181,6 +182,7 @@ const TUNABLES := [
 	["headset", "video_fps", "Кадров в секунду", 1.0, "", 6.0, 30.0, 90.0],
 	["headset", "video_stats", "Показывать задержку", 1.0, "", 1.0, 0.0, 1.0],
 	["headset", "pc_sound", "Звук ПК в шлеме", 1.0, "", 1.0, 0.0, 1.0],
+	["headset", "passthrough", "Комната вокруг (passthrough)", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "interact_radius", "Радиус нажатий по экранам", 1.0, "м", 1.0, 0.0, 50.0],
 	["world", "stick_mode", "Стик контроллера", 1.0, "", 1.0, 0.0, 2.0],
 	["world", "flight_sec", "Перелёт к месту", 1.0, "с", 0.1, 0.0, 2.0],
@@ -237,10 +239,10 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"work_mode": 3, "live_screens": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3,
+	"work_mode": 3, "live_screens": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3, "passthrough": 3,
 	"grab_mode": 8, "move_mode": 8, "magnet": 8, "tilt_mode": 8, "monitor_menu": 8,
 	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "wall_resolution": 8, "outlines": 8, "sphere_handle": 8, "wall_size_handle": 8, "wall_bend_handle": 8, "wall_tilt_handle": 8, "split_handle": 8, "handles_mode": 8,
-	"vignette": 8, "grid": 8, "grid_step": 8, "status_line": 2, "keyboard_bars": 2, "keyboard_click": 2, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
+	"vignette": 8, "grid": 8, "grid_step": 8, "status_line": 2, "keyboard_bars": 2, "keyboard_click": 2, "hand_dots": 2, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -770,6 +772,31 @@ var _smooth_turn_peak := 0.0
 ## is gone): buttons before the user, each a seat's id or -1 for standing up;
 ## closed by a choice, by going SEAT_CHOICE_AWAY away or after SEAT_CHOICE_SEC.
 var _seat_choice_buttons: Array[VrButton] = []
+## Passthrough (31.10.2026, PassthroughAreas): the whole room (HeadsetOptions
+## .passthrough) or only the marked areas, boxes in the rig's space shown with
+## the Meta addon's projected passthrough (OpenXRFbPassthroughGeometry, the
+## headset's app only). Marking: per pointer where its pinch began (or none).
+var _passthrough_areas: Array = []
+## The areas as kept, in the rig's (tracking) space: the headset's app asks for
+## the Stage space (31.10.2026), whose origin is the boundary's and stays put
+## between starts; a Meta spatial anchor was tried first and never came, and
+## the areas jumped. _passthrough_areas are the ones shown.
+var _areas_local: Array = []
+var _areas_dirty := true
+var _passthrough_nodes: Array[Node3D] = []
+var _passthrough_outlines: Array[MeshInstance3D] = []
+var _passthrough_marking := false
+var _passthrough_full_applied := -1
+var _mark_from: Array = [null, null]
+var _mark_preview: MeshInstance3D
+var _mark_material: StandardMaterial3D
+## The Meta addon's passthrough layer always goes at this order (behind the eyes'
+## picture, OpenXRFbPassthroughExtension._get_composition_layer_order).
+const PASSTHROUGH_ORDER := -100
+## Starting passthrough for the areas: the whole room at most this long.
+const PASSTHROUGH_KICK_SEC := 2.0
+var _passthrough_kick_until := 0.0
+var _area_punch: ShaderMaterial
 ## The keyboard in VR (31.10.2026, VirtualKeyboard): under the rig, so it goes
 ## along; moved by the bar below it, tilted by the bar above; kept in [keyboard].
 var _keyboard := VirtualKeyboard.new()
@@ -1206,6 +1233,7 @@ func _ready() -> void:
 	_build_helpers()
 	_build_seat_choice()
 	_build_keyboard()
+	_build_passthrough()
 	_build_radius_handles()
 	_build_outlines()
 	_build_bend_slider()
@@ -1270,6 +1298,8 @@ func _ready() -> void:
 	_xr_ready = true
 
 	print("[xr] система: ", xr.get_system_info())
+	# Stage keeps its origin between starts (31.10.2026: the marked areas of the room).
+	print("[xr] пространство: %s, зона: %s" % [ProjectSettings.get_setting("xr/openxr/reference_space", "?"), xr.xr_play_area_mode])
 	print("[xr] рендерер: ", RenderingServer.get_current_rendering_driver_name(),
 			" / ", RenderingServer.get_current_rendering_method())
 	var openxr := xr as OpenXRInterface
@@ -1335,7 +1365,7 @@ func _process(delta: float) -> void:
 		var pointer := _pointers[i]
 		# With the hand interaction profile the controller node is tracked for bare hands too.
 		_controller_visuals[i].visible = pointer.mode == "контроллер"
-		if pointer.mode == "покой":
+		if pointer.mode == "покой" or not _hand_dots_shown(pointer):
 			_joint_meshes[i].visible = false
 		lines.append("%s: суставов %d/%d (источник: %s) | контроллер: %s, триггер %.2f, grip %.2f, стик %s | луч: %s%s" % [
 			SIDE_LABELS[i], joints, XRHandTracker.HAND_JOINT_MAX, _hand_source_label(i),
@@ -1365,6 +1395,7 @@ func _process(delta: float) -> void:
 	_place_monitor_menu()
 	_update_screen_distances()
 	_update_keyboard()
+	_update_passthrough()
 	_update_buttons(delta)
 	_update_sliders()
 	if _menu_editor != null:
@@ -1385,6 +1416,8 @@ func _process(delta: float) -> void:
 		lines.append("РЕЖИМ РЕДАКТИРОВАНИЯ — выключается тем же пунктом кругового меню")
 	if _world_editing:
 		lines.append("РЕДАКТОР МИРА — кулак (grip) с лучом на заготовке: перенести; полочка слева: взять новую, бросить в «Удалить»; экраны не двигаются")
+	if _passthrough_marking:
+		lines.append("ОТМЕТКА КОМНАТЫ — щипок в одном углу, разжать в противоположном; короткий щипок внутри — убрать; выключается тем же пунктом меню")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
 	if _world.status_line >= 1:
@@ -2230,6 +2263,199 @@ func _drag_keyboard(pointer: Pointer) -> void:
 		_keyboard_tilt_deg = clampf(_keyboard_grab_tilt + rad_to_deg(_keyboard_grab_pitch - pitch) * 2.0, 0.0, 90.0)
 	_keyboard_placed = true
 	_apply_keyboard_place()
+
+
+## The joint dots of a hand, by the «Точки на руках» setting: hidden where the
+## real hand is seen (the whole room on, or the palm in a marked area).
+func _hand_dots_shown(pointer: Pointer) -> bool:
+	if _world.hand_dots >= 2:
+		return false
+	if _world.hand_dots == 0 or not _passthrough_ready():
+		return true
+	if _passthrough_full_applied == 1:
+		return false
+	var palm := _origin.global_transform.affine_inverse() * pointer.palm_world
+	return PassthroughAreas.find(_passthrough_areas, palm) < 0
+
+
+## The areas' own hole in the eyes' picture: multiplied by 0 (colour and alpha),
+## front faces only, after everything else.
+func _area_punch_material() -> ShaderMaterial:
+	if _area_punch == null:
+		var shader := Shader.new()
+		shader.code = "shader_type spatial;
+render_mode blend_mul, unshaded, cull_back, shadows_disabled;
+void fragment() {
+	ALBEDO = vec3(0.0);
+	ALPHA = 0.0;
+}
+"
+		_area_punch = ShaderMaterial.new()
+		_area_punch.shader = shader
+		_area_punch.render_priority = Material.RENDER_PRIORITY_MAX
+	return _area_punch
+
+
+func _passthrough_running() -> bool:
+	var extension := _passthrough_extension()
+	return extension != null and extension.has_method(&"is_passthrough_started") and bool(extension.call(&"is_passthrough_started"))
+
+
+## The Meta addon's passthrough extension (its singleton), or null.
+func _passthrough_extension() -> Object:
+	if Engine.has_singleton(&"OpenXRFbPassthroughExtension"):
+		return Engine.get_singleton(&"OpenXRFbPassthroughExtension")
+	if ClassDB.class_exists(&"OpenXRFbPassthroughExtension") and ClassDB.class_has_method(&"OpenXRFbPassthroughExtension", &"get_singleton"):
+		return ClassDB.class_call_static(&"OpenXRFbPassthroughExtension", &"get_singleton") as Object
+	return null
+
+
+## Whether this app can show the room: the headset's own, with the Meta addon.
+func _passthrough_ready() -> bool:
+	return ClassDB.class_exists(&"OpenXRFbPassthroughGeometry") and _xr != null
+
+
+func _build_passthrough() -> void:
+	_mark_material = StandardMaterial3D.new()
+	_mark_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_mark_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_mark_material.albedo_color = Color(0.3, 0.8, 1.0, 0.18)
+	_mark_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_mark_preview = MeshInstance3D.new()
+	_mark_preview.mesh = BoxMesh.new()
+	_mark_preview.material_override = _mark_material
+	_mark_preview.visible = false
+	_origin.add_child(_mark_preview)
+
+
+## The areas' nodes made again from _passthrough_areas: the addon's passthrough
+## geometry (it shows the room there) and, for marking, a faint box over each.
+func _rebuild_passthrough_areas() -> void:
+	for node in _passthrough_nodes:
+		node.queue_free()
+	for outline in _passthrough_outlines:
+		outline.queue_free()
+	_passthrough_nodes.clear()
+	_passthrough_outlines.clear()
+	for box: Dictionary in _passthrough_areas:
+		var mesh := BoxMesh.new()
+		mesh.size = box["size"]
+		var at := PassthroughAreas.transform_of(box)
+		if _passthrough_ready():
+			var geometry := ClassDB.instantiate(&"OpenXRFbPassthroughGeometry") as Node3D
+			if geometry != null:
+				geometry.set(&"mesh", mesh)
+				geometry.transform = at
+				geometry.visible = _passthrough_full_applied != 1
+				_origin.add_child(geometry)
+				_passthrough_nodes.append(geometry)
+			# Screens drawn as meshes in the eyes' picture (walls, columns, spheres in
+			# the headset) are not layers to move below the room (31.10.2026, they still
+			# covered the areas): drawn last, the box's front clears the picture to
+			# nothing wherever it is nearer than they are.
+			var punch := MeshInstance3D.new()
+			punch.mesh = mesh
+			punch.material_override = _area_punch_material()
+			punch.transform = at
+			punch.visible = _passthrough_full_applied != 1
+			_origin.add_child(punch)
+			_passthrough_nodes.append(punch)
+		var outline := MeshInstance3D.new()
+		outline.mesh = mesh
+		outline.material_override = _mark_material
+		outline.transform = at
+		_origin.add_child(outline)
+		_passthrough_outlines.append(outline)
+
+
+## Each frame: the whole room or only the areas, and marking with the hands.
+func _update_passthrough() -> void:
+	# Made once the session is on (31.10.2026: made with the settings at the start,
+	# before the addon's passthrough was up, they showed nothing until marked anew).
+	if _areas_dirty and _recentered:
+		_areas_dirty = false
+		_passthrough_areas = _areas_local.duplicate(true)
+		_rebuild_passthrough_areas()
+	if _passthrough_kick_until > 0.0 and (_passthrough_running() or Time.get_ticks_msec() / 1000.0 > _passthrough_kick_until):
+		_passthrough_kick_until = 0.0
+		if _passthrough_full_applied == 0:
+			_xr.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_OPAQUE
+			_areas_dirty = true
+		print("[passthrough] запущен: %s" % _passthrough_running())
+	var full := 1 if _passthrough_ready() and _headset_options.passthrough >= 1 else 0
+	if full != _passthrough_full_applied:
+		_passthrough_full_applied = full
+		_apply_passthrough(full == 1)
+	for outline in _passthrough_outlines:
+		outline.visible = _passthrough_marking
+	if not _passthrough_marking:
+		_mark_preview.visible = false
+		return
+	var rig := _origin.global_transform.affine_inverse()
+	var shown := false
+	for i in 2:
+		var pointer := _pointers[i]
+		var at := rig * (pointer.pinch_point if pointer.mode == "рука" else pointer.origin)
+		if pointer.active and pointer.just_pressed and _mark_from[i] == null and not pointer.on_keyboard:
+			_mark_from[i] = at
+		elif _mark_from[i] != null and not (pointer.active and pointer.pressed):
+			_finish_mark(_mark_from[i], at)
+			_mark_from[i] = null
+		if _mark_from[i] != null and not shown:
+			var box := PassthroughAreas.box_between(_mark_from[i], at, _head_yaw())
+			(_mark_preview.mesh as BoxMesh).size = box["size"]
+			_mark_preview.transform = PassthroughAreas.transform_of(box)
+			shown = true
+	_mark_preview.visible = shown
+
+
+## The way the head faces (yaw about up, rig space): boxes are drawn square to it.
+func _head_yaw() -> float:
+	var forward := -_camera.transform.basis.z
+	return atan2(-forward.x, -forward.z)
+
+
+func _finish_mark(from: Vector3, to: Vector3) -> void:
+	if PassthroughAreas.is_tap(from, to):
+		var found := PassthroughAreas.find(_passthrough_areas, to)
+		if found < 0 or found >= _areas_local.size():
+			return
+		_areas_local.remove_at(found)
+		print("[passthrough] область убрана, осталось %d" % _areas_local.size())
+	elif _areas_local.size() >= PassthroughAreas.MAX_AREAS:
+		print("[passthrough] областей уже %d — это предел" % PassthroughAreas.MAX_AREAS)
+		return
+	else:
+		var box := PassthroughAreas.box_between(from, to, _head_yaw())
+		_areas_local.append(box)
+		var size: Vector3 = box["size"]
+		print("[passthrough] область %.2f × %.2f × %.2f м, всего %d" % [size.x, size.y, size.z, _areas_local.size()])
+	_areas_dirty = true
+	_save_settings()
+
+
+## The whole room behind the world (the addon's full passthrough through the
+## eyes' alpha), or only the areas (their projected passthrough).
+func _apply_passthrough(full: bool) -> void:
+	if not _passthrough_ready():
+		return
+	var modes: Array = _xr.get_supported_environment_blend_modes()
+	if XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in modes:
+		get_viewport().transparent_bg = true
+		_xr.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND if full else XRInterface.XR_ENV_BLEND_MODE_OPAQUE
+	# Only the areas: their geometry made anew, so that the addon makes its
+	# projected layer again after the whole room's.
+	if not full:
+		_areas_dirty = true
+	# The addon starts passthrough only on a switch to the whole room, and has no
+	# call to start it (31.10.2026: after a start with only the areas, they showed
+	# nothing): the whole room for a moment, back to the areas once it runs.
+	if not full and not _passthrough_running() and XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in modes:
+		_xr.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND
+		_passthrough_kick_until = Time.get_ticks_msec() / 1000.0 + PASSTHROUGH_KICK_SEC
+	for node in _passthrough_nodes:
+		node.visible = not full
+	print("[passthrough] %s (режимы смешивания: %s)" % ["вся комната" if full else "только отмеченное", modes])
 
 
 ## The choice goes away when the user walks off or leaves it be.
@@ -4536,15 +4762,20 @@ func _update_panels(delta: float) -> void:
 ## Composition layers are drawn by sort_order, not by depth: with every panel at
 ## the same order, one behind another could show over it from some angles
 ## (20.10.2026). The nearest panel gets -2, each farther one a step lower; the
-## UAC quad stays above them all at -1.
+## UAC quad stays above them all at -1. With marked areas of the room (and not
+## the whole room) the panels go below PASSTHROUGH_ORDER, so that the areas show
+## over the screens (31.10.2026: a screen behind covered the desk).
 func _order_layers(head: Vector3) -> void:
+	var nearest := -2
+	if _passthrough_full_applied == 0 and not _passthrough_areas.is_empty() and _passthrough_ready():
+		nearest = PASSTHROUGH_ORDER - 10
 	var by_distance := _panels.duplicate()
 	by_distance.sort_custom(func(a: ScreenPanel, b: ScreenPanel) -> bool:
 		return a.placement.transform.origin.distance_squared_to(head) < b.placement.transform.origin.distance_squared_to(head))
 	for rank in by_distance.size():
 		var layer := (by_distance[rank] as ScreenPanel).layer
-		if layer != null and layer.sort_order != -2 - rank:
-			layer.sort_order = -2 - rank
+		if layer != null and layer.sort_order != nearest - rank:
+			layer.sort_order = nearest - rank
 
 
 ## The same monitors, only moved around (or another one made primary): the
@@ -5406,7 +5637,7 @@ func _drop_group(id: int, shift: Vector2i) -> void:
 
 ## Whether anything may reach the computer: not in either editing mode.
 func _computer_locked() -> bool:
-	return _editing or _world_editing
+	return _editing or _world_editing or _passthrough_marking
 
 
 func _set_world_editing(on: bool) -> void:
@@ -6797,6 +7028,7 @@ func _load_settings() -> void:
 	# «Настройки» came later (31.10.2026): menus arranged before get it too.
 	_menus = MenuSet.with_action(_menus, "settings", "center")
 	_menus = MenuSet.with_action(_menus, "keyboard", "save")
+	_menus = MenuSet.with_category(_menus, "Комната", ["passthrough", "passthrough_areas"])
 	var own: Variant = config.get_value("menus", "custom", {})
 	if own is Dictionary:
 		MenuSet.custom = own
@@ -6816,6 +7048,11 @@ func _load_settings() -> void:
 	_player_pose = pose if PlayerPose.is_valid(pose) else {}
 	_settings_open = bool(config.get_value("settings_panel", "open", true))
 	_keyboard_open = bool(config.get_value("keyboard", "open", false))
+	# Kept with the anchor of the first try (31.10.2026): in its frame, not the
+	# rig's, so not shown again.
+	_areas_local = PassthroughAreas.from_config(config.get_value("passthrough", "areas", [])) \
+			if str(config.get_value("passthrough", "anchor", "")) == "" else []
+	_areas_dirty = true
 	var place: Variant = config.get_value("keyboard", "place", null)
 	_keyboard_placed = place is Vector3
 	if _keyboard_placed:
@@ -6861,6 +7098,8 @@ func _save_settings() -> void:
 		config.set_value("world", "player_pose", _player_pose)
 	config.set_value("settings_panel", "open", _settings_open)
 	config.set_value("keyboard", "open", _keyboard_open)
+	config.set_value("passthrough", "areas", _areas_local)
+	config.set_value("passthrough", "anchor", "")
 	if _keyboard_placed:
 		config.set_value("keyboard", "place", _keyboard_place)
 		config.set_value("keyboard", "yaw", _keyboard_yaw)
@@ -7073,6 +7312,18 @@ func _run_menu_action(id: String) -> void:
 		_sit_or_stand()
 	elif id == "settings":
 		_set_settings_open(not _settings_open or not _settings_in_view())
+	elif id == "passthrough":
+		if _passthrough_ready():
+			_headset_options.passthrough = 0 if _headset_options.passthrough >= 1 else 1
+			print("[passthrough] комната вокруг: %s" % ("да" if _headset_options.passthrough >= 1 else "нет"))
+			_refresh_settings_panel()
+			_save_settings()
+		else:
+			print("[passthrough] только в режиме «мир в шлеме»")
+	elif id == "passthrough_areas":
+		_passthrough_marking = not _passthrough_marking
+		_mark_from = [null, null]
+		print("[passthrough] отметка комнаты %s, областей %d" % ["включена" if _passthrough_marking else "выключена", _passthrough_areas.size()])
 	elif id == "keyboard":
 		_set_keyboard_open(not _keyboard_open or not _keyboard_in_view())
 	elif id == "places":
@@ -8796,6 +9047,12 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return WorkMode.name_of(roundi(value))
 	elif tunable[1] == "video_stats":
 		return "да" if value >= 0.5 else "нет"
+	elif tunable[1] == "hand_dots":
+		return ["видны всегда", "не там, где видна комната", "не видны"][clampi(roundi(value), 0, 2)]
+	elif tunable[1] == "passthrough":
+		if not _passthrough_ready():
+			return "нет (только «мир в шлеме»)"
+		return "да" if value >= 0.5 else "нет, только отмеченное"
 	elif tunable[1] == "pc_sound":
 		return "да" if value >= 0.5 else "нет (в «OpenXR на ПК» звук даёт Link)"
 	elif tunable[1] == "live_screens":

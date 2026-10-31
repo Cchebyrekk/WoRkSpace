@@ -38,6 +38,7 @@ func _init() -> void:
 	_test_work_mode()
 	_test_player_pose()
 	_test_virtual_keyboard()
+	_test_passthrough_areas()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -696,7 +697,7 @@ func _test_hand_pose() -> void:
 
 func _test_menu_set() -> void:
 	var menus := MenuSet.default_menus()
-	_check(menus.size() == 3 and MenuSet.items_of(menus[0]).has("copy"), "три категории по умолчанию")
+	_check(menus.size() == 4 and MenuSet.items_of(menus[0]).has("copy"), "четыре категории по умолчанию (31.10.2026 — и «Комната»)")
 	for menu: Dictionary in menus:
 		_check(MenuSet.items_of(menu).size() <= MenuSet.MAX_ITEMS, "не больше %d пунктов в «%s»" % [MenuSet.MAX_ITEMS, menu["name"]])
 	_check(MenuSet.next_action("") == MenuSet.ACTIONS.keys()[0] and MenuSet.next_action(MenuSet.ACTIONS.keys().back()) == "",
@@ -2178,3 +2179,27 @@ func _test_virtual_keyboard() -> void:
 	_check(VirtualKeyboard.is_russian(0x0419) and not VirtualKeyboard.is_russian(0x0409), "клавиатура: 0x0419 — русская, 0x0409 — нет")
 	_check(VirtualKeyboard.label_of(q, true) == "Й" and VirtualKeyboard.label_of(q, false) == "Q", "клавиатура: Q/Й по раскладке")
 	_check(VirtualKeyboard.label_of(index_of.call("1"), true) == "1", "клавиатура: у цифр раскладка не меняет подпись")
+
+
+func _test_passthrough_areas() -> void:
+	var box := PassthroughAreas.box_between(Vector3(0.0, 0.7, -0.3), Vector3(0.6, 0.72, -0.7), 0.0)
+	_check((box["size"] as Vector3).is_equal_approx(Vector3(0.6, 0.05, 0.4)), "passthrough: коробка по двум углам, тонкая — не тоньше 5 см")
+	_check(PassthroughAreas.contains(box, Vector3(0.3, 0.71, -0.5)), "passthrough: середина внутри")
+	_check(not PassthroughAreas.contains(box, Vector3(0.3, 0.9, -0.5)), "passthrough: выше — снаружи")
+	var turned := PassthroughAreas.box_between(Vector3.ZERO, Vector3(0.0, 0.5, -1.0), PI / 2.0)
+	_check((turned["size"] as Vector3).is_equal_approx(Vector3(1.0, 0.5, 0.05)), "passthrough: в повёрнутой рамке стороны свои")
+	_check(PassthroughAreas.is_tap(Vector3.ZERO, Vector3(0.01, 0.0, 0.0)) and not PassthroughAreas.is_tap(Vector3.ZERO, Vector3(0.1, 0.0, 0.0)),
+			"passthrough: короткий щипок — касание")
+	var small := PassthroughAreas.box_between(Vector3(0.2, 0.69, -0.4), Vector3(0.4, 0.73, -0.6), 0.0)
+	_check(PassthroughAreas.find([box, small], Vector3(0.3, 0.71, -0.5)) == 1, "passthrough: внутри двух — меньшая")
+	var menus := MenuSet.with_category([{"name": "А", "items": ["copy"]}], "Комната", ["passthrough", "passthrough_areas"])
+	_check(menus.size() == 2 and menus[1]["items"] == ["passthrough", "passthrough_areas"], "меню: новая категория добавлена")
+	_check(MenuSet.with_category(menus, "Комната", ["passthrough"]).size() == 2, "меню: уже есть — не добавляется")
+	var anchor := Transform3D(Basis(Vector3.UP, 0.4), Vector3(1.0, 0.0, 2.0))
+	var there := PassthroughAreas.moved(box, anchor)
+	var back := PassthroughAreas.moved(there, anchor.affine_inverse())
+	_check((back["centre"] as Vector3).is_equal_approx(box["centre"]) and is_equal_approx(back["yaw"], box["yaw"]),
+			"passthrough: в рамку якоря и обратно — то же место")
+	_check(is_equal_approx(PassthroughAreas.yaw_of(Basis(Vector3.UP, 0.7)), 0.7), "passthrough: поворот рамки")
+	var saved := PassthroughAreas.from_config([box, {"centre": 1}, "x"])
+	_check(saved.size() == 1, "passthrough: из сохранённого — только коробки")

@@ -24,6 +24,9 @@ var video_stats := 0
 ## What the PC plays, in the headset (31.10.2026; the PC's SoundStreamer). Only
 ## without Link: Link brings the sound itself.
 var pc_sound := 1
+## The room around the user instead of the dark (31.10.2026; the headset's
+## passthrough, «мир в шлеме» only). Marked areas show the room either way.
+var passthrough := 0
 ## WorkMode: shown as the mode this process runs in (main.gd sets it on start);
 ## a change switches after a pause (main.gd, WORK_MODE_SWITCH_SEC).
 var work_mode := WorkMode.OPENXR

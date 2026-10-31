@@ -37,6 +37,9 @@ const ACTIONS := {
 	"settings": ["Настройки", []],
 	# 31.10.2026: the keyboard in VR, shown and hidden.
 	"keyboard": ["Клавиатура", []],
+	# 31.10.2026: the room around (passthrough) and the places of it always shown.
+	"passthrough": ["Комната вокруг", []],
+	"passthrough_areas": ["Отметить комнату", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.
@@ -86,7 +89,22 @@ static func default_menus() -> Array:
 		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all", "save", "keyboard"]},
 		{"name": "Окна", "items": ["alt_tab", "desktop", "minimize", "maximize", "close", "snap_left", "snap_right"]},
 		{"name": "Мир и система", "items": ["center", "settings", "stand_up", "places", "start", "explorer", "task_manager", "quit"]},
+		{"name": "Комната", "items": ["passthrough", "passthrough_areas"]},
 	]
+
+
+## `menus` with a category of `items` added at the end, when none of them is in
+## any menu yet and there is room for one more category.
+static func with_category(menus: Array, name: String, items: Array) -> Array:
+	if menus.size() >= MAX_CATEGORIES:
+		return menus
+	for menu: Dictionary in menus:
+		for id: String in items:
+			if id in menu.get("items", []):
+				return menus
+	var result := menus.duplicate(true)
+	result.append({"name": name, "items": items.duplicate()})
+	return result
 
 
 ## `menus` with `id` added where the user would look for it, if no menu has it:

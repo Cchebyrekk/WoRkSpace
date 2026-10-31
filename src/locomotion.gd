@@ -22,6 +22,10 @@ class Options:
 	## The keyboard in VR: its bars to move and tilt it shown (a fist carries it
 	## either way), and a click on each key (31.10.2026).
 	var keyboard_bars := 1
+	## The dots on the hands' joints: 0 always, 1 not where the room shows (the
+	## whole room on, or the hand in a marked area: the real hand is seen there),
+	## 2 never (31.10.2026).
+	var hand_dots := 1
 	var keyboard_click := 1
 	## Top speed (m/s) and how far the hand moves from the centre to reach it (m).
 	var move_speed := 2.0
