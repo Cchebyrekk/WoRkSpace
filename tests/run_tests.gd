@@ -2201,5 +2201,18 @@ func _test_passthrough_areas() -> void:
 	_check((back["centre"] as Vector3).is_equal_approx(box["centre"]) and is_equal_approx(back["yaw"], box["yaw"]),
 			"passthrough: в рамку якоря и обратно — то же место")
 	_check(is_equal_approx(PassthroughAreas.yaw_of(Basis(Vector3.UP, 0.7)), 0.7), "passthrough: поворот рамки")
+	var portal := PassthroughAreas.portal_at(Vector3(0.0, 0.0, -1.0), 0.0)
+	_check(is_equal_approx((portal["centre"] as Vector3).y, 1.0), "портал: стоит на полу")
+	_check(PassthroughAreas.passes(portal, Vector3(0.0, 1.6, -0.8), Vector3(0.0, 1.6, -1.2)), "портал: голова прошла сквозь проём")
+	_check(not PassthroughAreas.passes(portal, Vector3(1.0, 1.6, -0.8), Vector3(1.0, 1.6, -1.2)), "портал: мимо проёма — не прошла")
+	_check(not PassthroughAreas.passes(portal, Vector3(0.0, 1.6, -0.6), Vector3(0.0, 1.6, -0.8)), "портал: не дошла до плоскости")
+	_check(PassthroughAreas.side_of(portal, Vector3(0.0, 1.6, 0.0)) == 1 and PassthroughAreas.side_of(portal, Vector3(0.0, 1.6, -2.0)) == -1,
+			"портал: стороны")
+	var wider := PassthroughAreas.resized(portal, 1, Vector3(0.95, 1.0, -1.0))
+	_check(is_equal_approx((wider["size"] as Vector3).x, 1.4) and is_equal_approx((wider["centre"] as Vector3).x, 0.25),
+			"портал: правый край дальше — шире, левый на месте")
+	var lower := PassthroughAreas.resized(portal, 3, Vector3(0.0, 0.05, -1.0))
+	_check(is_equal_approx((lower["size"] as Vector3).y, PassthroughAreas.PORTAL_MIN_SIDE), "портал: не меньше 20 см")
+	_check(PassthroughAreas.edge_point(portal, 3).is_equal_approx(Vector3(0.0, 2.0, -1.0)), "портал: середина верхнего края")
 	var saved := PassthroughAreas.from_config([box, {"centre": 1}, "x"])
 	_check(saved.size() == 1, "passthrough: из сохранённого — только коробки")

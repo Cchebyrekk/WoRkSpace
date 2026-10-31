@@ -61,6 +61,70 @@ static func find(areas: Array, point: Vector3) -> int:
 	return best
 
 
+## A portal (01.11.2026): a door-sized box standing on the floor, as thick as a
+## head is wide (5 cm at first: going through, the eyes were out of it at once).
+const PORTAL_SIZE := Vector3(0.9, 2.0, 0.2)
+
+
+## A new portal at `foot` (on the floor, rig space), its face turned by `yaw`.
+static func portal_at(foot: Vector3, yaw: float) -> Dictionary:
+	return {"centre": foot + Vector3(0.0, PORTAL_SIZE.y * 0.5, 0.0), "size": PORTAL_SIZE, "yaw": yaw}
+
+
+## Which side of a portal's face `point` is on: 1 in front (+Z), -1 behind.
+static func side_of(portal: Dictionary, point: Vector3) -> int:
+	return 1 if (transform_of(portal).affine_inverse() * point).z >= 0.0 else -1
+
+
+## Whether going from `from` to `to` passes through the portal's opening (not
+## round its sides): the crossing of its face is inside its width and height.
+static func passes(portal: Dictionary, from: Vector3, to: Vector3) -> bool:
+	var inverse := transform_of(portal).affine_inverse()
+	var a := inverse * from
+	var b := inverse * to
+	if (a.z >= 0.0) == (b.z >= 0.0) or is_equal_approx(a.z, b.z):
+		return false
+	var at := a.lerp(b, a.z / (a.z - b.z))
+	var half: Vector3 = portal["size"] * 0.5
+	return absf(at.x) <= half.x and absf(at.y) <= half.y
+
+
+## A portal's sides between these (metres).
+const PORTAL_MIN_SIDE := 0.2
+const PORTAL_MAX_SIDE := 5.0
+## Edges of a portal for resizing: left, right, bottom, top (its face's -x, +x, -y, +y).
+const EDGES := [Vector2(-1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, -1.0), Vector2(0.0, 1.0)]
+
+
+## The middle of edge `edge` (EDGES), in the space the portal is in.
+static func edge_point(portal: Dictionary, edge: int) -> Vector3:
+	var half: Vector3 = portal["size"] * 0.5
+	var towards: Vector2 = EDGES[edge]
+	return transform_of(portal) * Vector3(towards.x * half.x, towards.y * half.y, 0.0)
+
+
+## The portal with edge `edge` brought to `point` (only its place across that
+## edge counts); the opposite edge stays.
+static func resized(portal: Dictionary, edge: int, point: Vector3) -> Dictionary:
+	var frame := transform_of(portal)
+	var local := frame.affine_inverse() * point
+	var size: Vector3 = portal["size"]
+	var half := size * 0.5
+	var towards: Vector2 = EDGES[edge]
+	var centre_local := Vector3.ZERO
+	if towards.x != 0.0:
+		var fixed := -towards.x * half.x
+		var side := clampf(absf(local.x - fixed), PORTAL_MIN_SIDE, PORTAL_MAX_SIDE)
+		size.x = side
+		centre_local.x = fixed + towards.x * side * 0.5
+	else:
+		var fixed := -towards.y * half.y
+		var side := clampf(absf(local.y - fixed), PORTAL_MIN_SIDE, PORTAL_MAX_SIDE)
+		size.y = side
+		centre_local.y = fixed + towards.y * side * 0.5
+	return {"centre": frame * centre_local, "size": size, "yaw": portal["yaw"]}
+
+
 static func is_valid(box: Variant) -> bool:
 	if not box is Dictionary:
 		return false

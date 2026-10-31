@@ -81,6 +81,10 @@ var _in_range := true
 ## no composition layer is shown — every panel is its mesh with its viewport's
 ## picture, as a convex one is (the layers stay, empty, for the code that moves them).
 static var mesh_only := false
+## In the headset, every video panel on its mesh, none on a layer (01.11.2026:
+## through a portal, the world is cut by the eyes' picture alone, and layers are
+## not in it).
+static var video_mesh := false
 ## With mesh_only: the picture with mipmaps (PanelMips), refreshed with the viewport;
 ## the generation of it the material has (0: still the viewport's own picture).
 var _mips: PanelMips
@@ -402,7 +406,7 @@ func place(new_placement: PanelLayout.Placement) -> void:
 		_make_layer(curved)
 	# Convex (on a wall or a column, slice l): drawn as a mesh (_surface); its quad
 	# layer stays, empty and without a hole, so the panel keeps its place in the list.
-	var convex := placement.curvature < 0.0 or mesh_only
+	var convex := placement.curvature < 0.0 or mesh_only or (_video and video_mesh)
 	# A video layer stays as it is: its surface has no texture for the convex mesh.
 	if not _video and convex == (layer.layer_viewport != null):
 		layer.layer_viewport = null if convex else _viewport

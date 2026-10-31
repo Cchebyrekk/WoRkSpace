@@ -535,6 +535,13 @@ class Pointer:
 	## The fixture this pointer carries in the world editor (-1 none): its frame and
 	## the ray's grip when taken, how far along the ray, how long the hold was lost.
 	var world_fixture := -1
+	## The portal this pointer carries in the world editor (-1 none), how far along
+	## its ray and the offset from that point to the portal's foot.
+	var portal := -1
+	var portal_reach := 0.0
+	var portal_offset := Vector3.ZERO
+	## The edge of it being pulled (PassthroughAreas.EDGES), -1 when carrying it whole.
+	var portal_edge := -1
 	var world_start := Transform3D()
 	var world_grip := Transform3D()
 	var world_reach := 0.0
@@ -797,6 +804,58 @@ const PASSTHROUGH_ORDER := -100
 const PASSTHROUGH_KICK_SEC := 2.0
 var _passthrough_kick_until := 0.0
 var _area_punch: ShaderMaterial
+## Portals (01.11.2026, the world editor's shelf): doors in the real room (rig
+## space, like the areas, kept in [passthrough] portals). From the world each is
+## an area showing the room; walking through one puts the user in the room (the
+## whole room), and the world shows only through the portals then — walking
+## back through one returns. _in_room is not kept: a start is in the world.
+var _portals: Array = []
+var _in_room := false
+var _portal_head := Vector3.ZERO
+var _portal_head_known := false
+var _portal_view: MeshInstance3D
+var _portal_view_material: ShaderMaterial
+## In the room, far round the eyes in the world's background colour: the
+## background is the picture's clear alpha, which shows the room (01.11.2026:
+## through a portal the room was seen behind the world, not the dark).
+var _portal_sky: MeshInstance3D
+const PORTAL_SKY_RADIUS := 900.0
+## In the world editor, a ball at the middle of each portal's edge: pulled with a
+## fist, that edge goes along (01.11.2026).
+var _portal_handles: Array[MeshInstance3D] = []
+const PORTAL_HANDLE_RADIUS := 0.04
+const MAX_PORTALS := 4
+const PORTAL_VIEW_SHADER := """
+shader_type spatial;
+render_mode blend_mul, unshaded, cull_disabled, depth_test_disabled, shadows_disabled;
+uniform int portal_count = 0;
+uniform mat4 portal_inverse[4];
+uniform vec3 portal_half[4];
+void fragment() {
+	vec3 eye = INV_VIEW_MATRIX[3].xyz;
+	vec3 here = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	vec3 look = normalize(here - eye);
+	for (int i = 0; i < portal_count; i++) {
+		// The portal as a box (its thickness too, 01.11.2026: a flat window
+		// narrowed to a line from the side): the world shows where the eyes see it.
+		vec3 from = (portal_inverse[i] * vec4(eye, 1.0)).xyz;
+		vec3 along = mat3(portal_inverse[i]) * look;
+		vec3 safe = vec3(abs(along.x) > 0.00001 ? along.x : 0.00001, abs(along.y) > 0.00001 ? along.y : 0.00001,
+				abs(along.z) > 0.00001 ? along.z : 0.00001);
+		vec3 t1 = (-portal_half[i] - from) / safe;
+		vec3 t2 = (portal_half[i] - from) / safe;
+		vec3 t_near = min(t1, t2);
+		vec3 t_far = max(t1, t2);
+		float enter = max(max(t_near.x, t_near.y), t_near.z);
+		float leave = min(min(t_far.x, t_far.y), t_far.z);
+		if (leave >= max(enter, 0.0)) {
+			discard;
+		}
+	}
+	ALBEDO = vec3(0.0);
+	ALPHA = 0.0;
+}
+"""
 ## The keyboard in VR (31.10.2026, VirtualKeyboard): under the rig, so it goes
 ## along; moved by the bar below it, tilted by the bar above; kept in [keyboard].
 var _keyboard := VirtualKeyboard.new()
@@ -921,8 +980,9 @@ var _shelf: Node3D
 var _shelf_items: Array[Node3D] = []
 var _edit_grid: MultiMeshInstance3D
 ## The shelf's slots: a kind to take, "" the bin.
-const SHELF_KINDS := ["sphere", "wall", "column", ""]
-const SHELF_NAMES := ["Шар", "Стена", "Столб", "Удалить"]
+## "portal" (01.11.2026): a door in the real room, not a fixture of the world.
+const SHELF_KINDS := ["sphere", "wall", "column", "portal", ""]
+const SHELF_NAMES := ["Шар", "Стена", "Столб", "Портал", "Удалить"]
 ## The hand takes from a slot within this (m); slots this far apart.
 const SHELF_REACH := 0.08
 const SHELF_SPACING := 0.13
@@ -2326,6 +2386,53 @@ func _build_passthrough() -> void:
 	_mark_preview.material_override = _mark_material
 	_mark_preview.visible = false
 	_origin.add_child(_mark_preview)
+	# In the room: around the eyes, after everything, clears all but what is seen
+	# through a portal (PORTAL_VIEW_SHADER).
+	_portal_view_material = ShaderMaterial.new()
+	_portal_view_material.shader = Shader.new()
+	_portal_view_material.shader.code = PORTAL_VIEW_SHADER
+	_portal_view_material.render_priority = Material.RENDER_PRIORITY_MAX
+	var around := SphereMesh.new()
+	around.radius = 0.5
+	around.height = 1.0
+	_portal_view = MeshInstance3D.new()
+	_portal_view.mesh = around
+	_portal_view.material_override = _portal_view_material
+	_portal_view.custom_aabb = AABB(Vector3.ONE * -1000.0, Vector3.ONE * 2000.0)
+	_portal_view.visible = false
+	_camera.add_child(_portal_view)
+	var sky_mesh := SphereMesh.new()
+	sky_mesh.radius = PORTAL_SKY_RADIUS
+	sky_mesh.height = PORTAL_SKY_RADIUS * 2.0
+	sky_mesh.flip_faces = true
+	var sky_material := StandardMaterial3D.new()
+	sky_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sky_material.albedo_color = Color(0.05, 0.06, 0.08)
+	sky_material.render_priority = Material.RENDER_PRIORITY_MIN
+	_portal_sky = MeshInstance3D.new()
+	_portal_sky.mesh = sky_mesh
+	_portal_sky.material_override = sky_material
+	_portal_sky.custom_aabb = AABB(Vector3.ONE * -1000.0, Vector3.ONE * 2000.0)
+	_portal_sky.visible = false
+	_camera.add_child(_portal_sky)
+
+
+## The portals' edge balls, as many as the portals' edges, where they are now.
+func _update_portal_handles() -> void:
+	while _portal_handles.size() < _portals.size() * 4:
+		var ball := SphereMesh.new()
+		ball.radius = PORTAL_HANDLE_RADIUS
+		ball.height = PORTAL_HANDLE_RADIUS * 2.0
+		var handle := MeshInstance3D.new()
+		handle.mesh = ball
+		handle.material_override = _map_material(Color(0.4, 0.85, 1.0), false)
+		_origin.add_child(handle)
+		_portal_handles.append(handle)
+	for k in _portal_handles.size():
+		var shown := _world_editing and k < _portals.size() * 4
+		_portal_handles[k].visible = shown
+		if shown:
+			_portal_handles[k].position = PassthroughAreas.edge_point(_portals[k / 4], k % 4)
 
 
 ## The areas' nodes made again from _passthrough_areas: the addon's passthrough
@@ -2374,15 +2481,16 @@ func _update_passthrough() -> void:
 	# before the addon's passthrough was up, they showed nothing until marked anew).
 	if _areas_dirty and _recentered:
 		_areas_dirty = false
-		_passthrough_areas = _areas_local.duplicate(true)
+		_passthrough_areas = _areas_local.duplicate(true) + _portals.duplicate(true)
 		_rebuild_passthrough_areas()
+	_update_portals()
 	if _passthrough_kick_until > 0.0 and (_passthrough_running() or Time.get_ticks_msec() / 1000.0 > _passthrough_kick_until):
 		_passthrough_kick_until = 0.0
 		if _passthrough_full_applied == 0:
 			_xr.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_OPAQUE
 			_areas_dirty = true
 		print("[passthrough] запущен: %s" % _passthrough_running())
-	var full := 1 if _passthrough_ready() and _headset_options.passthrough >= 1 else 0
+	var full := 1 if _passthrough_ready() and (_headset_options.passthrough >= 1 or _in_room) else 0
 	if full != _passthrough_full_applied:
 		_passthrough_full_applied = full
 		_apply_passthrough(full == 1)
@@ -2413,6 +2521,149 @@ func _update_passthrough() -> void:
 func _head_yaw() -> float:
 	var forward := -_camera.transform.basis.z
 	return atan2(-forward.x, -forward.z)
+
+
+## Walking through a portal: into the room, or back into the world. In the room
+## the world shows only through the portals (their transforms for the shader).
+func _update_portals() -> void:
+	var head := _camera.transform.origin
+	if _portal_head_known and _passthrough_ready():
+		for portal: Dictionary in _portals:
+			if PassthroughAreas.passes(portal, _portal_head, head):
+				_set_in_room(not _in_room)
+				break
+	_portal_head = head
+	_portal_head_known = _recentered
+	_update_portal_handles()
+	_portal_view.visible = _in_room
+	_portal_sky.visible = _in_room
+	if _in_room:
+		var rig := _origin.global_transform
+		var inverses: Array[Projection] = []
+		var halves: Array[Vector3] = []
+		for i in MAX_PORTALS:
+			var portal: Dictionary = _portals[i] if i < _portals.size() else {}
+			var at := (rig * PassthroughAreas.transform_of(portal)) if not portal.is_empty() else Transform3D.IDENTITY
+			inverses.append(Projection(at.affine_inverse()))
+			var size: Vector3 = portal.get("size", Vector3.ZERO)
+			halves.append(size * 0.5)
+		_portal_view_material.set_shader_parameter(&"portal_count", mini(_portals.size(), MAX_PORTALS))
+		_portal_view_material.set_shader_parameter(&"portal_inverse", inverses)
+		_portal_view_material.set_shader_parameter(&"portal_half", PackedVector3Array(halves))
+
+
+func _set_in_room(room: bool) -> void:
+	_in_room = room
+	# Every screen on its mesh while in the room: layers are not cut by the portals.
+	ScreenPanel.video_mesh = room
+	for panel in _panels:
+		panel.place(panel.placement)
+	print("[portal] %s" % ("в комнате: мир виден только через порталы" if room else "снова в мире"))
+
+
+## The portal edge ball the ray meets: [portal, edge, distance], portal -1 if none.
+func _portal_handle_under_ray(pointer: Pointer) -> Array:
+	var best := [-1, -1, INF]
+	var rig := _origin.global_transform
+	for i in _portals.size():
+		for edge in 4:
+			var centre := rig * PassthroughAreas.edge_point(_portals[i], edge)
+			var along := (centre - pointer.origin).dot(pointer.direction)
+			if along <= 0.0 or along >= float(best[2]):
+				continue
+			if (pointer.origin + pointer.direction * along).distance_to(centre) <= PORTAL_HANDLE_RADIUS * 1.5:
+				best = [i, edge, along]
+	return best
+
+
+## The portal the ray meets (its face), [index, distance], index -1 if none.
+func _portal_under_ray(pointer: Pointer) -> Array:
+	var rig := _origin.global_transform.affine_inverse()
+	var from := rig * pointer.origin
+	var along := rig.basis * pointer.direction
+	var best := -1
+	var nearest := INF
+	for i in _portals.size():
+		var inverse := PassthroughAreas.transform_of(_portals[i]).affine_inverse()
+		var a := inverse * from
+		var d := inverse.basis * along
+		if absf(d.z) < 0.00001:
+			continue
+		var t := -a.z / d.z
+		var at := a + d * t
+		var half: Vector3 = _portals[i]["size"] * 0.5
+		if t > 0.0 and t < nearest and absf(at.x) <= half.x and absf(at.y) <= half.y:
+			best = i
+			nearest = t
+	return [best, nearest]
+
+
+## A portal from the shelf: on the floor a metre ahead, facing the user, carried at once.
+func _take_portal(pointer: Pointer) -> void:
+	if _portals.size() >= MAX_PORTALS:
+		_vdd_message = "порталов уже %d — это предел" % MAX_PORTALS
+		return
+	var head := _camera.transform
+	var forward := -head.basis.z
+	forward.y = 0.0
+	forward = forward.normalized() if forward.length_squared() > 0.01 else Vector3.FORWARD
+	var foot := head.origin + forward * 1.0
+	foot.y = 0.0
+	_portals.append(PassthroughAreas.portal_at(foot, atan2(-forward.x, -forward.z)))
+	_areas_dirty = true
+	_grab_portal(pointer, _portals.size() - 1)
+
+
+func _grab_portal(pointer: Pointer, index: int, edge := -1, reach := -1.0) -> void:
+	var rig := _origin.global_transform
+	var centre := rig * (_portals[index]["centre"] as Vector3)
+	pointer.portal = index
+	pointer.portal_edge = edge
+	pointer.portal_reach = maxf(reach if reach > 0.0 else pointer.origin.distance_to(centre), 0.3)
+	pointer.portal_offset = centre - (pointer.origin + pointer.direction * pointer.portal_reach)
+
+
+## Carried whole: it follows the ray's end (up and down too, 01.11.2026), its face
+## to the user. By an edge: that edge follows the ray's end, the opposite one stays.
+func _carry_portal(pointer: Pointer) -> void:
+	var rig := _origin.global_transform.affine_inverse()
+	var portal: Dictionary = _portals[pointer.portal]
+	if pointer.portal_edge >= 0:
+		# Where the ray meets the portal's face (else its end at the grab's reach).
+		var from := rig * pointer.origin
+		var along := rig.basis * pointer.direction
+		var point := from + along * pointer.portal_reach
+		var plane := Plane(PassthroughAreas.transform_of(portal).basis.z, portal["centre"])
+		var crossing: Variant = plane.intersects_ray(from, along)
+		if crossing is Vector3:
+			point = crossing
+		_portals[pointer.portal] = PassthroughAreas.resized(portal, pointer.portal_edge, point)
+	else:
+		var centre := rig * (pointer.origin + pointer.direction * pointer.portal_reach + pointer.portal_offset)
+		var to_head := _camera.transform.origin - centre
+		var yaw := atan2(to_head.x, to_head.z) if Vector2(to_head.x, to_head.z).length_squared() > 0.01 else float(portal["yaw"])
+		_portals[pointer.portal] = {"centre": centre, "size": portal["size"], "yaw": yaw}
+	pointer.hit_distance = minf(pointer.hit_distance, pointer.portal_reach)
+	_areas_dirty = true
+
+
+func _drop_portal(pointer: Pointer, slot: int) -> void:
+	var index := pointer.portal
+	pointer.portal = -1
+	if index < 0 or index >= _portals.size():
+		return
+	if slot >= 0 and SHELF_KINDS[slot] == "":
+		_portals.remove_at(index)
+		if _portals.is_empty() and _in_room:
+			_set_in_room(false)
+		_vdd_message = "портал удалён"
+	else:
+		var at: Vector3 = _portals[index]["centre"]
+		var size: Vector3 = _portals[index]["size"]
+		_vdd_message = "портал поставлен: (%.2f; %.2f; %.2f), %.2f × %.2f м" % [at.x, at.y, at.z, size.x, size.y]
+	print("[portal] ", _vdd_message)
+	_areas_dirty = true
+	_save_settings()
 
 
 func _finish_mark(from: Vector3, to: Vector3) -> void:
@@ -5701,6 +5952,10 @@ func _build_world_editor() -> void:
 				var slab := BoxMesh.new()
 				slab.size = Vector3(0.09, 0.055, 0.01)
 				model.mesh = slab
+			"portal":
+				var door := BoxMesh.new()
+				door.size = Vector3(0.045, 0.09, 0.006)
+				model.mesh = door
 			"column":
 				var post := CylinderMesh.new()
 				post.top_radius = 0.025
@@ -5819,6 +6074,17 @@ func _update_world_editor(delta: float) -> void:
 	for i in 2:
 		var pointer := _pointers[i]
 		near_slots.append(WorldEdit.slot_at(_hand_point(pointer), slots, SHELF_REACH) if pointer.active else -1)
+		if pointer.portal >= 0:
+			if pointer.portal >= _portals.size():
+				pointer.portal = -1
+			elif pointer.active and _edit_holding(pointer):
+				pointer.world_lost = 0.0
+				_carry_portal(pointer)
+			else:
+				pointer.world_lost += delta
+				if pointer.world_lost >= FIST_GRACE_SEC:
+					_drop_portal(pointer, near_slots[i])
+			continue
 		if pointer.world_fixture >= 0:
 			var fixture := WorldLayout.find(_fixtures, pointer.world_fixture)
 			if fixture == null:
@@ -5838,10 +6104,21 @@ func _update_world_editor(delta: float) -> void:
 			continue
 		if not pointer.active or not _edit_hold_started(pointer):
 			continue
+		if near_slots[i] >= 0 and SHELF_KINDS[near_slots[i]] == "portal":
+			_take_portal(pointer)
+			continue
 		if near_slots[i] >= 0 and SHELF_KINDS[near_slots[i]] != "":
 			_take_from_shelf(pointer, SHELF_KINDS[near_slots[i]])
 			continue
+		var on_edge := _portal_handle_under_ray(pointer)
+		if on_edge[0] >= 0:
+			_grab_portal(pointer, on_edge[0], on_edge[1], on_edge[2])
+			continue
+		var on_portal := _portal_under_ray(pointer)
 		var hit := _fixture_under_ray(pointer)
+		if on_portal[0] >= 0 and (hit[0] < 0 or on_portal[1] < hit[1]):
+			_grab_portal(pointer, on_portal[0])
+			continue
 		if hit[0] >= 0:
 			_grab_fixture(pointer, hit[0], hit[1])
 	# The slot a hand is at grows: the one it takes from, or the bin it drops into.
@@ -7052,6 +7329,9 @@ func _load_settings() -> void:
 	# rig's, so not shown again.
 	_areas_local = PassthroughAreas.from_config(config.get_value("passthrough", "areas", [])) \
 			if str(config.get_value("passthrough", "anchor", "")) == "" else []
+	_portals = PassthroughAreas.from_config(config.get_value("passthrough", "portals", [])).slice(0, MAX_PORTALS)
+	for portal: Dictionary in _portals:
+		portal["size"] = Vector3((portal["size"] as Vector3).x, (portal["size"] as Vector3).y, PassthroughAreas.PORTAL_SIZE.z)
 	_areas_dirty = true
 	var place: Variant = config.get_value("keyboard", "place", null)
 	_keyboard_placed = place is Vector3
@@ -7099,6 +7379,7 @@ func _save_settings() -> void:
 	config.set_value("settings_panel", "open", _settings_open)
 	config.set_value("keyboard", "open", _keyboard_open)
 	config.set_value("passthrough", "areas", _areas_local)
+	config.set_value("passthrough", "portals", _portals)
 	config.set_value("passthrough", "anchor", "")
 	if _keyboard_placed:
 		config.set_value("keyboard", "place", _keyboard_place)
