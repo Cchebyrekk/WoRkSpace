@@ -761,9 +761,16 @@ var _seated := -1
 ## Smooth turning on now, and its top speed so far (degrees per second), for the log.
 var _smooth_turning := false
 var _smooth_turn_peak := 0.0
-## "Сесть": floats before the user near a sphere they are not seated in.
-var _sit_button: VrButton
-var _sit_offer: WorldLayout.Fixture
+## «Сесть / встать» with more than one option (31.10.2026, the floating «Сесть»
+## is gone): buttons before the user, each a seat's id or -1 for standing up;
+## closed by a choice, by going SEAT_CHOICE_AWAY away or after SEAT_CHOICE_SEC.
+var _seat_choice_buttons: Array[VrButton] = []
+var _seat_choice: Array = []
+var _seat_choice_from := Vector3.ZERO
+var _seat_choice_until := 0.0
+const SEAT_CHOICE_MAX := 6
+const SEAT_CHOICE_AWAY := 1.0
+const SEAT_CHOICE_SEC := 20.0
 ## Seated at a wall: where along it (u, v in metres, WallLayout), kept in [world] seat_slide.
 var _seat_slide := Vector2.ZERO
 var _wall_seat_moving := false
@@ -1142,7 +1149,7 @@ func _ready() -> void:
 		pointer.gestures.settings = _gesture_settings
 		pointer.engagement.settings = _engagement_settings
 	_build_helpers()
-	_build_seat_button()
+	_build_seat_choice()
 	_build_radius_handles()
 	_build_outlines()
 	_build_bend_slider()
@@ -1400,9 +1407,14 @@ func _update_first_recenter(delta: float) -> void:
 	var pose: XRPose = head.get_pose(&"default") if head != null else null
 	var tracked := pose != null and pose.has_tracking_data
 	if tracked or _recenter_wait_sec >= RECENTER_MAX_WAIT_SEC:
-		print("[xr] выравниваю сцену через %.2f с после фокуса (%s)" % [_recenter_wait_sec, "голова отслеживается" if tracked else "голова не отслеживается"])
-		_recenter_wait_sec = -1.0
+		var waited := _recenter_wait_sec
 		_recenter()
+		# Looking straight down (31.10.2026: the headset lying on the table) it does
+		# not align; tried again each frame, or the place would never be saved.
+		if not _recentered:
+			return
+		_recenter_wait_sec = -1.0
+		print("[xr] выровнено через %.2f с после фокуса (%s)" % [waited, "голова отслеживается" if tracked else "голова не отслеживается"])
 
 
 ## Puts a tiny copy of each distinct mesh/material and Label3D style in the scene
@@ -1760,33 +1772,89 @@ func _update_travel_rings() -> void:
 		(parts[2] as MeshInstance3D).global_position = centre + right * shown_offset.x + up * shown_offset.y
 
 
-## Seats (slice j). Near a sphere the user does not sit in, "Сесть" floats in
-## front of them; it takes them to the sphere's centre, facing its middle.
-## Seated, the movement pose does not move them (turning still turns); "Встать"
-## in the radial menu (in place of "Центр") stands them up where they are.
-func _update_seat() -> void:
-	var head := _camera.global_transform
-	var offer := _seat_offer_near(head.origin)
-	if offer != null and offer.id == _seated:
-		offer = null
-	_sit_offer = offer
-	_sit_button.visible = offer != null
-	if offer == null:
+## Seats (slice j). «Сесть / встать» in the radial menu (31.10.2026, before
+## that «Сесть» floated before the user near a seat): within reach of one seat it
+## sits there (a sphere's centre facing its middle, a wall's nearest screen),
+## seated it stands up where the user is, more than one option is a choice.
+## Seated, the movement pose does not move them (turning still turns).
+func _sit_or_stand() -> void:
+	var near: Array = []
+	for fixture in _seats_near(_camera.global_position):
+		near.append(fixture.id)
+	var options := WorldLayout.seat_options(near, _seated)
+	if options.is_empty():
+		print("[world] сесть некуда: рядом нет мест")
+	elif options.size() == 1:
+		_take_seat_option(options[0])
+	else:
+		_open_seat_choice(options)
+
+
+func _take_seat_option(id: int) -> void:
+	_close_seat_choice()
+	if id < 0:
+		if _seated >= 0:
+			_stand_up()
 		return
-	_sit_button.set_text("Сесть: %s" % offer.name)
+	var fixture := WorldLayout.find(_fixtures, id)
+	if fixture != null:
+		_sit(fixture)
+
+
+func _build_seat_choice() -> void:
+	for i in SEAT_CHOICE_MAX:
+		var button := _add_button_to(self, "", Vector3.ZERO, Vector2(0.42, 0.08), 0.4)
+		button.visible = false
+		button.activated.connect(_on_seat_choice.bind(i))
+		_seat_choice_buttons.append(button)
+
+
+## The options in a column before the user, the nearest seat (or «Встать») on top.
+func _open_seat_choice(options: Array) -> void:
+	_seat_choice = options.slice(0, SEAT_CHOICE_MAX)
+	var head := _camera.global_transform
 	var ahead := Vector3(-head.basis.z.x, 0.0, -head.basis.z.z).normalized()
-	var at := head.origin + ahead * 0.55 + Vector3.DOWN * 0.3
-	# Its face (+Z) towards the user.
-	_sit_button.global_transform = Transform3D(Basis.looking_at(ahead, Vector3.UP), at)
+	var top := head.origin + ahead * 0.6 + Vector3.DOWN * 0.1
+	for i in _seat_choice_buttons.size():
+		var button := _seat_choice_buttons[i]
+		button.visible = i < _seat_choice.size()
+		if not button.visible:
+			continue
+		var id: int = _seat_choice[i]
+		var fixture := WorldLayout.find(_fixtures, id)
+		button.set_text("Встать" if id < 0 else "Сесть: %s" % (fixture.name if fixture != null else "?"))
+		# Its face (+Z) towards the user.
+		button.global_transform = Transform3D(Basis.looking_at(ahead, Vector3.UP), top + Vector3.DOWN * 0.1 * i)
+	_seat_choice_from = head.origin
+	_seat_choice_until = Time.get_ticks_msec() / 1000.0 + SEAT_CHOICE_SEC
+	print("[world] выбор места: %d вариантов" % _seat_choice.size())
 
 
-## The fixture whose seat is offered: a sphere when the user is within its radius
+func _on_seat_choice(index: int) -> void:
+	if index < _seat_choice.size():
+		_take_seat_option(_seat_choice[index])
+
+
+func _close_seat_choice() -> void:
+	_seat_choice = []
+	for button in _seat_choice_buttons:
+		button.visible = false
+
+
+## The choice goes away when the user walks off or leaves it be.
+func _update_seat() -> void:
+	if _seat_choice.is_empty():
+		return
+	if _camera.global_position.distance_to(_seat_choice_from) > SEAT_CHOICE_AWAY \
+			or Time.get_ticks_msec() / 1000.0 > _seat_choice_until:
+		_close_seat_choice()
+
+
+## The seats in reach, nearest first: a sphere when the user is within its radius
 ## (and a little more) of its centre; a wall only when the user stands in front of
-## it, over its area and not farther than its distance and a little more. The
-## nearest such one.
-func _seat_offer_near(head: Vector3) -> WorldLayout.Fixture:
-	var best: WorldLayout.Fixture = null
-	var best_distance := INF
+## it, over its area and not farther than its distance and a little more.
+func _seats_near(head: Vector3) -> Array[WorldLayout.Fixture]:
+	var found: Array = []
 	for fixture in _fixtures:
 		var distance := head.distance_to(fixture.centre)
 		if _walled(fixture):
@@ -1797,16 +1865,19 @@ func _seat_offer_near(head: Vector3) -> WorldLayout.Fixture:
 			distance = seen.z
 		elif distance > fixture.radius + SEAT_REACH:
 			continue
-		if distance < best_distance:
-			best = fixture
-			best_distance = distance
-	return best
+		found.append([distance, fixture])
+	found.sort_custom(_nearer_first)
+	var seats: Array[WorldLayout.Fixture] = []
+	for pair: Array in found:
+		seats.append(pair[1])
+	return seats
 
 
-func _sit() -> void:
-	if _sit_offer == null:
-		return
-	var fixture := _sit_offer
+func _nearer_first(a: Array, b: Array) -> bool:
+	return a[0] < b[0]
+
+
+func _sit(fixture: WorldLayout.Fixture) -> void:
 	_seated = fixture.id
 	_seat_slide = Vector2.ZERO
 	if _walled(fixture):
@@ -1818,7 +1889,7 @@ func _sit() -> void:
 	_arrive(fixture)
 
 
-## Seated at `fixture` (by «Сесть» or at the end of a flight): Windows follows a
+## Seated at `fixture` (by «Сесть / встать» or at the end of a flight): Windows follows a
 ## wall or column, moving starts afresh, the world stays in place, it is saved.
 func _arrive(fixture: WorldLayout.Fixture) -> void:
 	if _walled(fixture):
@@ -3257,12 +3328,6 @@ func _build_radius_handles() -> void:
 		label.visible = false
 		add_child(label)
 		_radius_labels.append(label)
-
-
-func _build_seat_button() -> void:
-	_sit_button = _add_button_to(self, "Сесть", Vector3.ZERO, Vector2(0.36, 0.09), 0.4)
-	_sit_button.visible = false
-	_sit_button.activated.connect(_sit)
 
 
 func _set_vignette(strength: float) -> void:
@@ -6600,8 +6665,7 @@ func _run_menu_action(id: String) -> void:
 		else:
 			_recenter()
 	elif id == "stand_up":
-		if _seated >= 0:
-			_stand_up()
+		_sit_or_stand()
 	elif id == "settings":
 		_set_settings_open(not _settings_open or not _settings_in_view())
 	elif id == "places":

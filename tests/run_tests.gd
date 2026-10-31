@@ -2097,6 +2097,12 @@ func _test_work_mode() -> void:
 
 
 func _test_player_pose() -> void:
+	_check(WorldLayout.seat_options([], -1).is_empty(), "сесть/встать: рядом ничего — ничего")
+	_check(WorldLayout.seat_options([4], -1) == [4], "сесть/встать: одно место — сесть в него")
+	_check(WorldLayout.seat_options([4, 2], -1) == [4, 2], "сесть/встать: два места — выбор, ближнее первым")
+	_check(WorldLayout.seat_options([4], 4) == [-1], "сесть/встать: сижу, рядом только своё — встать")
+	_check(WorldLayout.seat_options([], 4) == [-1], "сесть/встать: сижу, ушёл из радиуса — встать")
+	_check(WorldLayout.seat_options([4, 2], 4) == [-1, 2], "сесть/встать: сижу, рядом другое — выбор: встать или туда")
 	# The user stood at (3, 0.5 floor, -4) looking along +X, with the rig turned and moved.
 	var rig := Transform3D(Basis(Vector3.UP, 0.7), Vector3(1.0, 0.5, 2.0))
 	var head := Transform3D(Basis(Vector3.UP, -0.2), Vector3(0.3, 1.6, -0.4))

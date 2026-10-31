@@ -257,6 +257,17 @@ static func nearby(fixtures: Array[Fixture], head: Vector3, reach: float) -> Fix
 	return best
 
 
+## What «Сесть / встать» offers (31.10.2026, in place of the floating «Сесть»):
+## the seats in reach (ids, nearest first) other than the one sat in, and -1 for
+## standing up when seated. One option is done at once, more are a choice.
+static func seat_options(near: Array, seated: int) -> Array:
+	var options: Array = [-1] if seated >= 0 else []
+	for id: int in near:
+		if id != seated:
+			options.append(id)
+	return options
+
+
 ## The rig placed so that the head (at `head_local` in the rig's space) is at the
 ## fixture's centre looking at its middle: the seat of a sphere.
 static func seat_rig(fixture: Fixture, head_local: Transform3D) -> Transform3D:
