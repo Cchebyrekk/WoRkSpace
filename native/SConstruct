@@ -9,15 +9,15 @@ env = SConscript("godot-cpp/SConstruct", {"api_version": "4.7"})
 
 env.Append(CPPPATH=["src/"])
 env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN"])
-env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32", "advapi32", "mfplat", "mfuuid", "ws2_32"])
+env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32", "advapi32", "mfplat", "mfuuid", "ws2_32", "ole32"])
 
 # The Windows-only file is built as C++20: in C++17 mode C++/WinRT pulls in
 # <experimental/coroutine>, which current MSVC rejects.
-windows_sources = ["src/win_backend.cpp", "src/video_stream.cpp"]
+windows_sources = ["src/win_backend.cpp", "src/video_stream.cpp", "src/audio_stream.cpp"]
 windows_env = env.Clone()
 windows_env.Append(CXXFLAGS=["/std:c++20"])
 
-godot_sources = [source for source in Glob("src/*.cpp") if source.name not in ("win_backend.cpp", "video_stream.cpp")]
+godot_sources = [source for source in Glob("src/*.cpp") if source.name not in ("win_backend.cpp", "video_stream.cpp", "audio_stream.cpp")]
 objects = env.SharedObject(godot_sources) + windows_env.SharedObject(windows_sources)
 
 library = env.SharedLibrary(

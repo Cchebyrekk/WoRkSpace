@@ -99,6 +99,39 @@ public:
 	virtual bool take_snapshot(std::vector<uint8_t> &rgba, int32_t &width, int32_t &height) = 0;
 };
 
+// What the sound stream has done so far (SoundBackend::stats).
+struct SoundStats {
+	uint64_t bytes_sent = 0;
+	uint64_t frames_captured = 0; // sample frames (one sample per channel)
+	uint64_t frames_dropped = 0; // lost by Windows (the capture fell behind) or not sent (the network)
+	int32_t sample_rate = 0;
+	int32_t source_channels = 0;
+	std::string device; // the output device listened to
+	std::string client; // "ip:port" of the connected headset, empty if none
+	std::string error; // what stopped the sound thread, empty while it runs
+};
+
+// Streams what the PC plays (the default output device, WASAPI loopback) to the
+// headset, for the work modes without Link (31.10.2026): 16-bit PCM, two
+// channels, the device's own rate, to one TCP client; everything runs on its own
+// thread. A new default device (headphones plugged in) is followed within a
+// second. Wire format, integers big-endian: on connect "WRKA", version, sample
+// rate, channels (u32 each), then nothing but samples, interleaved,
+// little-endian. A client that connects again gets the header again; one that
+// is too slow loses sound, not latency (a small send buffer). Nothing is sent
+// while nothing plays: Windows gives no samples then.
+class SoundBackend {
+public:
+	static SoundBackend *create();
+	virtual ~SoundBackend() = default;
+
+	// Returns once the device is open and the port listens.
+	virtual bool start(int32_t port, std::string &error) = 0;
+	virtual void stop() = 0;
+	virtual bool running() const = 0;
+	virtual SoundStats stats() const = 0;
+};
+
 // Mouse input injected into Windows with SendInput. Coordinates are pixels of the
 // virtual desktop (the same space as MonitorInfo::x / y).
 void mouse_move(int32_t x, int32_t y);

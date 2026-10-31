@@ -21,6 +21,9 @@ var video_fps := 60
 ## A line under the view: the latency from the PC's capture to the decoder, and
 ## what the PC's encoder and the headset's decoders take.
 var video_stats := 0
+## What the PC plays, in the headset (31.10.2026; the PC's SoundStreamer). Only
+## without Link: Link brings the sound itself.
+var pc_sound := 1
 ## WorkMode: shown as the mode this process runs in (main.gd sets it on start);
 ## a change switches after a pause (main.gd, WORK_MODE_SWITCH_SEC).
 var work_mode := WorkMode.OPENXR

@@ -38,8 +38,8 @@ var _next_unknown_log := 0.0
 ## thread asks adb for headsets on the cable and points their ports here with
 ## `adb reverse` (the headset then finds the PC at 127.0.0.1).
 const ADB_CHECK_SEC := 5.0
-## Control, then a video port for each of up to 16 monitors.
-const REVERSED_PORTS := 17
+## Control, then a video port for each of up to 16 monitors, then the sound.
+const REVERSED_PORTS := 18
 var _adb_path := ""
 ## Thumbnails (slice o5c): while the headset shows the plane of groups, every
 ## THUMB_SEC each stream makes a small picture, sent as JPEG.
@@ -50,6 +50,9 @@ var _thumbs_on := false
 var _next_thumbs := 0.0
 var _adb_thread: Thread
 var _next_adb := 0.0
+## What the PC plays (31.10.2026): always on, the headset listens if it wants
+## (HeadsetOptions.pc_sound); nothing goes while nobody listens.
+var _sound := SoundStreamer.new()
 ## Monitor key -> its ScreenStreamer.
 var _streamers: Dictionary = {}
 var _next_video_log := 0.0
@@ -110,6 +113,10 @@ func _ready() -> void:
 	_vdd.finished.connect(_on_vdd_finished)
 	error = _server.listen(LinkProtocol.CONTROL_PORT)
 	print("[link] связь: порт TCP %d %s" % [LinkProtocol.CONTROL_PORT, "слушаю" if error == OK else "занят (%d)" % error])
+	if _sound.start(LinkProtocol.SOUND_PORT):
+		print("[sound] звук ПК: порт TCP %d, %s" % [LinkProtocol.SOUND_PORT, _sound.get_stats()["device"]])
+	else:
+		print("[sound] звук ПК не запустился: %s" % _sound.get_last_error())
 	_refresh_monitors()
 
 
@@ -302,7 +309,8 @@ func _reverse_over_usb() -> void:
 		var serial := parts[0]
 		var listed := []
 		OS.execute(_adb_path, ["-s", serial, "reverse", "--list"], listed, true)
-		if not listed.is_empty() and str(listed[0]).contains("tcp:%d" % LinkProtocol.CONTROL_PORT):
+		# The last port: a headset reversed by an older server lacks it (the sound, 31.10.2026).
+		if not listed.is_empty() and str(listed[0]).contains("tcp:%d" % (LinkProtocol.CONTROL_PORT + REVERSED_PORTS - 1)):
 			continue
 		for i in REVERSED_PORTS:
 			var port := LinkProtocol.CONTROL_PORT + i
@@ -537,6 +545,7 @@ func _exit_tree() -> void:
 		_drop("сервер закрывается")
 	# After the drop: the buttons and keys it lets go are still delivered.
 	_input.stop()
+	_sound.stop()
 	if _adb_thread != null:
 		_adb_thread.wait_to_finish()
 	_server.stop()

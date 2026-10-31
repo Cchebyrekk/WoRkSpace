@@ -32,6 +32,11 @@ const REMOTE_EYES_PORT := 47903
 ## The hybrid (30.10.2026): each monitor's own stream on this + its index (the
 ## format of VIDEO_PORT's), shown by the headset on a layer behind the eyes.
 const REMOTE_SCREENS_PORT := 47904
+## What the PC plays (31.10.2026), the format at SoundBackend in
+## native/src/win_backend.h: the link server's right after the 16 monitors'
+## video ports (reversed over USB with them), the PC that draws its own.
+const SOUND_PORT := 47819
+const REMOTE_SOUND_PORT := 47920
 const ASK := "WoRkPlace?"
 const ANSWER := "WoRkPlace!"
 ## The headset pings this often; either side drops a silent link after LINK_TIMEOUT_SEC.

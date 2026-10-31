@@ -72,6 +72,12 @@ var _live: Dictionary = {}
 var _next_live_check := 0.0
 ## Keys whose stream the headset shows now (from its tracking).
 var _shown: Dictionary = {}
+## What the PC plays (31.10.2026), while «Звук ПК в шлеме» is on (HeadsetOptions);
+## a SoundStreamer, by name as _streamer. Looked at every SOUND_CHECK_SEC.
+var _sound: Variant = null
+var _next_sound_check := 0.0
+const SOUND_CHECK_SEC := 1.0
+const SOUND_RETRY_SEC := 10.0
 var _sent_layers: Array = []
 
 
@@ -106,6 +112,7 @@ func _process(_delta: float) -> void:
 	if _channel != null:
 		_serve(now)
 	_update_screens(now)
+	_update_sound(now)
 	if now >= _next_log and _streamer != null:
 		_next_log = now + 10.0
 		var stats: Dictionary = _streamer.get_stats()
@@ -118,6 +125,9 @@ func _process(_delta: float) -> void:
 func _exit_tree() -> void:
 	_stop_eyes()
 	_stop_screens()
+	if _sound != null:
+		_sound.stop()
+		_sound = null
 	_foveation.release()
 	if _channel != null:
 		_channel.put_var({"t": "bye"})
@@ -270,6 +280,25 @@ func _update_screens(now: float) -> void:
 	if layers != _sent_layers:
 		_sent_layers = layers
 		_send({"t": "layers", "pose": xr.pose_id, "layers": layers})
+
+
+func _update_sound(now: float) -> void:
+	if now < _next_sound_check:
+		return
+	_next_sound_check = now + SOUND_CHECK_SEC
+	var wanted := HeadsetOptions.current == null or HeadsetOptions.current.pc_sound != 0
+	if wanted and _sound == null:
+		_sound = ClassDB.instantiate(&"SoundStreamer")
+		if _sound.start(LinkProtocol.REMOTE_SOUND_PORT):
+			print("[sound] звук ПК: порт TCP %d, %s" % [LinkProtocol.REMOTE_SOUND_PORT, _sound.get_stats()["device"]])
+		else:
+			print("[sound] звук ПК не запустился: %s" % _sound.get_last_error())
+			_sound = null
+			_next_sound_check = now + SOUND_RETRY_SEC
+	elif not wanted and _sound != null:
+		print("[sound] звук ПК выключен")
+		_sound.stop()
+		_sound = null
 
 
 func _choose_live() -> void:

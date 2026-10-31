@@ -36,6 +36,65 @@ void ScreenStreamer::_bind_methods() {
 	ClassDB::bind_static_method("ScreenStreamer", D_METHOD("clock_usec"), &ScreenStreamer::clock_usec);
 }
 
+void SoundStreamer::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("start", "port"), &SoundStreamer::start);
+	ClassDB::bind_method(D_METHOD("stop"), &SoundStreamer::stop);
+	ClassDB::bind_method(D_METHOD("is_running"), &SoundStreamer::is_running);
+	ClassDB::bind_method(D_METHOD("get_stats"), &SoundStreamer::get_stats);
+	ClassDB::bind_method(D_METHOD("get_last_error"), &SoundStreamer::get_last_error);
+}
+
+SoundStreamer::~SoundStreamer() {
+	stop();
+}
+
+bool SoundStreamer::start(int p_port) {
+	stop();
+	backend = workplace::SoundBackend::create();
+	std::string error;
+	if (!backend->start(p_port, error)) {
+		last_error = String::utf8(error.c_str());
+		delete backend;
+		backend = nullptr;
+		return false;
+	}
+	last_error = "";
+	return true;
+}
+
+void SoundStreamer::stop() {
+	if (backend) {
+		backend->stop();
+		delete backend;
+		backend = nullptr;
+	}
+}
+
+bool SoundStreamer::is_running() const {
+	return backend && backend->running();
+}
+
+Dictionary SoundStreamer::get_stats() const {
+	Dictionary result;
+	if (!backend) {
+		return result;
+	}
+	workplace::SoundStats stats = backend->stats();
+	result["bytes_sent"] = static_cast<int64_t>(stats.bytes_sent);
+	result["frames_captured"] = static_cast<int64_t>(stats.frames_captured);
+	result["frames_dropped"] = static_cast<int64_t>(stats.frames_dropped);
+	result["rate"] = stats.sample_rate;
+	result["channels"] = stats.source_channels;
+	result["device"] = String::utf8(stats.device.c_str());
+	result["client"] = String::utf8(stats.client.c_str());
+	result["error"] = String::utf8(stats.error.c_str());
+	return result;
+}
+
+String SoundStreamer::get_last_error() const {
+	return last_error;
+}
+
 void EyeStreamer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start", "eye_width", "eye_height", "out_eye_width", "out_eye_height", "port",
 			"bitrate_kbps", "fps"), &EyeStreamer::start);

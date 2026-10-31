@@ -39,6 +39,10 @@ var _video_reports := 0
 var _settings_unsent := false
 ## com.workplace.headset.VideoReceiver (its latency), null off Android.
 var _receiver: Variant = null
+## com.workplace.headset.SoundReceiver (the PC's sound, 31.10.2026), null off
+## Android; the PC it plays from ("" while off: no PC or «Звук ПК в шлеме» off).
+var _sound: Variant = null
+var _sound_from := ""
 
 
 func _ready() -> void:
@@ -54,6 +58,7 @@ func _ready() -> void:
 	_started = Time.get_ticks_msec() / 1000.0
 	if OS.get_name() == "Android":
 		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
+		_sound = JavaClassWrapper.wrap("com.workplace.headset.SoundReceiver")
 
 
 func _start_main() -> void:
@@ -124,6 +129,7 @@ func _process(_delta: float) -> void:
 	if _link.state != before:
 		print("[link] ", _link.describe())
 	PcLink.dispatch()
+	_update_sound()
 	var fresh_settings := false
 	if _link.settings_changed:
 		_link.settings_changed = false
@@ -231,8 +237,32 @@ func _update_lost_notice(now: float) -> void:
 					_link.describe()]
 
 
+## The PC's sound plays while the PC is there and the world wants it.
+func _update_sound() -> void:
+	if _sound == null:
+		return
+	var on := HeadsetOptions.current != null and HeadsetOptions.current.pc_sound != 0
+	var from := _link.pc_address if on and PcLink.connected() else ""
+	if from == _sound_from:
+		return
+	_sound_from = from
+	if from == "":
+		_sound.stop()
+		print("[sound] звук ПК остановлен")
+	else:
+		_sound.start(from, LinkProtocol.SOUND_PORT)
+		print("[sound] звук ПК с %s:%d" % [from, LinkProtocol.SOUND_PORT])
+
+
+func _stop_sound() -> void:
+	if _sound != null:
+		_sound.stop()
+	_sound_from = ""
+
+
 ## headset_root.gd swaps to the other mode: nothing of this one may stay.
 func _exit_tree() -> void:
+	_stop_sound()
 	if PcLink.screens != null:
 		PcLink.screens.stop_all()
 	if _link != null:
@@ -245,6 +275,7 @@ func _exit_tree() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED:
+		_stop_sound()
 		if PcLink.screens != null:
 			PcLink.screens.stop_all()
 		if _link != null:

@@ -94,6 +94,9 @@ var _xr: XRInterface
 var _origin: XROrigin3D
 var _camera: XRCamera3D
 var _receiver: Variant = null
+## com.workplace.headset.SoundReceiver (31.10.2026): plays while a PC is there;
+## the PC sends sound only while «Звук ПК в шлеме» is on there.
+var _sound: Variant = null
 var _texture := ExternalTexture.new()
 var _screens: ScreenLayers
 ## The eyes' video: rows of the eyes, of the alpha mask under them.
@@ -172,6 +175,7 @@ func _ready() -> void:
 	_camera.add_child(_status)
 	if OS.get_name() == "Android":
 		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
+		_sound = JavaClassWrapper.wrap("com.workplace.headset.SoundReceiver")
 	_screens = ScreenLayers.new(_receiver, _origin)
 	_udp.set_broadcast_enabled(true)
 	_udp.bind(0)
@@ -237,6 +241,8 @@ func _search(now: float) -> void:
 				_last_heard = now
 				_greeted = true
 				print("[player] подключён к %s" % _pc_address)
+				if _sound != null:
+					_sound.start(_pc_address, LinkProtocol.REMOTE_SOUND_PORT)
 			StreamPeerTCP.STATUS_CONNECTING:
 				if now - _connecting_since > CONNECT_TIMEOUT_SEC:
 					_tcp = null
@@ -326,6 +332,8 @@ func _reset(why: String) -> void:
 	print("[player] %s, ищу снова" % why)
 	if _receiver != null:
 		_receiver.stopAll()
+	if _sound != null:
+		_sound.stop()
 	if _tcp != null:
 		_tcp.disconnect_from_host()
 	_tcp = null

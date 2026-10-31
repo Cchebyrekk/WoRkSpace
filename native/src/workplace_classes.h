@@ -11,6 +11,7 @@
 namespace workplace {
 class CaptureBackend;
 class StreamBackend;
+class SoundBackend;
 class HotkeyBackend;
 } // namespace workplace
 
@@ -85,6 +86,29 @@ public:
 	// The clock of the frames' capture times, microseconds (slice o7: the headset
 	// sets its clock by it to measure the latency).
 	static int64_t clock_usec();
+};
+
+// Streams what the PC plays to the headset (31.10.2026, the work modes without
+// Link), see SoundBackend in win_backend.h.
+class SoundStreamer : public RefCounted {
+	GDCLASS(SoundStreamer, RefCounted)
+
+	workplace::SoundBackend *backend = nullptr;
+	String last_error;
+
+protected:
+	static void _bind_methods();
+
+public:
+	~SoundStreamer();
+
+	bool start(int p_port);
+	void stop();
+	bool is_running() const;
+	// bytes_sent, frames_captured, frames_dropped, rate, channels (the device's),
+	// device, client ("" without a headset), error.
+	Dictionary get_stats() const;
+	String get_last_error() const;
 };
 
 // Branch pc-render: streams what Godot draws for the headset (both eyes side by
