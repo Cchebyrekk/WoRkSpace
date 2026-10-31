@@ -218,10 +218,12 @@ const MONITOR_MENU_FORWARD := 0.25
 ## "Жесты": everything about recognising the hands — touches, pause, swipe, zoom,
 ## rest, fist, the ring's tilt and the moving hand's reach; 20.10.2026 the user
 ## asked for every setting to sit on the tab it belongs to).
-const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Миры", "Меню"]
+## «Шлем» (31.10.2026, the user's wish: the work mode and the headset's video
+## and sound had stood on «Курсор»).
+const SETTINGS_TABS := ["Жесты", "Прокрутка", "Курсор", "Шлем", "Луч", "Раскладки", "Драйвер", "Назначения", "Мир", "Заготовки", "Миры", "Меню"]
 ## Subheadings over the rows they start (the user's wish, 22.10.2026: to find things at a glance).
 const SETTINGS_HEADERS := {"pinch_press": "Касания", "max_gap": "Пауза", "swipe_mode": "Смахивание и масштаб",
-	"drop": "Покой", "live_screens": "Шлем (своя связь)", "fist_curl": "Кулак и движение рукой",
+	"drop": "Покой", "live_screens": "Своя связь (без Link)", "fist_curl": "Кулак и движение рукой",
 	"scroll_mode": "Способ", "stick_speed": "Направление", "disc_dwell": "Диск и поза",
 	"drag_threshold": "Перетаскивание", "double_click_sec": "Двойной щелчок",
 	"grab_mode": "Панели", "travel_mode": "Движение", "turn_mode": "Поворот",
@@ -232,10 +234,10 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"work_mode": 2, "live_screens": 2, "link_mode": 2, "video_mbps": 2, "video_fps": 2, "video_stats": 2, "pc_sound": 2,
-	"grab_mode": 7, "move_mode": 7, "magnet": 7, "tilt_mode": 7, "monitor_menu": 7,
-	"travel_mode": 7, "move_speed": 7, "turn_mode": 7, "snap_degrees": 7, "turn_speed_degrees": 7, "wall_slide_hand": 7, "wall_resolution": 7, "outlines": 7, "sphere_handle": 7, "wall_size_handle": 7, "wall_bend_handle": 7, "wall_tilt_handle": 7, "split_handle": 7, "handles_mode": 7,
-	"vignette": 7, "grid": 7, "grid_step": 7, "option_lists": 7, "render_radius": 7, "interact_radius": 7, "stick_mode": 7, "flight_sec": 7, "auto_links": 7, "edit_step": 7, "edit_turn_degrees": 7,
+	"work_mode": 3, "live_screens": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3,
+	"grab_mode": 8, "move_mode": 8, "magnet": 8, "tilt_mode": 8, "monitor_menu": 8,
+	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "wall_resolution": 8, "outlines": 8, "sphere_handle": 8, "wall_size_handle": 8, "wall_bend_handle": 8, "wall_tilt_handle": 8, "split_handle": 8, "handles_mode": 8,
+	"vignette": 8, "grid": 8, "grid_step": 8, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
 }
 ## The sliders of the settings rows (see VrSlider).
 var _sliders: Array[VrSlider] = []
@@ -1061,6 +1063,20 @@ const OPTION_LIST_STEP := 0.058
 var _cursor_owner := -1
 var _cursor_press_armed := false
 var _recentered := false
+## Where the user was (PlayerPose, 31.10.2026): saved once a new place has held
+## POSE_SETTLE_SEC, put back at the first alignment after a start.
+var _player_pose: Dictionary = {}
+var _pose_candidate: Dictionary = {}
+var _pose_since := 0.0
+var _next_pose_check := 0.0
+const POSE_CHECK_SEC := 0.5
+const POSE_SETTLE_SEC := 3.0
+## The settings panel shown (31.10.2026: «Свернуть» on it, «Настройки» in the
+## radial menu brings it back in front of the user); saved.
+var _settings_open := true
+## In front of the user's head when it opens: this far, this much lower than the eyes.
+const SETTINGS_DISTANCE := 0.9
+const SETTINGS_BELOW_EYES := 0.35
 ## Temporary: log every hand's pose ([pose]) to design the locomotion gesture from
 ## the sign the user shows (20.10.2026). Turn off once the gesture is in.
 const POSE_LOG := false
@@ -1133,6 +1149,7 @@ func _ready() -> void:
 	_build_split_grips()
 	_build_settings_panel()
 	_load_settings()
+	_settings_root.visible = _settings_open
 	_headset_options.work_mode = WorkMode.current()
 	# The one started last wins: the watchdog stops what it runs for another mode.
 	if not OS.has_feature("android") and DisplayServer.get_name() != "headless":
@@ -1206,6 +1223,15 @@ func _ready() -> void:
 			openxr.connect(&"pose_recentered", _on_pose_recentered)
 		for event: StringName in [&"session_stopping", &"session_focussed", &"session_visible", &"session_loss_pending", &"instance_exiting"]:
 			openxr.connect(event, _on_xr_event.bind(event))
+		# In the headset the world starts after the PC answers (up to 4 s), when the
+		# session is often focused already and the signal has gone by (31.10.2026:
+		# no first alignment, so the place was never saved nor put back).
+		if openxr.has_method(&"get_session_state"):
+			var state: int = openxr.call(&"get_session_state")
+			if state == OpenXRInterface.SESSION_STATE_FOCUSED:
+				_on_xr_event(&"session_focussed")
+			elif state == OpenXRInterface.SESSION_STATE_VISIBLE:
+				_on_xr_event(&"session_visible")
 
 	if not _diag.is_empty():
 		print("[diag] ", _diag)
@@ -1220,6 +1246,7 @@ func _process(delta: float) -> void:
 	if not _xr_ready:
 		return
 	_update_work_mode_switch(delta)
+	_remember_pose()
 	_update_startup_probe(delta)
 	_update_first_recenter(delta)
 	_update_shader_warm_up()
@@ -3712,6 +3739,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 ## the set of attached screens from before this session; a normal exit keeps them.
 func _quit(restore_layout := false) -> void:
 	print("[app] выход")
+	_remember_pose_now()
 	if restore_layout:
 		print("[screens] возвращаю исходную раскладку: ", _topology.restore_layout_now())
 	get_tree().quit()
@@ -6079,23 +6107,35 @@ func _recenter() -> void:
 	var turn := Basis(Vector3.UP, yaw)
 	_origin.transform = Transform3D(turn, -(turn * Vector3(head.origin.x, 0.0, head.origin.z)))
 	_place_panels([], true)
-	# The settings behind the user and the status line ahead, where they always
-	# stood after aligning; they hang under the rig and go along from here.
-	if _settings_root != null:
-		_settings_root.global_transform = Transform3D(Basis(Vector3.UP, PI), Vector3(0.0, 1.25, 0.9))
+	# The settings in front of the user (31.10.2026, before that behind) and the
+	# status line ahead; they hang under the rig and go along from here.
+	_place_settings_in_front()
 	_status.global_position = Vector3(0.0, 2.05, -1.2)
 	# Seated (also after a restart): back to the seat, facing its sphere's middle.
 	var seat := WorldLayout.find(_fixtures, _seated)
 	if seat != null:
 		_origin.global_transform = _seat_rig(seat)
+		# In a sphere the user may have turned (31.10.2026: after a restart they
+		# faced its middle again): the first alignment keeps the way they looked.
+		if not _recentered and not _walled(seat) and PlayerPose.is_valid(_player_pose):
+			_origin.global_transform = WorldLayout.rig_for(Transform3D(Basis(Vector3.UP, float(_player_pose["yaw"])), seat.centre),
+					_camera.transform)
+			print("[world] на месте «%s», поворот %.0f°" % [seat.name, rad_to_deg(_player_pose["yaw"])])
 		_keep_world_in_place()
 	elif _seated >= 0:
 		_seated = -1
+	# The first alignment of a start: where the user was last time, looking the same way.
+	if seat == null and not _recentered and PlayerPose.is_valid(_player_pose):
+		_origin.global_transform = PlayerPose.rig_for(_player_pose, _camera.transform)
+		_keep_world_in_place()
+		print("[world] на прежнем месте: (%.1f, %.1f, %.1f), поворот %.0f°" % [_player_pose["x"], _player_pose["y"],
+				_player_pose["z"], rad_to_deg(_player_pose["yaw"])])
 	# A prompt on show follows too ("Центр" or the Meta button), in front of the new view.
 	if _secure_shown:
 		_release_secure_button()
 		_place_secure_quad()
 	_recentered = true
+	_pose_candidate = {}
 	print("[xr] сцена выровнена по взгляду, поворот %.0f° (%.2f с от старта, заняло %.1f мс)" % [rad_to_deg(yaw),
 			Time.get_ticks_msec() / 1000.0, (Time.get_ticks_usec() - recenter_start_usec) / 1000.0])
 
@@ -6118,6 +6158,35 @@ func _on_xr_event(event: StringName) -> void:
 
 ## Counts down a «Режим работы» change; at the end the PC switches (in the
 ## headset: asks the PC to) and this app ends.
+## Saves where the user is once a new place has held a while (each save goes to
+## the PC from the headset: not on every step).
+func _remember_pose() -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	if not _recentered or now < _next_pose_check:
+		return
+	_next_pose_check = now + POSE_CHECK_SEC
+	var pose := PlayerPose.of(_origin.global_transform, _camera.transform)
+	if not PlayerPose.differs(pose, _player_pose):
+		_pose_candidate = {}
+	elif PlayerPose.differs(pose, _pose_candidate):
+		_pose_candidate = pose
+		_pose_since = now
+	elif now - _pose_since >= POSE_SETTLE_SEC:
+		_player_pose = pose
+		_pose_candidate = {}
+		_save_settings()
+
+
+## Before quitting or switching the work mode: the place as it is now.
+func _remember_pose_now() -> void:
+	if not _recentered:
+		return
+	var pose := PlayerPose.of(_origin.global_transform, _camera.transform)
+	if PlayerPose.differs(pose, _player_pose):
+		_player_pose = pose
+		_save_settings()
+
+
 func _update_work_mode_switch(delta: float) -> void:
 	if _work_mode_switch_in < 0.0:
 		return
@@ -6130,6 +6199,7 @@ func _update_work_mode_switch(delta: float) -> void:
 	var mode := _headset_options.work_mode
 	_headset_options.work_mode = WorkMode.current()
 	_refresh_settings_panel()
+	_remember_pose_now()
 	if WorkMode.remote_switch.is_valid():
 		# In the headset: the PC switches; the headset app follows by itself
 		# (headset_root.gd finds what the PC runs).
@@ -6267,6 +6337,8 @@ func _load_settings() -> void:
 	var menus: Variant = config.get_value("menus", "list", [])
 	if menus is Array and not (menus as Array).is_empty() and (menus as Array).size() <= MenuSet.MAX_CATEGORIES:
 		_menus = menus
+	# «Настройки» came later (31.10.2026): menus arranged before get it too.
+	_menus = MenuSet.with_action(_menus, "settings", "center")
 	var own: Variant = config.get_value("menus", "custom", {})
 	if own is Dictionary:
 		MenuSet.custom = own
@@ -6282,6 +6354,9 @@ func _load_settings() -> void:
 	_group_offsets = DesktopGroups.offsets_from(config.get_value("world", "group_offsets", {}))
 	var slide: Variant = config.get_value("world", "seat_slide", Vector2.ZERO)
 	_seat_slide = slide if slide is Vector2 else Vector2.ZERO
+	var pose: Variant = config.get_value("world", "player_pose", {})
+	_player_pose = pose if PlayerPose.is_valid(pose) else {}
+	_settings_open = bool(config.get_value("settings_panel", "open", true))
 	var worlds: Variant = config.get_value("worlds", "list", [])
 	_worlds = worlds if worlds is Array else []
 	_world_index = clampi(int(config.get_value("worlds", "current", 0)), 0, maxi(_worlds.size() - 1, 0))
@@ -6317,6 +6392,9 @@ func _save_settings() -> void:
 	config.set_value("world", "links_removed", PlaceNetwork.links_to(_links_removed))
 	config.set_value("world", "group_offsets", DesktopGroups.offsets_to(_group_offsets))
 	config.set_value("world", "seat_slide", _seat_slide)
+	if not _player_pose.is_empty():
+		config.set_value("world", "player_pose", _player_pose)
+	config.set_value("settings_panel", "open", _settings_open)
 	# The open world keeps itself up to date in its slot.
 	if _worlds.is_empty():
 		_worlds.append({"name": WorldEdit.next_world_name([]), "data": {}})
@@ -6524,6 +6602,8 @@ func _run_menu_action(id: String) -> void:
 	elif id == "stand_up":
 		if _seated >= 0:
 			_stand_up()
+	elif id == "settings":
+		_set_settings_open(not _settings_open or not _settings_in_view())
 	elif id == "places":
 		if _map_open:
 			_close_map()
@@ -7661,17 +7741,15 @@ func _add_button_to(parent: Node3D, text: String, at: Vector3, size: Vector2, ho
 	return button
 
 
-## Settings panel behind the user, where no screen panel reaches (the screens span
-## at most 300 degrees in front), in tabs so that it stays small: each tunable
-## with − / + buttons, the hand ray, saved arrangements, the display driver.
-## Shown and hidden with the "Настройки" button; saved on each change.
+## Settings panel in front of the user (31.10.2026; it had stood behind, where no
+## screen reached), in tabs so that it stays small: each tunable with − / +
+## buttons, the hand ray, saved arrangements, the display driver. «Свернуть»
+## hides it, «Настройки» in the radial menu brings it back in front of the
+## user; saved on each change.
 func _build_settings_panel() -> void:
 	_settings_root = Node3D.new()
-	_settings_root.position = Vector3(0.0, 1.25, 0.9)
-	# Turned to face the user when they turn round.
-	_settings_root.rotation = Vector3(0.0, PI, 0.0)
-	# Always there behind the user (18.10.2026: nothing stays in front of the screens);
-	# under the rig, so it goes along when the user moves through the world (slice i).
+	_settings_root.position = Vector3(0.0, 1.25, -SETTINGS_DISTANCE)
+	# Under the rig, so it goes along when the user moves through the world (slice i).
 	_origin.add_child(_settings_root)
 
 	for t in SETTINGS_TABS.size():
@@ -7765,6 +7843,42 @@ func _build_settings_panel() -> void:
 
 	# Kept apart from the tabs so that it is not hit by accident.
 	_add_button_to(_settings_root, "Выход", Vector3(1.1, 0.62, 0.0), Vector2(0.18, 0.06), EXIT_BUTTON_HOLD_SEC).activated.connect(_quit)
+	_add_button_to(_settings_root, "Свернуть", Vector3(0.86, 0.62, 0.0), Vector2(0.22, 0.06), 0.3).activated.connect(_set_settings_open.bind(false))
+
+
+## Opens the settings in front of the user's view, or folds them away.
+func _set_settings_open(open: bool) -> void:
+	if open:
+		_place_settings_in_front()
+	_settings_open = open
+	_settings_root.visible = open
+	if not open:
+		_close_binding_menu()
+		_close_option_list()
+	print("[settings] панель настроек %s" % ("открыта перед вами" if open else "свёрнута"))
+	_save_settings()
+
+
+## Whether the open panel is roughly ahead (the radial menu's «Настройки» then
+## folds it; one out of sight comes in front instead).
+func _settings_in_view() -> bool:
+	var to := _settings_root.global_position - _camera.global_position
+	return (-_camera.global_basis.z).angle_to(to) < deg_to_rad(50.0)
+
+
+func _place_settings_in_front() -> void:
+	if _settings_root == null:
+		return
+	var head := _camera.transform
+	var forward := -head.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.01:
+		forward = Vector3.FORWARD
+	forward = forward.normalized()
+	var at := head.origin + forward * SETTINGS_DISTANCE
+	at.y = maxf(head.origin.y - SETTINGS_BELOW_EYES, 0.6)
+	# The panel's face (+Z) to the user.
+	_settings_root.transform = Transform3D(Basis(Vector3.UP, atan2(forward.x, forward.z) + PI), at)
 
 
 func _settings_label(text: String, at: Vector3, font_size: int, parent: Node3D = null) -> Label3D:

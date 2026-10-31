@@ -33,6 +33,8 @@ const ACTIONS := {
 	"places": ["Сеть мест", []],
 	"groups": ["Группы экранов", []],
 	"world_edit": ["Редактор мира", []],
+	# 31.10.2026: the settings panel folds away and comes back in front of the user.
+	"settings": ["Настройки", []],
 }
 ## The user's own functions: keyboard shortcuts recorded from the keyboard,
 ## id ("custom:N") -> [label like "Ctrl+Shift+T", keys]. Kept in [menus] custom.
@@ -79,10 +81,37 @@ const MODE_TWO_LEVEL := 1
 
 static func default_menus() -> Array:
 	return [
-		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all"]},
+		{"name": "Правка", "items": ["copy", "paste", "cut", "undo", "redo", "select_all", "save"]},
 		{"name": "Окна", "items": ["alt_tab", "desktop", "minimize", "maximize", "close", "snap_left", "snap_right"]},
-		{"name": "Мир и система", "items": ["center", "stand_up", "places", "start", "save", "explorer", "task_manager", "quit"]},
+		{"name": "Мир и система", "items": ["center", "settings", "stand_up", "places", "start", "explorer", "task_manager", "quit"]},
 	]
+
+
+## `menus` with `id` added where the user would look for it, if no menu has it:
+## after `near` in the menu holding that, else at the end of the first with room
+## (a function added later reaches menus the user already arranged); the same
+## `menus` if it is there already or nothing has room.
+static func with_action(menus: Array, id: String, near: String) -> Array:
+	var room := -1
+	var beside := -1
+	for i in menus.size():
+		var items: Array = (menus[i] as Dictionary).get("items", [])
+		if id in items:
+			return menus
+		if items.size() < MAX_ITEMS:
+			if room < 0:
+				room = i
+			if near in items and beside < 0:
+				beside = i
+	var chosen := beside if beside >= 0 else room
+	if chosen < 0:
+		return menus
+	var result := menus.duplicate(true)
+	var items: Array = result[chosen].get("items", [])
+	var at := items.find(near)
+	items.insert(at + 1 if at >= 0 else items.size(), id)
+	result[chosen]["items"] = items
+	return result
 
 
 ## The items of a menu without empty places and unknown ids.

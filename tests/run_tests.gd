@@ -36,6 +36,7 @@ func _init() -> void:
 	_test_world_edit()
 	_test_link_protocol()
 	_test_work_mode()
+	_test_player_pose()
 	print("%d проверок, %d провалов" % [_checks, _failures])
 	quit(1 if _failures > 0 else 0)
 
@@ -2093,3 +2094,36 @@ func _test_work_mode() -> void:
 	_check(WorkMode.current() == WorkMode.OPENXR, "режим: без WORKPLACE_REMOTE — OpenXR на ПК")
 	_check(WorkMode.name_of(WorkMode.HEADSET_WORLD) == "мир в шлеме", "режим: имя")
 	_check(LinkProtocol.CALLS.has("app") and "work_mode" in LinkProtocol.CALLS["app"], "режим: шлем может попросить ПК")
+
+
+func _test_player_pose() -> void:
+	# The user stood at (3, 0.5 floor, -4) looking along +X, with the rig turned and moved.
+	var rig := Transform3D(Basis(Vector3.UP, 0.7), Vector3(1.0, 0.5, 2.0))
+	var head := Transform3D(Basis(Vector3.UP, -0.2), Vector3(0.3, 1.6, -0.4))
+	var pose := PlayerPose.of(rig, head)
+	_check(is_equal_approx(pose["y"], 0.5), "положение: высота пола рига")
+	_check(is_equal_approx(pose["yaw"], 0.5), "положение: поворот головы в мире")
+	# Next start: the head is elsewhere in the room, looking elsewhere.
+	var head2 := Transform3D(Basis(Vector3.UP, 2.1), Vector3(-1.2, 1.5, 0.8))
+	var rig2 := PlayerPose.rig_for(pose, head2)
+	var again := PlayerPose.of(rig2, head2)
+	_check(Vector3(again["x"], again["y"], again["z"]).is_equal_approx(Vector3(pose["x"], pose["y"], pose["z"])), "положение: голова там же")
+	_check(absf(angle_difference(again["yaw"], pose["yaw"])) < 0.0001, "положение: смотрит туда же")
+	_check(rig2.basis.y.is_equal_approx(Vector3.UP), "положение: риг не наклонён")
+	_check(not PlayerPose.differs(pose, again), "положение: то же самое не меняется")
+	var stepped := pose.duplicate()
+	stepped["x"] += 0.5
+	var turned := pose.duplicate()
+	turned["yaw"] += 0.5
+	_check(PlayerPose.differs(pose, stepped) and PlayerPose.differs(pose, turned), "положение: шаг и поворот замечены")
+	_check(PlayerPose.is_valid(pose) and not PlayerPose.is_valid({}) and not PlayerPose.is_valid({"x": 1.0}) 			and not PlayerPose.is_valid({"x": NAN, "y": 0.0, "z": 0.0, "yaw": 0.0}), "положение: проверка сохранённого")
+	_check(PlayerPose.differs({}, pose) and not PlayerPose.differs({}, {}), "положение: нет сохранённого")
+	var full := {"name": "Ф", "items": ["copy", "paste", "cut", "undo", "redo", "select_all", "save", "alt_tab"]}
+	var world := {"name": "М", "items": ["explorer", "center", "start"]}
+	var added := MenuSet.with_action([full, world], "settings", "center")
+	_check(added[1]["items"] == ["explorer", "center", "settings", "start"], "меню: «Настройки» встают после «Центр»")
+	_check(world["items"].size() == 3, "меню: исходные не меняются")
+	_check(MenuSet.with_action(added, "settings", "center") == added, "меню: второй раз не добавляется")
+	_check(MenuSet.with_action([{"items": ["copy"]}], "settings", "center")[0]["items"] == ["copy", "settings"], "меню: без «Центр» — в конец первой со свободным местом")
+	_check(MenuSet.with_action([full], "settings", "center") == [full], "меню: места нет — не добавляется")
+	_check(MenuSet.default_menus().all(func(m: Dictionary) -> bool: return m["items"].size() <= MenuSet.MAX_ITEMS), "меню: по умолчанию не больше восьми")
