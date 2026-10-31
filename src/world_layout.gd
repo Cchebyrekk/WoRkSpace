@@ -51,6 +51,9 @@ class Fixture:
 	var splits := {}
 	## Joined cells: "B<n>" -> what each covers, "a+b+…" (WallLayout.Wall.blocks).
 	var blocks := {}
+	## How wide its columns and how high its rows are (WallLayout.Sizes; a new one
+	## each time they change, so the wall built from them knows it is stale).
+	var sizes := WallLayout.Sizes.new()
 
 	## From the fixture's own space (centre at the origin, its middle along -Z) to the world.
 	func frame() -> Transform3D:
@@ -63,7 +66,7 @@ class Fixture:
 			stored[key] = [cell.position.x, cell.position.y, cell.size.x, cell.size.y]
 		return {"id": id, "kind": kind, "name": name, "centre": centre, "yaw": yaw, "radius": radius, "monitors": monitors,
 				"bend": bend, "cells": stored, "gap": gap, "grid": [grid.position.x, grid.position.y, grid.size.x, grid.size.y],
-				"parts": parts, "splits": splits, "blocks": blocks, "tilt": tilt, "squeeze": squeeze, "group": group, "placement": placement}
+				"parts": parts, "splits": splits, "blocks": blocks, "sizes": sizes.to_dictionary(), "tilt": tilt, "squeeze": squeeze, "group": group, "placement": placement}
 
 	static func from_dictionary(data: Dictionary) -> Fixture:
 		var fixture := Fixture.new()
@@ -96,6 +99,7 @@ class Fixture:
 				for key: Variant in stored_map:
 					clean[str(key)] = str(stored_map[key])
 				fixture.set(field, clean)
+		fixture.sizes = WallLayout.Sizes.from_dictionary(data.get("sizes", {}))
 		# Saved before joined cells were cells of their own (22.10.2026): each group
 		# "a+b" becomes "B<n>", and a screen that stood in the group stands in it.
 		var old_joins: Variant = data.get("joins", [])
@@ -260,6 +264,12 @@ static func nearby(fixtures: Array[Fixture], head: Vector3, reach: float) -> Fix
 ## What «Сесть / встать» offers (31.10.2026, in place of the floating «Сесть»):
 ## the seats in reach (ids, nearest first) other than the one sat in, and -1 for
 ## standing up when seated. One option is done at once, more are a choice.
+## A sphere's radius pulled by the hand: as far as the hand went from the centre
+## since the grip, twice (slice j, back 01.11.2026 for dragging by hand).
+static func dragged_radius(start_radius: float, start_distance: float, distance: float, gain := 2.0) -> float:
+	return clampf(start_radius + (distance - start_distance) * gain, MIN_RADIUS, MAX_RADIUS)
+
+
 static func seat_options(near: Array, seated: int) -> Array:
 	var options: Array = [-1] if seated >= 0 else []
 	for id: int in near:

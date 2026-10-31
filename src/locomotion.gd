@@ -26,6 +26,10 @@ class Options:
 	## whole room on, or the hand in a marked area: the real hand is seen there),
 	## 2 never (31.10.2026).
 	var hand_dots := 1
+	## How a wall's, column's or sphere's size handle works: 0 the pad (or slider)
+	## in front of the user, 1 dragged by hand, the corner where the ray points on
+	## the wall (the radius as far as the hand goes), as before 22.10.2026.
+	var size_drag := 0
 	var keyboard_click := 1
 	## Top speed (m/s) and how far the hand moves from the centre to reach it (m).
 	var move_speed := 2.0

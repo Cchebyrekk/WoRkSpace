@@ -40,13 +40,17 @@ static func pitch(gap := DEFAULT_GAP) -> Vector2:
 
 
 ## Middle of a cell rectangle on the wall (u, v).
-static func cell_centre(cell: Rect2i, gap := DEFAULT_GAP) -> Vector2:
+static func cell_centre(cell: Rect2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Vector2:
+	if sizes != null and not sizes.plain():
+		return sizes.rect(cell, gap).get_center()
 	var step := pitch(gap)
 	return Vector2((cell.position.x + (cell.size.x - 1) * 0.5) * step.x, -(cell.position.y + (cell.size.y - 1) * 0.5) * step.y)
 
 
 ## Width and height of a cell rectangle, gaps between its cells included (m).
-static func cell_size(cell: Rect2i, gap := DEFAULT_GAP) -> Vector2:
+static func cell_size(cell: Rect2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Vector2:
+	if sizes != null and not sizes.plain():
+		return sizes.rect(cell, gap).size
 	return Vector2(cell.size.x * CELL.x + (cell.size.x - 1) * gap, cell.size.y * CELL.y + (cell.size.y - 1) * gap)
 
 
@@ -65,8 +69,10 @@ static func span_for(pixels: Vector2i) -> Vector2i:
 
 
 ## The cell rectangle of size `span` whose middle is nearest to (u, v).
-static func cell_at(u: float, v: float, span: Vector2i, gap := DEFAULT_GAP) -> Rect2i:
+static func cell_at(u: float, v: float, span: Vector2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Rect2i:
 	var step := pitch(gap)
+	if sizes != null and not sizes.plain():
+		return Rect2i(Vector2i(sizes.index_at(0, u - (span.x - 1) * 0.5 * step.x, gap), sizes.index_at(1, -v - (span.y - 1) * 0.5 * step.y, gap)), span)
 	return Rect2i(Vector2i(roundi(u / step.x - (span.x - 1) * 0.5), roundi(-v / step.y - (span.y - 1) * 0.5)), span)
 
 
@@ -209,9 +215,9 @@ const MAX_TILT := deg_to_rad(75.0)
 
 
 static func shape_of(grid: Rect2i, gap: float, distance: float, bend: float, outside := false, tilt := 0.0,
-		squeeze := 1.0) -> Shape:
+		squeeze := 1.0, sizes: Sizes = null) -> Shape:
 	var shape := Shape.new()
-	var wall := area(grid, gap)
+	var wall := area(grid, gap, sizes)
 	shape.distance = distance
 	shape.bend = bend
 	shape.middle = wall.get_center().x
@@ -331,11 +337,11 @@ static func project(point: Vector3, shape: Shape) -> Vector3:
 
 
 ## Middle of the screen nearest to (u, v), or (u, v) itself on a wall with no screens.
-static func nearest_screen(cells: Array[Rect2i], u: float, v: float, gap := DEFAULT_GAP) -> Vector2:
+static func nearest_screen(cells: Array[Rect2i], u: float, v: float, gap := DEFAULT_GAP, sizes: Sizes = null) -> Vector2:
 	var best := Vector2(u, v)
 	var best_distance := INF
 	for cell in cells:
-		var middle := cell_centre(cell, gap)
+		var middle := cell_centre(cell, gap, sizes)
 		var distance := middle.distance_to(Vector2(u, v))
 		if distance < best_distance:
 			best = middle
@@ -355,9 +361,128 @@ static func max_distance(shape: Shape, limit: float) -> float:
 
 
 ## A cell rectangle on the wall in metres: u, v of its lower left corner, and its size.
-static func area(cell: Rect2i, gap := DEFAULT_GAP) -> Rect2:
+static func area(cell: Rect2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Rect2:
+	if sizes != null and not sizes.plain():
+		return sizes.rect(cell, gap)
 	var size := cell_size(cell, gap)
 	return Rect2(cell_centre(cell, gap) - size * 0.5, size)
+
+
+## How wide a wall's columns and how high its rows are (the user's rule,
+## 01.11.2026: a side made smaller by its thinnest cells — a column or row of the
+## grid can be thinner than a cell). Along an axis: 0 the columns (u, to the right),
+## 1 the rows (downwards, so -v). A line not listed is as CELL; `shift` moves them
+## all (m), so a line made thinner leaves the others where they were.
+class Sizes:
+	## Column -> its width as a share of CELL.x.
+	var widths := {}
+	## Row -> its height as a share of CELL.y.
+	var heights := {}
+	var shift := Vector2.ZERO
+
+	func copy() -> Sizes:
+		var other := Sizes.new()
+		other.widths = widths.duplicate()
+		other.heights = heights.duplicate()
+		other.shift = shift
+		return other
+
+	## Every cell as CELL (the old equal grid).
+	func plain() -> bool:
+		return widths.is_empty() and heights.is_empty() and shift == Vector2.ZERO
+
+	func share(axis: int, index: int) -> float:
+		return float((widths if axis == 0 else heights).get(index, 1.0))
+
+	## A line's width or height (m).
+	func length(axis: int, index: int) -> float:
+		return share(axis, index) * CELL[axis]
+
+	## Where line `index` begins along `axis` (u of its left edge; for rows, how
+	## far down from row 0's top place its top is).
+	func start(axis: int, index: int, gap: float) -> float:
+		var at := -CELL[axis] * 0.5 + shift[axis]
+		if index >= 0:
+			for i in index:
+				at += length(axis, i) + gap
+		else:
+			for i in range(index, 0):
+				at -= length(axis, i) + gap
+		return at
+
+	## The line at `at` along `axis` (up to the middle of the gaps round it).
+	func index_at(axis: int, at: float, gap: float) -> int:
+		var index := 0
+		for guard in 4096:
+			var from := start(axis, index, gap)
+			if at < from - gap * 0.5:
+				index -= 1
+			elif at >= from + length(axis, index) + gap * 0.5:
+				index += 1
+			else:
+				break
+		return index
+
+	## A cell rectangle on the wall in metres (as WallLayout.area).
+	func rect(cell: Rect2i, gap: float) -> Rect2:
+		var left := start(0, cell.position.x, gap)
+		var right := start(0, cell.end.x - 1, gap) + length(0, cell.end.x - 1)
+		var top := -start(1, cell.position.y, gap)
+		var bottom := -(start(1, cell.end.y - 1, gap) + length(1, cell.end.y - 1))
+		return Rect2(left, bottom, right - left, top - bottom)
+
+	## Line `index` along `axis` as `value` CELLs, the line's start or its end
+	## (`keep_end`) staying where it is, and the lines past it on that side with it.
+	func set_share(axis: int, index: int, value: float, gap: float, keep_end: bool) -> void:
+		var kept := start(axis, index, gap) + (length(axis, index) if keep_end else 0.0)
+		var lines: Dictionary = widths if axis == 0 else heights
+		if is_equal_approx(value, 1.0):
+			lines.erase(index)
+		else:
+			lines[index] = value
+		anchor(axis, index, kept - (length(axis, index) if keep_end else 0.0), gap)
+
+	## Every line moved so that `index` begins at `at`.
+	func anchor(axis: int, index: int, at: float, gap: float) -> void:
+		shift[axis] += at - start(axis, index, gap)
+		if absf(shift[axis]) < 0.000001:
+			shift[axis] = 0.0
+
+	## Nothing kept of the lines outside `grid` (they are as CELL again), the lines in it staying put.
+	func kept_to(grid: Rect2i, gap: float) -> void:
+		for axis in 2:
+			var first := grid.position[axis]
+			var at := start(axis, first, gap)
+			var lines: Dictionary = widths if axis == 0 else heights
+			for index: int in lines.keys():
+				if index < first or index >= grid.end[axis]:
+					lines.erase(index)
+			anchor(axis, first, at, gap)
+
+	func to_dictionary() -> Dictionary:
+		var stored := {"widths": {}, "heights": {}, "shift": [shift.x, shift.y]}
+		for index: int in widths:
+			stored["widths"][str(index)] = widths[index]
+		for index: int in heights:
+			stored["heights"][str(index)] = heights[index]
+		return stored
+
+	static func from_dictionary(data: Variant) -> Sizes:
+		var sizes := Sizes.new()
+		if not data is Dictionary:
+			return sizes
+		for field: String in ["widths", "heights"]:
+			var stored: Variant = data.get(field, {})
+			if stored is Dictionary:
+				var lines: Dictionary = sizes.widths if field == "widths" else sizes.heights
+				for key: Variant in stored:
+					var value := float(stored[key])
+					if value > 0.0 and not is_equal_approx(value, 1.0):
+						lines[int(str(key))] = clampf(value, 0.01, 1.0 * MAX_SPAN * 4)
+		var shift: Variant = data.get("shift", [])
+		if shift is Array and shift.size() == 2:
+			sizes.shift = Vector2(float(shift[0]), float(shift[1]))
+		return sizes
 
 
 ## The wall's cells: `grid`, grown to hold every screen; a wall with no size yet
@@ -369,23 +494,57 @@ static func settle_grid(grid: Rect2i, cells: Array[Rect2i]) -> Rect2i:
 	return result if result.size != Vector2i.ZERO else Rect2i(0, 0, 1, 1)
 
 
+## A wall's side `side` (as `shrunk`) brought, step by step, to `at` (u or v on
+## it; «Размер ручкой: проведением», 01.11.2026): a step bigger while `at` is past
+## the edge by more than half the line it adds, a step smaller while it is inside
+## by more than half the strip it takes; not past a screen (of `keys`). As
+## `shrunk`, or {} if nothing changes.
+static func dragged_side(wall: Wall, grid: Rect2i, side: Vector2i, at: float, gap := DEFAULT_GAP,
+		keys := PackedStringArray(), limit := 64) -> Dictionary:
+	var axis := _side_axis(side)
+	var s := 1.0 if _side_high(side) else -1.0
+	var result := {}
+	var current := wall
+	var now := grid
+	for guard in 40:
+		var sizes := current.sizes if current.sizes != null else Sizes.new()
+		var whole := area(now, gap, sizes)
+		var past := s * (at - (whole.end[axis] if s > 0.0 else whole.position[axis]))
+		var step := {}
+		if past > (sizes.length(axis, edge_line(now, side)) + gap) * 0.5 and now.size[axis] < limit:
+			step = grown(current, now, side, gap)
+		elif past < -MIN_PART_SIDE * 0.5:
+			step = shrunk(current, now, side, gap, keys)
+			if not step.is_empty():
+				var smaller := area(step["grid"], gap, (step["wall"] as Wall).sizes)
+				var taken := s * ((whole.end[axis] if s > 0.0 else whole.position[axis]) - (smaller.end[axis] if s > 0.0 else smaller.position[axis]))
+				if -past < taken * 0.5:
+					step = {}
+		if step.is_empty():
+			break
+		result = step
+		current = step["wall"]
+		now = step["grid"]
+	return result
+
+
 ## Where a size handle is: past that corner of the wall.
-static func size_handle_point(grid: Rect2i, gap := DEFAULT_GAP, corner := Vector2i(1, 1)) -> Vector2:
-	var wall := area(grid, gap)
+static func size_handle_point(grid: Rect2i, gap := DEFAULT_GAP, corner := Vector2i(1, 1), sizes: Sizes = null) -> Vector2:
+	var wall := area(grid, gap, sizes)
 	return Vector2(wall.end.x + HANDLE_MARGIN.x if corner.x > 0 else wall.position.x - HANDLE_MARGIN.x,
 			wall.position.y - HANDLE_MARGIN.y if corner.y > 0 else wall.end.y + HANDLE_MARGIN.y)
 
 
 ## Where the bend handle is: under the middle of the wall's lower edge (its lower
 ## left corner is a size handle now), below the screens' own grips.
-static func bend_handle_point(grid: Rect2i, gap := DEFAULT_GAP) -> Vector2:
-	var wall := area(grid, gap)
+static func bend_handle_point(grid: Rect2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Vector2:
+	var wall := area(grid, gap, sizes)
 	return Vector2(wall.get_center().x, wall.position.y - HANDLE_MARGIN.y - BEND_HANDLE_DROP)
 
 
 ## Where the tilt handle is: over the middle of the wall's top edge.
-static func tilt_handle_point(grid: Rect2i, gap := DEFAULT_GAP) -> Vector2:
-	var wall := area(grid, gap)
+static func tilt_handle_point(grid: Rect2i, gap := DEFAULT_GAP, sizes: Sizes = null) -> Vector2:
+	var wall := area(grid, gap, sizes)
 	return Vector2(wall.get_center().x, wall.end.y + HANDLE_MARGIN.y + BEND_HANDLE_DROP)
 
 
@@ -502,9 +661,9 @@ static func outline(grid: Rect2i, gap: float, shape: Shape, wall: Wall = null) -
 ## The wall's backing as triangles (the fixture's space): a slab behind the
 ## screens, BACKING_FRONT..BACKING_BACK deep, a little bigger than the cells, bent
 ## like the wall (the user wanted the wall to have a body, 21.10.2026).
-static func backing(grid: Rect2i, gap: float, shape: Shape) -> PackedVector3Array:
+static func backing(grid: Rect2i, gap: float, shape: Shape, sizes: Sizes = null) -> PackedVector3Array:
 	var triangles := PackedVector3Array()
-	var wall := area(grid, gap).grow(BACKING_MARGIN)
+	var wall := area(grid, gap, sizes).grow(BACKING_MARGIN)
 	var pieces := OUTLINE_ARC_STEPS if shape.bent() else 1
 	var bottom := wall.position.y
 	var top := wall.end.y
@@ -565,6 +724,8 @@ const MIN_PART_SIDE := 0.08
 const STAGGER_SHARE := 0.12
 ## Edges this close (m) count as the same line when places are joined.
 const JOIN_EPSILON := 0.002
+## No line of the grid (`shrunk`).
+const NO_LINE := -1048576
 
 
 ## A wall's screens: on whole cells, in parts; how cells are split and joined.
@@ -577,6 +738,8 @@ class Wall:
 	var splits := {}
 	## Joined cell "B<n>" -> what it covers, "a+b+…" (cells or parts, hidden behind it).
 	var blocks := {}
+	## How wide its columns and how high its rows are (null = every cell as CELL).
+	var sizes: Sizes = null
 	## A wall that is only read (main.gd keeps one per wall until it changes): what
 	## is asked of it is remembered. Worked out every frame on a wall of ~1800 parts
 	## (22.10.2026, «Стена 2») it took the frame rate down to 38 and below.
@@ -593,17 +756,18 @@ class Wall:
 		other.parts = parts.duplicate()
 		other.splits = splits.duplicate()
 		other.blocks = blocks.duplicate()
+		other.sizes = sizes.copy() if sizes != null else null
 		return other
 
 	## A cell, part or joined cell on the wall in metres.
 	func area_of(slot: String, gap: float) -> Rect2:
 		if not frozen:
-			return WallLayout.slot_area(slot, splits, gap, blocks)
+			return WallLayout.slot_area(slot, splits, gap, blocks, sizes)
 		if gap != _areas_gap:
 			_areas = {}
 			_areas_gap = gap
 		if not _areas.has(slot):
-			_areas[slot] = WallLayout.slot_area(slot, splits, gap, blocks)
+			_areas[slot] = WallLayout.slot_area(slot, splits, gap, blocks, sizes)
 		return _areas[slot]
 
 	## Every slot hidden behind a joined cell -> that joined cell.
@@ -723,8 +887,10 @@ static func best_resolution(box: Vector2, available: Array[Vector2i]) -> Vector2
 ## memory of cells taken away — their splits and joined cells were still drawn
 ## on top of a column made smaller): splits of cells outside, joined cells
 ## reaching outside, and screens' places in them go (those screens find a cell anew).
-static func pruned(wall: Wall, grid: Rect2i) -> Wall:
+static func pruned(wall: Wall, grid: Rect2i, gap := DEFAULT_GAP) -> Wall:
 	var result := wall.copy()
+	if result.sizes != null:
+		result.sizes.kept_to(grid, gap)
 	for id: String in wall.blocks:
 		for member in (wall.blocks[id] as String).split("+", false):
 			if not grid.has_point(_cell_of(wall, member)):
@@ -742,6 +908,235 @@ static func pruned(wall: Wall, grid: Rect2i) -> Wall:
 				result.parts.erase(key)
 				break
 	return result
+
+
+## The axis a side of the wall moves along (0 across, 1 up and down) and whether
+## it is the side at the bigger u or v: `side` (1, 0) is the right, (-1, 0) the
+## left, (0, -1) the top, (0, 1) the bottom (rows go down, as the grid's).
+static func _side_axis(side: Vector2i) -> int:
+	return 0 if side.x != 0 else 1
+
+
+static func _side_high(side: Vector2i) -> bool:
+	return side.x > 0 or side.y < 0
+
+
+## The grid's line at that side (a column or a row).
+static func edge_line(grid: Rect2i, side: Vector2i) -> int:
+	var axis := _side_axis(side)
+	return grid.end[axis] - 1 if (axis == 0) == _side_high(side) else grid.position[axis]
+
+
+## A wall with side `side` (as `_side_axis`) made smaller by one step (the
+## user's rule, 01.11.2026): a strip as thick as the thinnest place along that
+## edge goes (with the gap before it); places as thick go, thicker ones are cut
+## thinner by as much and stay — a column or row of the grid too (`Sizes`). What
+## would be left of a part thinner than MIN_PART_SIDE goes too (the others of its
+## split share its room), and a line left thinner goes whole. Not past a screen:
+## if the strip would touch one (of `keys`; empty = every screen on the wall),
+## nothing changes. {"wall": Wall, "grid": Rect2i}, or {} if it cannot.
+static func shrunk(wall: Wall, grid: Rect2i, side: Vector2i, gap := DEFAULT_GAP, keys := PackedStringArray()) -> Dictionary:
+	var axis := _side_axis(side)
+	var high := _side_high(side)
+	var s := 1.0 if high else -1.0
+	var old := wall.copy()
+	if old.sizes == null:
+		old.sizes = Sizes.new()
+	old.frozen = true
+	var whole := area(grid, gap, old.sizes)
+	var edge := whole.end[axis] if high else whole.position[axis]
+	var thinnest := INF
+	for leaf in all_leaves(old, grid):
+		var box := old.area_of(leaf, gap)
+		if absf((box.end[axis] if high else box.position[axis]) - edge) < JOIN_EPSILON:
+			thinnest = minf(thinnest, box.size[axis])
+	if thinnest == INF:
+		return {}
+	var cut := edge - s * (thinnest + gap)
+	# The grid's lines from the edge in: those past the cut go, the one it crosses is cut.
+	var removed := 0
+	var trimmed := NO_LINE
+	var trimmed_share := 1.0
+	var line := edge_line(grid, side)
+	var inwards := -1 if (axis == 0) == high else 1
+	var count := grid.size[axis]
+	for n in count:
+		var index := line + inwards * n
+		var cell := Vector2i(index, grid.position.y) if axis == 0 else Vector2i(grid.position.x, index)
+		var box := area(Rect2i(cell, Vector2i.ONE), gap, old.sizes)
+		var inner := box.position[axis] if high else box.end[axis]
+		var outer := box.end[axis] if high else box.position[axis]
+		if s * (inner - cut) >= -JOIN_EPSILON:
+			removed += 1
+			continue
+		if s * (outer - cut) <= JOIN_EPSILON:
+			cut = outer
+			break
+		var left := s * (cut - inner)
+		if left < MIN_PART_SIDE - JOIN_EPSILON:
+			removed += 1
+			cut = inner - s * gap
+		else:
+			trimmed = index
+			trimmed_share = left / CELL[axis]
+		break
+	if removed >= count:
+		return {}
+	for key: String in old.cells.keys() + old.parts.keys():
+		if not keys.is_empty() and not keys.has(key):
+			continue
+		var box := screen_area(old, key, gap)
+		if s * ((box.end[axis] if high else box.position[axis]) - cut) > JOIN_EPSILON:
+			return {}
+	var kept := grid
+	if (axis == 0) == high:
+		kept.size[axis] -= removed
+	else:
+		kept.position[axis] += removed
+		kept.size[axis] -= removed
+	# Splits cut where the strip goes, in the cut line's cells and the joined cells.
+	var result := wall.copy()
+	var maps := {}
+	var roots := PackedStringArray(old.blocks.keys())
+	if trimmed != NO_LINE:
+		for across in range(grid.position[1 - axis], grid.end[1 - axis]):
+			roots.append(slot_of(Vector2i(trimmed, across) if axis == 0 else Vector2i(across, trimmed)))
+	for root in roots:
+		_clip(old, root, cut, axis, high, gap, result.splits, maps)
+	_remap(result, func(name: String) -> String:
+		var path := name.split(":")
+		var head := path[0]
+		if not head.begins_with("B") and not kept.has_point(cell_of(head)):
+			return ""
+		var current := head
+		var renamed := head
+		for k in range(1, path.size()):
+			if maps.has(current):
+				var map: Array = maps[current]
+				var index := int(path[k])
+				if index >= map.size() or int(map[index]) < 0:
+					return ""
+				# One part left: it is the slot itself.
+				if map.count(-1) < map.size() - 1:
+					renamed += ":%d" % int(map[index])
+			else:
+				renamed += ":" + path[k]
+			current += ":" + path[k]
+		return renamed)
+	if result.sizes == null:
+		result.sizes = Sizes.new()
+	if trimmed != NO_LINE:
+		result.sizes.set_share(axis, trimmed, trimmed_share, gap, (axis == 0) != high)
+	result = pruned(result, kept, gap)
+	_tidy(result)
+	return {"wall": result, "grid": kept}
+
+
+## `slot`'s splits as they are left with everything past `cut` (along `axis`, on
+## the side `high`) gone: parts past it go, the one across it is cut there, the
+## weights are the parts' sizes left; how its parts are numbered now goes into
+## `maps` (old part -> new, -1 gone).
+static func _clip(old: Wall, slot: String, cut: float, axis: int, high: bool, gap: float, splits: Dictionary, maps: Dictionary) -> void:
+	var spec: String = old.splits.get(slot, "")
+	if spec == "":
+		return
+	var s := 1.0 if high else -1.0
+	var box := old.area_of(slot, gap)
+	if s * ((box.end[axis] if high else box.position[axis]) - cut) <= JOIN_EPSILON:
+		return
+	var count := spec_count(spec)
+	if spec.begins_with("c") != (axis == 0):
+		for i in count:
+			_clip(old, "%s:%d" % [slot, i], cut, axis, high, gap, splits, maps)
+		return
+	var lengths := PackedFloat64Array()
+	var map := []
+	for i in count:
+		var name := "%s:%d" % [slot, i]
+		var part := old.area_of(name, gap)
+		var far := part.end[axis] if high else part.position[axis]
+		var near := part.position[axis] if high else part.end[axis]
+		if s * (far - cut) <= JOIN_EPSILON:
+			map.append(lengths.size())
+			lengths.append(part.size[axis])
+		elif s * (cut - near) >= MIN_PART_SIDE - JOIN_EPSILON:
+			map.append(lengths.size())
+			lengths.append(s * (cut - near))
+			_clip(old, name, cut, axis, high, gap, splits, maps)
+		else:
+			map.append(-1)
+	maps[slot] = map
+	if lengths.size() <= 1:
+		splits.erase(slot)
+	else:
+		splits[slot] = _spec(spec.left(1), lengths)
+
+
+## A wall with side `side` (as `_side_axis`) made bigger by one step (the user's
+## rule, 01.11.2026): a copy of the line at that edge — as wide or high, its cells
+## split alike; a joined cell reaching into that line gives a joined cell over the
+## same cells of the new one (split as it is along the edge). No screens copied.
+static func grown(wall: Wall, grid: Rect2i, side: Vector2i, gap := DEFAULT_GAP) -> Dictionary:
+	var axis := _side_axis(side)
+	var high := _side_high(side)
+	var line := edge_line(grid, side)
+	var outwards := 1 if (axis == 0) == high else -1
+	var added := line + outwards
+	var result := wall.copy()
+	if result.sizes == null:
+		result.sizes = Sizes.new()
+	var at := result.sizes.start(axis, line, gap)
+	result.sizes.set_share(axis, added, result.sizes.share(axis, line), gap, false)
+	result.sizes.anchor(axis, line, at, gap)
+	var bigger := grid
+	bigger.size[axis] += 1
+	if outwards < 0:
+		bigger.position[axis] -= 1
+	var renamed := func(slot: String) -> String:
+		var head := slot.get_slice(":", 0)
+		var cell := cell_of(head)
+		cell[axis] = added
+		return slot_of(cell) + slot.substr(head.length())
+	for slot: String in wall.splits:
+		var head := slot.get_slice(":", 0)
+		if not head.begins_with("B") and cell_of(head)[axis] == line:
+			result.splits[renamed.call(slot)] = wall.splits[slot]
+	var line_box := area(Rect2i(Vector2i(line, grid.position.y) if axis == 0 else Vector2i(grid.position.x, line), Vector2i.ONE), gap,
+			result.sizes)
+	for id: String in wall.blocks:
+		var members := PackedStringArray()
+		for member in (wall.blocks[id] as String).split("+", false):
+			if not member.begins_with("B") and cell_of(member)[axis] == line:
+				members.append(renamed.call(member))
+		if members.is_empty():
+			continue
+		var box := wall.area_of(id, gap)
+		var inside := box.position[axis] >= line_box.position[axis] - JOIN_EPSILON and box.end[axis] <= line_box.end[axis] + JOIN_EPSILON
+		var target := members[0]
+		if members.size() >= 2:
+			target = _new_block(result, members)
+		for split: String in result.splits.keys():
+			if split == target or split.begins_with(target + ":"):
+				result.splits.erase(split)
+		_slice(wall, id, target, axis, high, inside, result.splits)
+	_tidy(result)
+	return {"wall": result, "grid": bigger}
+
+
+## `slot`'s splits copied under `prefix`: whole, or as the edge on side `high`
+## along `axis` has them (a split along it gives only its part at that edge).
+static func _slice(wall: Wall, slot: String, prefix: String, axis: int, high: bool, whole: bool, out: Dictionary) -> void:
+	var spec: String = wall.splits.get(slot, "")
+	if spec == "":
+		return
+	var count := spec_count(spec)
+	if whole or spec.begins_with("c") != (axis == 0):
+		out[prefix] = spec
+		for i in count:
+			_slice(wall, "%s:%d" % [slot, i], "%s:%d" % [prefix, i], axis, high, whole, out)
+		return
+	var edge := count - 1 if (axis == 0) == high else 0
+	_slice(wall, "%s:%d" % [slot, edge], prefix, axis, high, whole, out)
 
 
 static func slot_of(cell: Vector2i) -> String:
@@ -765,16 +1160,16 @@ static func _cell_of(wall: Wall, slot: String) -> Vector2i:
 ## A cell, part or joined cell on the wall in metres (as `area`): the parts of a
 ## split share it, with the wall's gap between them; rows count from the top. A
 ## joined cell is the rectangle round what it covers (`blocks`).
-static func slot_area(slot: String, splits: Dictionary, gap := DEFAULT_GAP, blocks := {}) -> Rect2:
+static func slot_area(slot: String, splits: Dictionary, gap := DEFAULT_GAP, blocks := {}, sizes: Sizes = null) -> Rect2:
 	var path := slot.split(":")
 	var current := path[0]
 	var rect := Rect2()
 	if current.begins_with("B"):
 		for member in (blocks.get(current, "") as String).split("+", false):
-			var spot := slot_area(member, splits, gap, blocks)
+			var spot := slot_area(member, splits, gap, blocks, sizes)
 			rect = spot if rect.size == Vector2.ZERO else rect.merge(spot)
 	else:
-		rect = area(Rect2i(cell_of(current), Vector2i.ONE), gap)
+		rect = area(Rect2i(cell_of(current), Vector2i.ONE), gap, sizes)
 	for k in range(1, path.size()):
 		var spec: String = splits.get(current, "")
 		if spec == "":
@@ -879,7 +1274,7 @@ static func _descend(wall: Wall, slot: String, u: float, v: float, gap: float) -
 static func screen_area(wall: Wall, key: String, gap := DEFAULT_GAP) -> Rect2:
 	if wall.parts.has(key):
 		return wall.area_of(wall.parts[key], gap)
-	return area(wall.cells.get(key, Rect2i()), gap)
+	return area(wall.cells.get(key, Rect2i()), gap, wall.sizes)
 
 
 ## The cells a screen stands on (for a screen in a place: the cells under it).
@@ -1349,19 +1744,21 @@ static func resplit(wall: Wall, slot: String, next: String) -> Wall:
 ## whole cells as `moved` (a screen from a part takes one cell); a screen on several
 ## cells does not go into a part.
 static func dropped(wall: Wall, key: String, u: float, v: float, gap := DEFAULT_GAP) -> Wall:
-	var cell := cell_at(u, v, Vector2i.ONE, gap).position
+	var cell := cell_at(u, v, Vector2i.ONE, gap, wall.sizes).position
 	var spanning: bool = wall.cells.has(key) and (wall.cells[key] as Rect2i).size != Vector2i.ONE
 	# Its middle on the line between two cells: staggered, over their halves.
-	var across := u / pitch(gap).x
-	if not spanning and absf(across - floorf(across) - 0.5) < STAGGER_SHARE:
-		var staggered := straddled(wall, key, Vector2i(floori(across), cell.y))
+	var box := area(Rect2i(cell, Vector2i.ONE), gap, wall.sizes)
+	var reach := STAGGER_SHARE * pitch(gap).x
+	var left := cell.x if absf(u - box.end.x - gap * 0.5) < reach else (cell.x - 1 if absf(u - box.position.x + gap * 0.5) < reach else NO_LINE)
+	if not spanning and left != NO_LINE:
+		var staggered := straddled(wall, key, Vector2i(left, cell.y))
 		if staggered != null:
 			return staggered
 	var leaf := leaf_at(wall, cell, u, v, gap)
 	if leaf != slot_of(cell) and not spanning:
 		return into(wall, key, leaf)
 	var size: Vector2i = (wall.cells[key] as Rect2i).size if wall.cells.has(key) else Vector2i.ONE
-	return onto_cells(wall, key, cell_at(u, v, size, gap))
+	return onto_cells(wall, key, cell_at(u, v, size, gap, wall.sizes))
 
 
 ## Staggered rows (the user's wish, 22.10.2026: «шахматный порядок»): screen `key`

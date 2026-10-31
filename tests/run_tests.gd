@@ -30,6 +30,7 @@ func _init() -> void:
 	_test_lookups_and_helpers()
 	_test_wall_layout()
 	_test_wall_split()
+	_test_wall_resize()
 	_test_column_and_lean()
 	_test_place_network()
 	_test_desktop_groups()
@@ -1494,6 +1495,131 @@ static func _split_wall(splits: Dictionary) -> WallLayout.Wall:
 	return wall
 
 
+## A wall's side made smaller by its thinnest places, bigger by a copy of its edge (01.11.2026).
+func _test_wall_resize() -> void:
+	var gap := 0.06
+	var near := func(a: float, b: float) -> bool:
+		return absf(a - b) < 0.001
+	# Lines of their own size; equal ones are the old grid.
+	var plain := WallLayout.Sizes.new()
+	_check(plain.rect(Rect2i(-1, 2, 3, 2), gap).is_equal_approx(WallLayout.area(Rect2i(-1, 2, 3, 2), gap)), "размеры клеток: равные — как прежде")
+	var sizes := WallLayout.Sizes.new()
+	var before := WallLayout.area(Rect2i(0, 0, 1, 1), gap)
+	sizes.set_share(0, 1, 0.5, gap, false)
+	_check(sizes.rect(Rect2i(0, 0, 1, 1), gap).is_equal_approx(before) and near.call(sizes.rect(Rect2i(1, 0, 1, 1), gap).size.x, 0.635),
+			"размеры клеток: столбец уже, левые на месте")
+	var right := sizes.rect(Rect2i(1, 0, 1, 1), gap)
+	sizes.set_share(0, 0, 0.5, gap, true)
+	_check(sizes.rect(Rect2i(1, 0, 1, 1), gap).is_equal_approx(right) and near.call(sizes.rect(Rect2i(0, 0, 1, 1), gap).end.x, before.end.x),
+			"размеры клеток: слева уже — правый край и соседи на месте")
+	_check(WallLayout.cell_at(right.get_center().x, 0.0, Vector2i.ONE, gap, sizes).position == Vector2i(1, 0), "размеры клеток: клетка под точкой")
+	sizes.set_share(1, -1, 0.5, gap, true)
+	_check(near.call(sizes.rect(Rect2i(0, -1, 1, 1), gap).position.y, before.end.y + gap) and near.call(sizes.rect(Rect2i(0, -1, 1, 1), gap).size.y, WallLayout.CELL.y * 0.5),
+			"размеры клеток: строка выше ниже ростом, её низ на месте")
+
+	# Shrinking the right side: a third goes, halves are cut thinner.
+	var wall := WallLayout.Wall.new()
+	wall.splits = {"1,0": "c3", "1,1": "c2"}
+	wall.cells = {"m": Rect2i(0, 0, 1, 1)}
+	var grid := Rect2i(0, 0, 2, 2)
+	var third := (WallLayout.CELL.x - 2 * gap) / 3.0
+	var edge := WallLayout.area(grid, gap).end.x
+	var step := WallLayout.shrunk(wall, grid, Vector2i(1, 0), gap)
+	_check(not step.is_empty(), "уменьшение справа: идёт")
+	if not step.is_empty():
+		var shrunk: WallLayout.Wall = step["wall"]
+		var new_grid: Rect2i = step["grid"]
+		var new_edge := WallLayout.area(new_grid, gap, shrunk.sizes).end.x
+		_check(new_grid == grid and near.call(new_edge, edge - third - gap), "уменьшение справа: край ушёл на треть клетки и щель")
+		_check(shrunk.splits.get("1,0") == "c2" and near.call(shrunk.area_of("1,0:0", gap).size.x, third), "уменьшение справа: из трёх третей остались две")
+		_check(near.call(shrunk.area_of("1,1:0", gap).size.x, (WallLayout.CELL.x - gap) * 0.5) and near.call(shrunk.area_of("1,1:1", gap).end.x, new_edge)
+				and near.call(shrunk.area_of("1,1:1", gap).size.x, (WallLayout.CELL.x - gap) * 0.5 - third - gap), "уменьшение справа: половинка стала тоньше")
+		_check(shrunk.area_of("0,0", gap).is_equal_approx(wall.area_of("0,0", gap)) and shrunk.cells == wall.cells, "уменьшение справа: остальное на месте")
+	var blocked := wall.copy()
+	blocked.parts = {"n": "1,0:2"}
+	_check(WallLayout.shrunk(blocked, grid, Vector2i(1, 0), gap).is_empty(), "уменьшение: экран в полосе — край стоит")
+	blocked.parts = {"n": "1,1:1"}
+	_check(WallLayout.shrunk(blocked, grid, Vector2i(1, 0), gap).is_empty(), "уменьшение: полоса задевает экран — край стоит")
+	blocked.parts = {"n": "1,0:0"}
+	_check(not WallLayout.shrunk(blocked, grid, Vector2i(1, 0), gap).is_empty(), "уменьшение: экран не у края — край идёт")
+	var spanning := WallLayout.Wall.new()
+	spanning.cells = {"k": Rect2i(0, 0, 2, 2)}
+	_check(WallLayout.shrunk(spanning, Rect2i(0, 0, 2, 2), Vector2i(1, 0), gap).is_empty(), "уменьшение: экран на 2×2 — край стоит")
+	_check(WallLayout.shrunk(WallLayout.Wall.new(), Rect2i(0, 0, 1, 1), Vector2i(1, 0), gap).is_empty(), "уменьшение: последняя клетка остаётся")
+	var empty_step := WallLayout.shrunk(WallLayout.Wall.new(), Rect2i(0, 0, 3, 1), Vector2i(-1, 0), gap)
+	_check(not empty_step.is_empty() and empty_step["grid"] == Rect2i(1, 0, 2, 1), "уменьшение слева: целый столбец уходит")
+
+	# A joined place over three cells (as B4 of «Стена 1»), a screen in its first part.
+	var joined := WallLayout.Wall.new()
+	joined.blocks = {"B1": "0,0+1,0+2,0"}
+	joined.splits = {"B1": "c6"}
+	joined.parts = {"s": "B1:0"}
+	var screen := joined.area_of("B1:0", gap)
+	var row := Rect2i(0, 0, 3, 1)
+	var steps := 0
+	for i in 8:
+		var next := WallLayout.shrunk(joined, row, Vector2i(1, 0), gap)
+		if next.is_empty():
+			break
+		joined = next["wall"]
+		row = next["grid"]
+		steps += 1
+	_check(steps == 5 and WallLayout.screen_area(joined, "s", gap).is_equal_approx(screen), "уменьшение: соединённое место режется до экрана, экран на месте")
+	_check(near.call(WallLayout.area(row, gap, joined.sizes).end.x, screen.end.x) and row.size.x == 1, "уменьшение: стена кончается у экрана")
+
+	# Left and the top: parts numbered anew, a screen keeps its place in metres.
+	var left := WallLayout.Wall.new()
+	left.splits = {"0,0": "c3"}
+	left.parts = {"a": "0,0:2"}
+	var left_area := left.area_of("0,0:2", gap)
+	var left_step := WallLayout.shrunk(left, Rect2i(0, 0, 1, 1), Vector2i(-1, 0), gap)
+	_check(not left_step.is_empty() and (left_step["wall"] as WallLayout.Wall).parts.get("a") == "0,0:1"
+			and WallLayout.screen_area(left_step["wall"], "a", gap).is_equal_approx(left_area), "уменьшение слева: части перенумерованы, экран на месте")
+	var top := WallLayout.Wall.new()
+	top.splits = {"0,0": "r2"}
+	top.parts = {"a": "0,0:1"}
+	var top_area := top.area_of("0,0:1", gap)
+	var top_step := WallLayout.shrunk(top, Rect2i(0, 0, 1, 1), Vector2i(0, -1), gap)
+	_check(not top_step.is_empty() and (top_step["wall"] as WallLayout.Wall).cells.get("a") == Rect2i(0, 0, 1, 1)
+			and WallLayout.screen_area(top_step["wall"], "a", gap).is_equal_approx(top_area), "уменьшение сверху: из двух строк одна, экран на ней на месте")
+	_check(WallLayout.shrunk(top, Rect2i(0, 0, 1, 1), Vector2i(0, 1), gap).is_empty(), "уменьшение снизу: экран внизу — край стоит")
+	# A cut leaving less than MIN_PART_SIDE: that part goes too.
+	var thin := WallLayout.Wall.new()
+	thin.splits = {"0,0": "r3", "0,1": "r2"}
+	var thin_step := WallLayout.shrunk(thin, Rect2i(0, 0, 1, 2), Vector2i(0, 1), gap)
+	_check(not thin_step.is_empty() and not (thin_step["wall"] as WallLayout.Wall).splits.has("0,1"), "уменьшение: обрезок тоньше 8 см уходит")
+
+	# Growing: a copy of the edge line.
+	var grow := WallLayout.Wall.new()
+	grow.splits = {"1,0": "c3"}
+	grow.sizes = WallLayout.Sizes.new()
+	grow.sizes.set_share(0, 1, 0.65, gap, false)
+	var grown := WallLayout.grown(grow, Rect2i(0, 0, 2, 1), Vector2i(1, 0), gap)
+	var grown_wall: WallLayout.Wall = grown["wall"]
+	_check(grown["grid"] == Rect2i(0, 0, 3, 1) and grown_wall.splits.get("2,0") == "c3" and near.call(grown_wall.sizes.share(0, 2), 0.65)
+			and grown_wall.area_of("1,0", gap).is_equal_approx(grow.area_of("1,0", gap)), "увеличение: копия крайнего столбца с делением")
+	var tall := WallLayout.Wall.new()
+	tall.blocks = {"B1": "1,0+1,1"}
+	tall.splits = {"B1": "r3"}
+	var tall_wall: WallLayout.Wall = WallLayout.grown(tall, Rect2i(0, 0, 2, 2), Vector2i(1, 0), gap)["wall"]
+	_check(tall_wall.blocks.size() == 2 and tall_wall.splits.get("B2") == "r3" and tall_wall.blocks.get("B2") == "2,0+2,1",
+			"увеличение: соединённое место в крайнем столбце копируется")
+	var wide := WallLayout.Wall.new()
+	wide.blocks = {"B1": "0,0+1,0"}
+	wide.splits = {"B1": "c4", "B1:3": "r2"}
+	var wide_wall: WallLayout.Wall = WallLayout.grown(wide, Rect2i(0, 0, 2, 1), Vector2i(1, 0), gap)["wall"]
+	_check(wide_wall.splits.get("2,0") == "r2" and wide_wall.blocks.size() == 1, "увеличение: от широкого места — его край")
+	_check(WallLayout.grown(WallLayout.Wall.new(), Rect2i(0, 0, 1, 1), Vector2i(0, -1), gap)["grid"] == Rect2i(0, -1, 1, 2), "увеличение сверху: строка выше")
+
+	# Kept with the fixture; an old save has none.
+	var fixture := WorldLayout.Fixture.new()
+	fixture.kind = "wall"
+	fixture.sizes = grown_wall.sizes
+	var saved := WorldLayout.Fixture.from_dictionary(fixture.to_dictionary())
+	_check(near.call(saved.sizes.share(0, 2), 0.65) and saved.sizes.shift.is_equal_approx(fixture.sizes.shift), "размеры клеток сохраняются")
+	_check(WorldLayout.Fixture.from_dictionary({"kind": "wall"}).sizes.plain(), "старое сохранение: клетки равные")
+
+
 func _test_wall_split() -> void:
 	# Saved before joined cells were cells of their own: groups become "B<n>".
 	var old := WorldLayout.Fixture.from_dictionary({"kind": "wall", "joins": ["0,0+1,0"], "parts": {"m": "0,0+1,0", "n": "2,0:1"}, "splits": {"2,0": "c2"}})
@@ -2099,6 +2225,17 @@ func _test_work_mode() -> void:
 
 
 func _test_player_pose() -> void:
+	_check(is_equal_approx(WorldLayout.dragged_radius(2.0, 0.5, 0.75), 2.5), "размер проведением: рука на 25 см дальше — радиус на 50 см больше")
+	var gap := WallLayout.DEFAULT_GAP
+	var dragged := WallLayout.dragged_side(WallLayout.Wall.new(), Rect2i(0, 0, 2, 2), Vector2i(1, 0), WallLayout.pitch(gap).x * 3.6, gap)
+	_check(not dragged.is_empty() and (dragged["grid"] as Rect2i).size.x == 4, "размер проведением: край стены за третью клетку — четыре клетки")
+	var holding := WallLayout.Wall.new()
+	holding.cells = {"m": Rect2i(2, 0, 1, 1)}
+	_check(WallLayout.dragged_side(holding, Rect2i(0, 0, 3, 1), Vector2i(1, 0), 0.0, gap).is_empty(), "размер проведением: не меньше экранов")
+	var thirds := WallLayout.Wall.new()
+	thirds.splits = {"1,0": "c3"}
+	var cut := WallLayout.dragged_side(thirds, Rect2i(0, 0, 2, 1), Vector2i(1, 0), WallLayout.area(Rect2i(0, 0, 2, 1), gap).end.x - 0.4, gap)
+	_check(not cut.is_empty() and (cut["wall"] as WallLayout.Wall).splits.get("1,0") == "c2", "размер проведением: на треть клетки внутрь — треть уходит")
 	_check(WorldLayout.seat_options([], -1).is_empty(), "сесть/встать: рядом ничего — ничего")
 	_check(WorldLayout.seat_options([4], -1) == [4], "сесть/встать: одно место — сесть в него")
 	_check(WorldLayout.seat_options([4, 2], -1) == [4, 2], "сесть/встать: два места — выбор, ближнее первым")
