@@ -8,9 +8,22 @@ const LINK_AUTO := 0
 const LINK_CABLE := 1
 const LINK_WIFI := 2
 
+const LIVE_BY_GAZE := 0
+const LIVE_BY_DISTANCE := 1
+const LIVE_BY_RECENT := 2
+## A screen already live keeps its place against a newcomer by this much (26.10.2026:
+## on the edge two took turns every few seconds, each a new connection): radians
+## of the view, metres of distance.
+const LIVE_STICK_ANGLE := 0.17
+const LIVE_STICK_METRES := 0.3
+
 ## Screens decoded at once; the rest keep their last frame. The Quest 3S refused
 ## a 7th 1920×1080 decoder (NO_MEMORY, slice o4); more may work with smaller screens.
 var live_screens := 6
+## Which screens are live (01.11.2026, the user's choice): those nearest to where
+## the user looks (as it was), those nearest to the user, or those the cursor was
+## on last. The one with the cursor is live either way.
+var live_by := LIVE_BY_GAZE
 ## How the headset reaches the PC: either way, only the USB cable (adb reverse,
 ## which the PC's link server sets up itself), or only Wi-Fi.
 var link_mode := LINK_AUTO
@@ -40,3 +53,30 @@ static var settings_saved := Callable()
 
 static func link_mode_name(mode: int) -> String:
 	return ["кабель или Wi-Fi", "только кабель", "только Wi-Fi"][clampi(mode, 0, 2)]
+
+
+## The screens to keep live, best first, at most `count`: each entry {"key",
+## "angle" (from where the user looks, radians), "distance" (m), "live" (decoded
+## now), "last" (ms the cursor was last on it, 0 never)} ranked by `by` (LIVE_BY_…);
+## `cursor` (the screen with the cursor) first.
+static func live_order(entries: Array, by: int, count: int, cursor := "") -> PackedStringArray:
+	var ranked: Array = []
+	for entry: Dictionary in entries:
+		var score := 0.0
+		match by:
+			LIVE_BY_DISTANCE:
+				score = float(entry["distance"]) - (LIVE_STICK_METRES if entry["live"] else 0.0)
+			LIVE_BY_RECENT:
+				# The latest first; never seen ones after them, by the view.
+				var last := int(entry["last"])
+				score = -float(last) if last > 0 else 1e12 + float(entry["angle"])
+			_:
+				score = float(entry["angle"]) - (LIVE_STICK_ANGLE if entry["live"] else 0.0)
+		if entry["key"] == cursor:
+			score = -INF
+		ranked.append([score, entry["key"]])
+	ranked.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+	var result := PackedStringArray()
+	for i in mini(count, ranked.size()):
+		result.append(ranked[i][1])
+	return result

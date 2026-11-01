@@ -312,3 +312,49 @@ static func _vertical_overlap(a: Rect2i, b: Rect2i) -> int:
 
 static func _centre(rect: Rect2i) -> Vector2:
 	return Vector2(rect.position) + Vector2(rect.size) * 0.5
+
+
+## The Windows layout kept between runs (the user's wish, 01.11.2026: after Windows
+## restarted, the driver's screens came up in a row): monitor key -> Rect2i, as
+## stored ([x, y, width, height] per key) and back.
+static func stored_layout(layout: Dictionary) -> Dictionary:
+	var stored := {}
+	for key: String in layout:
+		var rect: Rect2i = layout[key]
+		stored[key] = [rect.position.x, rect.position.y, rect.size.x, rect.size.y]
+	return stored
+
+
+static func layout_from(stored: Variant) -> Dictionary:
+	var layout := {}
+	if stored is Dictionary:
+		for key: Variant in stored:
+			var value: Variant = stored[key]
+			if value is Array and value.size() == 4:
+				layout[str(key)] = Rect2i(int(value[0]), int(value[1]), int(value[2]), int(value[3]))
+	return layout
+
+
+## Where the monitors `now` (key -> Rect2i) go to stand as in `known`: key ->
+## position, only if they are the same monitors with the same sizes and some
+## stands elsewhere; else {}.
+static func put_back(known: Dictionary, now: Dictionary) -> Dictionary:
+	if known.size() != now.size() or not same_sizes(known, now):
+		return {}
+	var positions := {}
+	var moved := false
+	for key: String in now:
+		var was: Rect2i = known[key]
+		positions[key] = was.position
+		moved = moved or was.position != (now[key] as Rect2i).position
+	return positions if moved else {}
+
+
+## Whether `known` and `now` (key -> Rect2i) have the same monitors and sizes.
+static func same_sizes(known: Dictionary, now: Dictionary) -> bool:
+	if known.size() != now.size():
+		return false
+	for key: String in now:
+		if not known.has(key) or (known[key] as Rect2i).size != (now[key] as Rect2i).size:
+			return false
+	return true

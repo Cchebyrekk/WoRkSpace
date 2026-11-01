@@ -31,6 +31,7 @@ func _init() -> void:
 	_test_wall_layout()
 	_test_wall_split()
 	_test_wall_resize()
+	_test_kept_layout_and_live()
 	_test_column_and_lean()
 	_test_place_network()
 	_test_desktop_groups()
@@ -1493,6 +1494,34 @@ static func _split_wall(splits: Dictionary) -> WallLayout.Wall:
 	var wall := WallLayout.Wall.new()
 	wall.splits = splits
 	return wall
+
+
+## The Windows layout kept between runs; which screens are live (01.11.2026).
+func _test_kept_layout_and_live() -> void:
+	var known := {"a": Rect2i(0, 0, 1920, 1080), "b": Rect2i(-1920, 0, 1920, 1080), "c": Rect2i(0, 1080, 4632, 3576)}
+	_check(LayoutEdit.layout_from(LayoutEdit.stored_layout(known)) == known, "раскладка Windows: сохраняется и читается")
+	var row := {"a": Rect2i(1920, 0, 1920, 1080), "b": Rect2i(0, 0, 1920, 1080), "c": Rect2i(3840, 0, 4632, 3576)}
+	var back := LayoutEdit.put_back(known, row)
+	_check(back.get("a") == Vector2i(0, 0) and back.get("b") == Vector2i(-1920, 0) and back.get("c") == Vector2i(0, 1080),
+			"раскладка Windows: после перезапуска в ряд — обратно как была")
+	_check(LayoutEdit.put_back(known, known).is_empty(), "раскладка Windows: как была — ничего не делать")
+	var smaller := row.duplicate()
+	smaller["c"] = Rect2i(3840, 0, 1920, 1080)
+	_check(LayoutEdit.put_back(known, smaller).is_empty() and not LayoutEdit.same_sizes(known, smaller), "раскладка Windows: разрешения ещё не те — ждать")
+	var other := {"a": Rect2i(0, 0, 1920, 1080), "d": Rect2i(1920, 0, 1920, 1080), "c": Rect2i(0, 1080, 4632, 3576)}
+	_check(LayoutEdit.put_back(known, other).is_empty(), "раскладка Windows: другие экраны — не трогать")
+
+	var entries := [
+		{"key": "ahead", "angle": 0.1, "distance": 3.0, "live": false, "last": 0},
+		{"key": "near", "angle": 1.5, "distance": 0.8, "live": false, "last": 0},
+		{"key": "used", "angle": 2.5, "distance": 5.0, "live": false, "last": 5000},
+		{"key": "older", "angle": 2.0, "distance": 4.0, "live": true, "last": 1000},
+	]
+	_check(HeadsetOptions.live_order(entries, HeadsetOptions.LIVE_BY_GAZE, 2) == PackedStringArray(["ahead", "near"]), "живые экраны: куда смотрю")
+	_check(HeadsetOptions.live_order(entries, HeadsetOptions.LIVE_BY_DISTANCE, 2) == PackedStringArray(["near", "ahead"]), "живые экраны: ближайшие")
+	_check(HeadsetOptions.live_order(entries, HeadsetOptions.LIVE_BY_RECENT, 3) == PackedStringArray(["used", "older", "ahead"]),
+			"живые экраны: где недавно был курсор, потом по взгляду")
+	_check(HeadsetOptions.live_order(entries, HeadsetOptions.LIVE_BY_DISTANCE, 1, "used") == PackedStringArray(["used"]), "живые экраны: с курсором — всегда")
 
 
 ## A wall's side made smaller by its thinnest places, bigger by a copy of its edge (01.11.2026).

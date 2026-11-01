@@ -178,6 +178,7 @@ const TUNABLES := [
 	["world", "render_radius", "Радиус отрисовки экранов", 1.0, "м", 1.0, 0.0, 100.0],
 	["headset", "work_mode", "Режим работы", 1.0, "", 1.0, 0.0, 2.0],
 	["headset", "live_screens", "Живых экранов", 1.0, "", 1.0, 1.0, 16.0],
+	["headset", "live_by", "Живые экраны", 1.0, "", 1.0, 0.0, 2.0],
 	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 2.0],
 	["headset", "video_mbps", "Битрейт экрана", 1.0, "Мбит/с", 2.0, 2.0, 60.0],
 	["headset", "video_fps", "Кадров в секунду", 1.0, "", 6.0, 30.0, 90.0],
@@ -240,7 +241,7 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"work_mode": 3, "live_screens": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3, "passthrough": 3,
+	"work_mode": 3, "live_screens": 3, "live_by": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "video_stats": 3, "pc_sound": 3, "passthrough": 3,
 	"grab_mode": 8, "move_mode": 8, "magnet": 8, "tilt_mode": 8, "monitor_menu": 8,
 	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "wall_resolution": 8, "outlines": 8, "sphere_handle": 8, "wall_size_handle": 8, "wall_bend_handle": 8, "wall_tilt_handle": 8, "split_handle": 8, "handles_mode": 8, "size_drag": 8,
 	"vignette": 8, "grid": 8, "grid_step": 8, "status_line": 2, "keyboard_bars": 2, "keyboard_click": 2, "hand_dots": 2, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
@@ -672,6 +673,14 @@ var _panel_positions := {}
 var _panel_options := PanelOptions.new()
 ## A layout to send to Windows once the one being applied is done.
 var _queued_positions := {}
+## The Windows layout last seen settled (monitor key -> Rect2i), kept in
+## settings.cfg: when Windows starts anew its driver's screens come up in a row
+## (01.11.2026), and if nothing else lays Windows out (by groups), it is put back.
+var _windows_layout := {}
+## Until the layout at start is put back (or found as it was), the one seen is not kept;
+## when the first look began (ms), as resolutions by cells may take a while.
+var _windows_layout_checked := false
+var _windows_layout_since := -1
 ## Tilt per monitor name and per row (key: row from the primary's, as a string),
 ## in radians; neither = facing the eye. Curvature per monitor name, 0..1.
 var _panel_pitches := {}
@@ -1141,6 +1150,13 @@ const SQUEEZE_MAGNET_STEP := 0.05
 ## most columns or rows a wall gets.
 const WALL_SIZE_STEPS := Vector2i(12, 8)
 const WALL_MAX_LINES := 40
+## Marked room areas cut the eyes' picture after what is drawn before them (render
+## priority); the radial menu comes after and is not depth-tested, so it stays
+## whole over them and inside them (01.11.2026: a menu over the desk area was gone,
+## then its part inside the area).
+const AREA_PUNCH_PRIORITY := 100
+## How long at start the Windows layout waits for the screens' sizes to be as they were.
+const WINDOWS_LAYOUT_WAIT_MS := 90000
 ## The size pad of a wall held now: its columns and rows when it came up, the
 ## steps taken since, and the way (+1/-1 each) a step could not go from there
 ## (not tried again every frame until a step goes).
@@ -1418,6 +1434,8 @@ func _process(delta: float) -> void:
 		return
 	_update_work_mode_switch(delta)
 	_remember_pose()
+	if _remote != null:
+		_remote.cursor_key = _pointers[_cursor_owner].panel.monitor_key if _cursor_owner >= 0 and _cursor_owner < _pointers.size() 				and _pointers[_cursor_owner].panel != null else _remote.cursor_key
 	_update_startup_probe(delta)
 	_update_first_recenter(delta)
 	_update_shader_warm_up()
@@ -2355,12 +2373,13 @@ func _hand_dots_shown(pointer: Pointer) -> bool:
 
 
 ## The areas' own hole in the eyes' picture: multiplied by 0 (colour and alpha),
-## front faces only, after everything else.
+## front faces only, after everything but the radial menu (AREA_PUNCH_PRIORITY);
+## writing no depth (01.11.2026: the menu's part inside an area was gone behind it).
 func _area_punch_material() -> ShaderMaterial:
 	if _area_punch == null:
 		var shader := Shader.new()
 		shader.code = "shader_type spatial;
-render_mode blend_mul, unshaded, cull_back, shadows_disabled;
+render_mode blend_mul, unshaded, cull_back, shadows_disabled, depth_draw_never;
 void fragment() {
 	ALBEDO = vec3(0.0);
 	ALPHA = 0.0;
@@ -2368,7 +2387,7 @@ void fragment() {
 "
 		_area_punch = ShaderMaterial.new()
 		_area_punch.shader = shader
-		_area_punch.render_priority = Material.RENDER_PRIORITY_MAX
+		_area_punch.render_priority = AREA_PUNCH_PRIORITY
 	return _area_punch
 
 
@@ -5222,6 +5241,48 @@ func _rebuild_panels() -> void:
 	_apply_group_windows()
 	# «Разрешение по клетке» goes one screen at a time: the next after each rebuild.
 	_apply_wall_resolutions()
+	_keep_windows_layout()
+
+
+## The Windows layout kept between runs: at start put back as it was if Windows
+## came up otherwise (the same monitors; once their sizes are as they were — the
+## resolutions by cells come first — or given up after WINDOWS_LAYOUT_WAIT_MS);
+## after that every settled layout is kept. Not where the layout follows the
+## groups in VR (_apply_group_windows lays it out itself).
+func _keep_windows_layout() -> void:
+	if _panels.is_empty() or _topology.busy or not _layout_pending.is_empty():
+		return
+	var now := {}
+	for panel in _panels:
+		now[panel.monitor_key] = panel.monitor_rect
+	if not _windows_layout_checked:
+		if _windows_layout_since < 0:
+			_windows_layout_since = Time.get_ticks_msec()
+		var by_groups := not _windows_moves()
+		if by_groups:
+			by_groups = false
+			for fixture in _fixtures:
+				by_groups = by_groups or not _fixture_free(fixture)
+		if not by_groups and not _windows_layout.is_empty():
+			var back := LayoutEdit.put_back(_windows_layout, now)
+			if back.is_empty() and not LayoutEdit.same_sizes(_windows_layout, now) 					and _windows_layout.size() == now.size() and Time.get_ticks_msec() - _windows_layout_since < WINDOWS_LAYOUT_WAIT_MS:
+				return
+			if not back.is_empty():
+				_windows_layout_checked = true
+				var positions := {}
+				var rects: Array[Rect2i] = []
+				for panel in _panels:
+					positions[panel.monitor_name] = back[panel.monitor_key]
+					rects.append(Rect2i(back[panel.monitor_key], panel.monitor_rect.size))
+				print("[screens] раскладка Windows как до перезапуска: %s" % positions)
+				_layout_pending = rects
+				_vdd_message = "раскладка Windows — как была…"
+				_topology.arrange(positions)
+				return
+		_windows_layout_checked = true
+	if now != _windows_layout:
+		_windows_layout = now
+		_save_settings()
 
 
 ## Puts the panels on an arc around the user, mirroring the Windows layout, or
@@ -7367,6 +7428,7 @@ func _load_settings() -> void:
 	for tunable: Array in TUNABLES:
 		var target := _tunable_target(tunable[0])
 		target.set(tunable[1], config.get_value(tunable[0], tunable[1], target.get(tunable[1])))
+	_windows_layout = LayoutEdit.layout_from(config.get_value("panels", "windows_layout", {}))
 	var arrangements: Variant = config.get_value("panels", "arrangements", {})
 	if arrangements is Dictionary:
 		var identity := {}
@@ -7455,6 +7517,7 @@ func _save_settings() -> void:
 		config.set_value(tunable[0], tunable[1], _tunable_target(tunable[0]).get(tunable[1]))
 	_arrangements[_mode_key()] = _own_arrangement()
 	config.set_value("panels", "arrangements", _arrangements)
+	config.set_value("panels", "windows_layout", LayoutEdit.stored_layout(_windows_layout))
 	config.set_value("layouts", "slots", _layout_slots)
 	config.set_value("poses", "custom", _custom_poses.map(func(t: HandPose.Template) -> Dictionary: return t.to_dictionary()))
 	config.set_value("poses", "next", _next_custom_pose)
@@ -8779,8 +8842,10 @@ func _build_rig() -> void:
 			label.outline_size = 8
 			label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 			# Over the background disc: transparent things are otherwise sorted by distance.
-			label.render_priority = 2
-			label.outline_render_priority = 1
+			label.render_priority = AREA_PUNCH_PRIORITY + 3
+			label.outline_render_priority = AREA_PUNCH_PRIORITY + 2
+			# Inside a marked area too: what is behind the area's front fails the depth test.
+			label.no_depth_test = true
 			label.visible = false
 			add_child(label)
 			_menu_labels[i].append(label)
@@ -8792,7 +8857,8 @@ func _build_rig() -> void:
 		background_mesh.radial_segments = 48
 		var background_material := _flat_material(MENU_BACKGROUND_COLOR)
 		background_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		background_material.render_priority = -1
+		background_material.render_priority = AREA_PUNCH_PRIORITY + 1
+		background_material.no_depth_test = true
 		var background := MeshInstance3D.new()
 		background.mesh = background_mesh
 		background.material_override = background_material
@@ -9434,6 +9500,8 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return "да" if value >= 0.5 else "нет, только отмеченное"
 	elif tunable[1] == "pc_sound":
 		return "да" if value >= 0.5 else "нет (в «OpenXR на ПК» звук даёт Link)"
+	elif tunable[1] == "live_by":
+		return ["куда смотрю", "ближайшие ко мне", "где недавно был курсор"][clampi(roundi(value), 0, 2)]
 	elif tunable[1] == "live_screens":
 		return "%d (больше 6 — проверить)" % roundi(value) if value > 6.5 else "%d" % roundi(value)
 	elif tunable[1] == "handles_mode":

@@ -9,11 +9,6 @@ extends RefCounted
 ## Without the world's settings yet (HeadsetOptions.live_screens is the user's).
 const DEFAULT_LIVE := 6
 const LIVE_CHECK_SEC := 0.3
-## A live panel keeps its place until another is this much nearer the gaze
-## (radians, 10°): on the edge two panels took turns every few seconds, each
-## time a new connection and a key frame (26.10.2026).
-const LIVE_STICKINESS := 0.17
-
 ## com.workplace.headset.VideoReceiver, null off Android.
 var _receiver: Variant = null
 ## Monitor key -> {"layer" (the node it is shown on: an OpenXR layer, or the
@@ -22,6 +17,10 @@ var _receiver: Variant = null
 var _attached: Dictionary = {}
 var _next_id := 1
 var _live: Dictionary = {}
+## Screen key -> when the cursor was last on it (ms; HeadsetOptions.LIVE_BY_RECENT).
+var _last_active: Dictionary = {}
+var _live_logged := ""
+var _no_surface_logged := {}
 var _next_live_check := 0.0
 ## The stream list the attached receivers were started for (a new one restarts them).
 var _videos_serial := -1
@@ -131,6 +130,9 @@ func poll(now: float, camera: Camera3D) -> void:
 		else:
 			var surface: Variant = (node as OpenXRCompositionLayer).get_android_surface()
 			if surface == null:
+				if not _no_surface_logged.has(key):
+					_no_surface_logged[key] = true
+					print("[video] %s: у слоя ещё нет поверхности Android — жду" % key)
 				continue
 			_receiver.start(screen["id"], surface, PcLink.link.pc_address, port)
 		screen["started"] = true
@@ -202,24 +204,27 @@ func _stop(screen: Dictionary) -> void:
 func _choose_live(camera: Camera3D) -> void:
 	var forward := -camera.global_basis.z
 	var eye := camera.global_position
-	var ranked: Array = []
+	var now := Time.get_ticks_msec()
+	if _attached.has(PcLink.cursor_key):
+		_last_active[PcLink.cursor_key] = now
+	var entries: Array = []
 	for key: String in _attached:
 		var node: Node3D = _attached[key]["layer"]
 		if is_instance_valid(node):
-			var angle := forward.angle_to(node.global_position - eye)
-			if _attached[key]["started"]:
-				angle -= LIVE_STICKINESS
-			if key == PcLink.cursor_key:
-				angle = -INF
-			ranked.append([angle, key])
-	ranked.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+			entries.append({"key": key, "angle": forward.angle_to(node.global_position - eye), "distance": eye.distance_to(node.global_position),
+					"live": _attached[key]["started"], "last": int(_last_active.get(key, 0))})
+	var by := HeadsetOptions.current.live_by if HeadsetOptions.current != null else HeadsetOptions.LIVE_BY_GAZE
 	_live.clear()
 	var wanted := HeadsetOptions.current.live_screens if HeadsetOptions.current != null else DEFAULT_LIVE
 	if wanted != _limit_for_setting:
 		_limit_for_setting = wanted
 		_decoder_limit = 1 << 30
-	for i in mini(mini(wanted, _decoder_limit), ranked.size()):
-		_live[ranked[i][1]] = true
+	for key in HeadsetOptions.live_order(entries, by, mini(wanted, _decoder_limit), PcLink.cursor_key):
+		_live[key] = true
+	var chosen := "%d %s: %s" % [by, PcLink.cursor_key, ", ".join(PackedStringArray(_live.keys()))]
+	if chosen != _live_logged:
+		_live_logged = chosen
+		print("[video] живые (способ, курсор: экраны) %s" % chosen)
 	for key: String in _attached:
 		if not _live.has(key):
 			_stop(_attached[key])

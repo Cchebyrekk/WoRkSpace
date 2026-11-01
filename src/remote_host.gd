@@ -47,6 +47,9 @@ const MIPMAP_BIAS := -0.7
 var xr := RemoteXR.new()
 ## main.gd's panels (set by it every frame).
 var panels: Array[ScreenPanel] = []
+## The screen the cursor is on (main.gd), live always; when it was on each (ms).
+var cursor_key := ""
+var _last_active := {}
 
 var _discovery := PacketPeerUDP.new()
 var _server := TCPServer.new()
@@ -302,20 +305,23 @@ func _update_sound(now: float) -> void:
 
 
 func _choose_live() -> void:
-	var ranked: Array = []
+	var now := Time.get_ticks_msec()
+	if cursor_key != "":
+		_last_active[cursor_key] = now
+	var entries: Array = []
 	for panel in panels:
 		if panel.remote_layer().is_empty() or not _screen_streamers.has(panel.monitor_key):
 			continue
 		var origin := panel.layer.get_parent() as Node3D
 		var head := origin.global_transform * xr.head
-		var angle := (-head.basis.z).angle_to(panel.placement.transform.origin - head.origin)
-		if _live.has(panel.monitor_key):
-			angle -= LIVE_STICKINESS
-		ranked.append([angle, panel.monitor_key])
-	ranked.sort_custom(func(a: Array, b: Array) -> bool: return a[0] < b[0])
+		var towards := panel.placement.transform.origin - head.origin
+		entries.append({"key": panel.monitor_key, "angle": (-head.basis.z).angle_to(towards) - (LIVE_STICKINESS - HeadsetOptions.LIVE_STICK_ANGLE
+				if _live.has(panel.monitor_key) else 0.0), "distance": towards.length(), "live": _live.has(panel.monitor_key),
+				"last": int(_last_active.get(panel.monitor_key, 0))})
+	var by := HeadsetOptions.current.live_by if HeadsetOptions.current != null else HeadsetOptions.LIVE_BY_GAZE
 	_live.clear()
-	for i in mini(LIVE_SCREENS, ranked.size()):
-		_live[ranked[i][1]] = true
+	for key in HeadsetOptions.live_order(entries, by, LIVE_SCREENS, cursor_key):
+		_live[key] = true
 
 
 func _start_screens() -> void:
