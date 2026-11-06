@@ -33,6 +33,11 @@ var video_mbps := 12.0
 var video_fps := 60
 ## Extra tangent coverage for PC VR games, percent. Applied on next game link.
 var game_fov_percent := 0.0
+## PC VR quality, applied when SteamVR next starts / the headset reconnects.
+var game_bitrate_mbps := 90
+var game_render_percent := 140
+var game_queue_frames := 6
+var game_buffer_frames := 1
 ## A line under the view: the latency from the PC's capture to the decoder, and
 ## what the PC's encoder and the headset's decoders take.
 var video_stats := 0

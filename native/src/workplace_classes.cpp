@@ -105,6 +105,7 @@ void GameBridge::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("take_haptics"), &GameBridge::take_haptics);
 	ClassDB::bind_method(D_METHOD("write_hands", "hands"), &GameBridge::write_hands);
 	ClassDB::bind_method(D_METHOD("get_driver"), &GameBridge::get_driver);
+	ClassDB::bind_method(D_METHOD("set_game_profile", "profile"), &GameBridge::set_game_profile);
 }
 
 namespace {
@@ -239,6 +240,7 @@ void GameBridge::write_hands(const Array &hands) {
 		float distance=world[5].origin.distance_to(world[10].origin);
 		bool pressed=link->hand_trigger[h]>0.5f;
 		link->hand_trigger[h]=(distance < (pressed?0.035f:0.025f))?1.0f:0.0f;
+		if(bool(data.get("ui_capture",false))) link->hand_trigger[h]=0;
 		const int tips[]={5,10,15,20,25};
 		for(int i=0;i<5;i++) world[26+i]=world[tips[i]];
 		for(int j=0;j<31;j++) {
@@ -269,6 +271,11 @@ Array GameBridge::take_haptics() {
 	return result;
 }
 
+void GameBridge::set_game_profile(int64_t profile) {
+	if(profile!=0 && profile!=1) return;
+	if(auto *link=game_link()) link->game_profile.store(static_cast<int32_t>(profile));
+}
+
 Dictionary GameBridge::get_driver() const {
 	Dictionary result;
 	workplace::GameLink *link = game_link();
@@ -277,6 +284,7 @@ Dictionary GameBridge::get_driver() const {
 	}
 	uint64_t beat = link->driver_beat_us.load();
 	uint64_t now = workplace::StreamBackend::clock_us();
+	result["clock_us"] = static_cast<int64_t>(now);
 	result["alive"] = beat != 0 && now >= beat && now - beat < 2'000'000;
 	result["port"] = static_cast<int64_t>(link->eyes_port.load());
 	result["width"] = static_cast<int64_t>(link->eyes_width.load());

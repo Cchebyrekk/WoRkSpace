@@ -14,11 +14,13 @@ function In-Games {
     return (!(Test-Path $StopFile) -and (Get-Content $ModeFile -ErrorAction SilentlyContinue | Select-Object -First 1) -eq '3')
 }
 function Reverse-Usb {
+	if (!(In-Games)) { return }
     if (!(Test-Path $Adb)) { return }
     foreach ($line in ((Adb-Call 'devices') -split "`n")) {
-        if ($line -match '^([A-Za-z0-9_-]+)\s+device$') {
+        if ($line.Trim() -match '^([A-Za-z0-9_-]+)\s+device$') {
             $serial = $Matches[1]
             foreach ($port in @(47902,47903,47920)) {
+				if (!(In-Games)) { return }
                 Adb-Call "-s $serial reverse tcp:$port tcp:$port" | Out-Null
             }
         }

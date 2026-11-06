@@ -95,12 +95,13 @@ public:
 	// device is made on the adapter with `adapter_luid`. Same stream as the eyes'
 	// (HEVC, pose ids).
 	virtual bool start_shared(uint64_t adapter_luid, void *first_texture, int32_t port, int32_t bitrate_kbps, int32_t fps,
-			std::string &error) = 0;
+			std::string &error, int32_t max_in_air = 6) = 0;
 	// Copies the presented texture at once (the compositor draws into it again
 	// soon) and has it encoded. shared_wait blocks until the copy is done on the
 	// GPU, at most `timeout_ms` (IVRVirtualDisplay::WaitForPresent).
-	virtual void shared_submit(void *texture, uint32_t pose_id) = 0;
+	virtual void shared_submit(void *texture, uint32_t pose_id, uint64_t pose_written_us) = 0;
 	virtual void shared_wait(int32_t timeout_ms) = 0;
+	virtual void set_queue_limit(int32_t frames) = 0;
 	virtual void stop() = 0;
 	virtual bool running() const = 0;
 	virtual StreamStats stats() const = 0;

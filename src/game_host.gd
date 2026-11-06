@@ -35,6 +35,8 @@ var _next_log := 0.0
 var _driver_wait_since := -1.0
 var _had_vr_app := false
 var _app_closed_since := -1.0
+var _leaving := false
+var _profile := 1
 
 
 func _ready() -> void:
@@ -42,6 +44,10 @@ func _ready() -> void:
 	_bridge = ClassDB.instantiate(&"GameBridge")
 	if _bridge == null or not _bridge.open():
 		print("[games] нет связи с драйвером SteamVR: ", "" if _bridge == null else _bridge.get_last_error())
+	var config := ConfigFile.new()
+	config.load("user://settings.cfg")
+	var saved_profile := 0 if int(config.get_value("headset", "game_queue_frames", 3)) == 6 else 1
+	_profile = clampi(int(config.get_value("headset", "game_ab_profile", saved_profile)), 0, 1)
 	var error := _discovery.bind(LinkProtocol.REMOTE_DISCOVERY_PORT)
 	print("[games] поиск: порт UDP %d %s" % [LinkProtocol.REMOTE_DISCOVERY_PORT, "слушаю" if error == OK else "занят (%d)" % error])
 	error = _server.listen(LinkProtocol.REMOTE_CONTROL_PORT)
@@ -49,6 +55,8 @@ func _ready() -> void:
 
 
 func _process(_delta: float) -> void:
+	if _leaving:
+		return
 	var now := Time.get_ticks_msec() / 1000.0
 	_answer_searches()
 	if _server.is_connection_available():
@@ -146,9 +154,25 @@ func _serve(now: float) -> void:
 				var ray := {}
 				for key: String in config.get_section_keys("ray"):
 					ray[key] = config.get_value("ray", key)
-				_send({"t": "games", "fov_percent": clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0.0, 100.0), "ray": ray})
+				_send({"t": "games", "fov_percent": clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0.0, 100.0), "ray": ray,
+					"buffer_frames": clampi(int(config.get_value("headset", "game_buffer_frames", 1)), 0, 2), "ab_profile": _profile})
+			"game_profile":
+				_profile = int(message["profile"])
+				_bridge.set_game_profile(_profile)
+				var config := ConfigFile.new()
+				config.load("user://settings.cfg")
+				config.set_value("headset", "game_ab_profile", _profile)
+				config.set_value("headset", "game_queue_frames", 6 if _profile == 0 else 3)
+				config.set_value("headset", "game_buffer_frames", 1)
+				config.save("user://settings.cfg")
+				print("[q4-ab] профиль ", _profile)
+				_send({"t": "game_profile", "profile": _profile})
 			"tracking":
 				tracking = message
+			"game_metrics":
+				for key: String in ["video", "layer", "pacing"]:
+					if message[key] is String:
+						print("[q4-%s] %s" % [key, message[key].substr(0, 4096)])
 			"ping":
 				_send(LinkProtocol.pong(message["time"]))
 			"bye":
@@ -162,6 +186,8 @@ func _serve(now: float) -> void:
 	# field of view of the other mode (less margin): SteamVR kept the first it
 	# was given and drew with it all along (04.11.2026).
 	if not tracking.is_empty() and _bridge != null and tracking.get("game", false):
+		if _tracking_count % 10 == 0 and tracking.get("sent_us", 0) is int and int(tracking.get("sent_us", 0)) > 0:
+			_send({"t": "pose_ack", "sent_us": tracking.get("sent_us", 0), "received_us": _bridge.get_driver().get("clock_us", 0)})
 		_bridge.write_head(tracking["id"], tracking["head"], tracking["head_ok"], tracking["eyes"], tracking["fov"])
 		_bridge.write_controllers(tracking["controllers"])
 		_bridge.write_hands(tracking["hands"])
@@ -235,12 +261,17 @@ func _drop(why: String) -> void:
 ## stays is ended a few seconds later, the link server comes back (world in the
 ## headset) and this ends. The headset app follows by itself (headset_root.gd).
 func _leave_games() -> void:
+	if _leaving:
+		return
+	_leaving = true
 	print("[games] завершаю игровую сессию, возвращаю предыдущий режим")
-	_send({"t": "bye"})
+	var previous := WorkMode.parse(FileAccess.get_file_as_string(WorkMode.file_path().get_base_dir().path_join("before_games.txt")))
+	if previous < 0 or previous >= WorkMode.PC_GAMES:
+		previous = WorkMode.HEADSET_WORLD
+	_send({"t": "games_leaving", "mode": previous})
 	if WorkMode.parse(FileAccess.get_file_as_string(WorkMode.file_path())) == WorkMode.PC_GAMES:
-		var previous := WorkMode.parse(FileAccess.get_file_as_string(WorkMode.file_path().get_base_dir().path_join("before_games.txt")))
-		WorkMode.write(previous if previous >= 0 and previous < WorkMode.PC_GAMES else WorkMode.HEADSET_WORLD)
-		get_tree().quit()
+		WorkMode.write(previous)
+		get_tree().create_timer(0.15).timeout.connect(get_tree().quit)
 		return
 	OS.create_process("taskkill.exe", ["/IM", "vrmonitor.exe"])
 	OS.create_process("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command",

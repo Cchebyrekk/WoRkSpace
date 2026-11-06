@@ -128,6 +128,7 @@ public:
 	// eyes: two Transform3D relative to the head; fov: two Vector4 of tangents
 	// (left, right, down, up), as the headset's `tracking` has them.
 	void write_head(int64_t p_pose_id, const Transform3D &p_head, bool p_head_ok, const Array &p_eyes, const Array &p_fov);
+	void set_game_profile(int64_t profile);
 	void write_controllers(const Array &p_controllers);
 	Array take_haptics();
 	void write_hands(const Array &p_hands);

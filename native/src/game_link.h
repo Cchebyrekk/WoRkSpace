@@ -12,11 +12,11 @@
 
 namespace workplace {
 
-constexpr const wchar_t *GAME_LINK_MAPPING = L"Local\\WoRkPlaceGameLinkV6";
+constexpr const wchar_t *GAME_LINK_MAPPING = L"Local\\WoRkPlaceGameLinkV7";
 // Set by the host after each new pose: the driver's pose thread waits on it.
 constexpr const wchar_t *GAME_LINK_EVENT = L"Local\\WoRkPlaceGameLinkPose";
 constexpr uint32_t GAME_LINK_MAGIC = 0x57524b47; // "WRKG"
-constexpr uint32_t GAME_LINK_VERSION = 6;
+constexpr uint32_t GAME_LINK_VERSION = 7;
 
 // Godot's and OpenVR's spaces agree (right-handed, Y up, -Z forward, metres).
 struct GameTransform {
@@ -53,6 +53,7 @@ struct GameLink {
 	// Host → driver. A seqlock: odd while the host writes; a reader copies and
 	// keeps the copy only if the number is even and the same before and after.
 	std::atomic<uint32_t> sequence;
+	std::atomic<int32_t> game_profile{-1}; // -1 custom, 0 original, 1 q4 comparison
 	uint32_t headset; // 1 while a headset is connected
 	uint32_t pose_id; // the headset's pose number (the eyes' stream tags pictures with it)
 	uint32_t head_ok;

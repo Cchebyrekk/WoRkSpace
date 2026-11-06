@@ -2,10 +2,14 @@ package com.workplace.headset;
 
 import android.graphics.ImageFormat;
 import android.hardware.HardwareBuffer;
+import android.hardware.SyncFence;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Build;
 import android.view.Surface;
 
 import java.io.BufferedInputStream;
@@ -68,10 +72,13 @@ public final class VideoReceiver {
 	private static final long WARMUP_NS = 1_500_000_000L;
 	private volatile int width;
 	private volatile int height;
+	private volatile int videoVersion;
 	/** The decoder could not be made or started (the Quest ran out of decoders), not the network. */
 	private volatile boolean decoderFailed;
 	/** Texture mode (surface null): where the decoder puts frames, and the frames held. */
 	private ImageReader reader;
+	private HandlerThread imageThread;
+	private final Object imageReady = new Object();
 	private Image frame;
 	private Image previousFrame;
 	private long framePointer;
@@ -81,7 +88,13 @@ public final class VideoReceiver {
 	 * textureFrame returned last.
 	 */
 	private final TreeMap<Long, Integer> posesByTime = new TreeMap<>();
+	private final TreeMap<Long, long[]> timingsByTime = new TreeMap<>();
+	private final FrameTimings timings = new FrameTimings();
+	private long lastTakenNs;
+	private int pendingPeak;
 	private volatile int framePose;
+	private volatile long frameTimeUs;
+	private volatile long frameCapturedUs;
 	/**
 	 * The decoder's buffer, which can be wider than the picture (3680 for 3664,
 	 * 30.10.2026): sampled whole, the picture shrank towards its left edge.
@@ -99,15 +112,19 @@ public final class VideoReceiver {
 	 * them still vanished on the way to it when two came close together (716 out
 	 * of the decoder, 585 shown). So paced frames wait in the decoder (pending:
 	 * output buffer indices) and each Godot frame releases one to the reader and
-	 * takes the one released the frame before: one frame more latency, none lost;
-	 * over PENDING_MAX waiting, the oldest are dropped. Counted for pacingReport.
+	 * originally took the one released the frame before. q4 releases it before
+	 * acquiring, waits at most 1 ms for ImageReader notification and checks the
+	 * producer fence on API 33+: no forced extra display frame. Older Android
+	 * retains the previous ordering. Excess pending buffers are dropped.
 	 */
 	private volatile boolean paced;
+	private volatile boolean comparisonTest = true;
 	private long pacedNew;
 	private long pacedSkipped;
 	private long pacedRepeated;
 	private long reportedReceived;
 	private long reportedShown;
+	private long reportedAtNs = System.nanoTime();
 	/**
 	 * Paced: the decoder's frames are taken by a thread of their own as soon as
 	 * they are out; taken only when the next frame came in from the network,
@@ -118,7 +135,7 @@ public final class VideoReceiver {
 	private final ArrayDeque<Integer> pending = new ArrayDeque<>();
 	private MediaCodec pendingCodec;
 	/** Decoded frames left waiting at most: older ones are dropped (latency). */
-	private static final int PENDING_MAX = 2;
+	private volatile int pendingMax = 2;
 
 	private VideoReceiver() {
 	}
@@ -133,8 +150,20 @@ public final class VideoReceiver {
 
 	/** startTexture, with the frames taken in order, one per call (see paced). */
 	public static synchronized void startTexturePaced(int id, String host, int port) {
-		start(id, null, host, port);
-		receivers.get(id).paced = true;
+		startInternal(id, null, host, port, true);
+	}
+
+	/** Extra decoded frames held behind the next one to release (0 = newest). */
+	public static void configurePacing(int id, int extraFrames) {
+		VideoReceiver receiver = get(id);
+		if (receiver != null) receiver.pendingMax = Math.max(0, Math.min(2, extraFrames)) + 1;
+	}
+
+	public static void configureComparison(int id, int profile) {
+		VideoReceiver receiver = get(id);
+		if(receiver != null) {
+			receiver.comparisonTest = profile != 0;
+		}
 	}
 
 	/** New, skipped and repeated frames of a paced receiver since the last call. */
@@ -146,9 +175,14 @@ public final class VideoReceiver {
 		synchronized (receiver) {
 			long received = receiver.framesReceived;
 			long shown = receiver.framesShown;
+			long now = System.nanoTime();
+			double seconds = Math.max(.001, (now - receiver.reportedAtNs) / 1e9);
 			String report = "принято " + (received - receiver.reportedReceived) + ", из декодера "
 					+ (shown - receiver.reportedShown) + ", показано новых " + receiver.pacedNew + ", пропущено "
 					+ receiver.pacedSkipped + ", без нового " + receiver.pacedRepeated;
+			report += String.format(java.util.Locale.US, "; window=%.3fs received_fps=%.2f decoded_fps=%.2f texture_fps=%.2f", seconds,
+				(received-receiver.reportedReceived)/seconds, (shown-receiver.reportedShown)/seconds, receiver.pacedNew/seconds);
+			receiver.reportedAtNs = now;
 			receiver.reportedReceived = received;
 			receiver.reportedShown = shown;
 			receiver.pacedNew = receiver.pacedSkipped = receiver.pacedRepeated = 0;
@@ -170,6 +204,34 @@ public final class VideoReceiver {
 	public static int textureFramePose(int id) {
 		VideoReceiver receiver = get(id);
 		return receiver == null ? 0 : receiver.framePose;
+	}
+	public static long textureFrameTime(int id) {
+		VideoReceiver receiver = get(id);
+		return receiver == null ? 0 : receiver.frameTimeUs;
+	}
+
+	public static String frameTimings(int id) {
+		VideoReceiver receiver = get(id);
+		if (receiver == null) return "";
+		synchronized (receiver) {
+			String report = receiver.timings.report() + "; pending_peak=" + receiver.pendingPeak
+				+ "; clock_error_ms=" + clockErrorMs + "; wire_version=" + receiver.videoVersion
+				+ "; profile=" + (receiver.comparisonTest ? "test" : "original");
+			receiver.pendingPeak = 0;
+			return report;
+		}
+	}
+
+	public static long monotonicUsec() { return System.nanoTime() / 1000; }
+	public static void recordUplink(int id, long sentUs, long receivedPcUs) {
+		VideoReceiver receiver = get(id);
+		if (receiver != null && clockKnown && sentUs > 0 && receivedPcUs > 0)
+			receiver.timings.add("pose_uplink", (receivedPcUs - sentUs - clockOffsetUs) / 1e3);
+	}
+	public static double textureAgeMs(int id) {
+		VideoReceiver receiver = get(id);
+		if (receiver == null || !clockKnown || receiver.frameCapturedUs == 0) return -1;
+		return (monotonicUsec() + clockOffsetUs - receiver.frameCapturedUs) / 1e3;
 	}
 
 	public static int textureWidth(int id) {
@@ -195,6 +257,9 @@ public final class VideoReceiver {
 
 	/** Starts receiving into `surface`; a receiver already running under `id` is stopped first. */
 	public static synchronized void start(int id, Surface surface, String host, int port) {
+		startInternal(id, surface, host, port, false);
+	}
+	private static void startInternal(int id, Surface surface, String host, int port, boolean startPaced) {
 		VideoReceiver previous = receivers.remove(id);
 		Thread previousThread = null;
 		if (previous != null) {
@@ -202,6 +267,7 @@ public final class VideoReceiver {
 			previousThread = previous.thread;
 		}
 		VideoReceiver receiver = new VideoReceiver();
+		receiver.paced = startPaced;
 		receiver.running = true;
 		receiver.status = "подключаюсь";
 		Thread waitFor = previousThread;
@@ -357,21 +423,68 @@ public final class VideoReceiver {
 	}
 
 	private synchronized long takeFrame() {
+		int oldPose = framePose, oldWidth = bufferWidth, oldHeight = bufferHeight;
+		long oldTime = frameTimeUs, oldCapture = frameCapturedUs;
 		if (reader == null) {
 			return framePointer;
 		}
 		Image image;
 		try {
-			image = reader.acquireLatestImage();
-			if (paced) {
-				releaseNextPending(image != null);
+			boolean sameFrame = paced && comparisonTest && Build.VERSION.SDK_INT >= 33;
+			boolean released = sameFrame && releaseNextPending();
+			// Release before acquiring. The old order always deferred this image
+			// until the next Godot frame, adding ~14 ms even on a perfect link.
+			synchronized (imageReady) {
+				image = reader.acquireLatestImage();
+				if (image == null && released) {
+					long start = System.nanoTime();
+					try { imageReady.wait(1); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+					image = reader.acquireLatestImage();
+					timings.add("image_ready_wait", (System.nanoTime()-start)/1e6);
+				}
+			}
+			if(paced && !sameFrame) releaseNextPending();
+			if(image != null && sameFrame) {
+				long start = System.nanoTime();
+				try (SyncFence fence = image.getFence()) {
+					if(fence.isValid() && !fence.await(java.time.Duration.ofMillis(1))) {
+						timings.add("image_fence_timeout", 1);image.close();image = null;
+					}
+				} catch(java.io.IOException e) {
+					timings.add("image_fence_error", 1);image.close();image = null;
+				}
+				timings.add("image_fence_wait", (System.nanoTime()-start)/1e6);
+			}
+			if(paced) {
+				if(image != null) pacedNew++; else pacedRepeated++;
 			}
 			if (image != null) {
 				Integer pose = posesByTime.get(image.getTimestamp() / 1000);
-				if (pose != null) {
-					framePose = pose;
-				}
+				framePose = pose == null ? 0 : pose;
+				frameTimeUs = image.getTimestamp() / 1000;
 				posesByTime.headMap(image.getTimestamp() / 1000).clear();
+				long[] timing = timingsByTime.get(image.getTimestamp() / 1000);
+				frameCapturedUs = timing == null ? 0 : timing[2];
+				timingsByTime.headMap(image.getTimestamp() / 1000, true).clear();
+				long taken = System.nanoTime();
+				if (firstShownNanos != 0 && taken - firstShownNanos > WARMUP_NS) {
+					if (lastTakenNs != 0) timings.add("texture_interval", (taken - lastTakenNs) / 1e6);
+					if (timing != null) {
+						timings.add("decode", (timing[7] - timing[0]) / 1e6);
+						timings.add("decoder_input_wait", (timing[0] - timing[1]) / 1e6);
+						timings.add("decoded_to_texture", (taken - timing[7]) / 1e6);
+						if (clockKnown && timing[2] != 0) {
+							timings.add("pc_submit_to_texture", (taken / 1000 + clockOffsetUs - timing[2]) / 1e3);
+							if (timing[6] != 0) {
+								if (timing[4] > 0) timings.add("pose_pc_to_submit", (timing[2] - timing[4]) / 1e3);
+								timings.add("pre_encode", (timing[5] - timing[2]) / 1e3);
+								timings.add("encode", (timing[6] - timing[5]) / 1e3);
+								timings.add("send_and_network", (timing[1] / 1000 + clockOffsetUs - timing[6]) / 1e3);
+							}
+						}
+					}
+				}
+				lastTakenNs = taken;
 			}
 		} catch (IllegalStateException e) {
 			return framePointer;
@@ -386,6 +499,7 @@ public final class VideoReceiver {
 		frame = image;
 		HardwareBuffer buffer = image.getHardwareBuffer();
 		if (buffer == null) {
+			framePose = oldPose; frameTimeUs = oldTime; frameCapturedUs = oldCapture;
 			return framePointer;
 		}
 		bufferWidth = buffer.getWidth();
@@ -400,34 +514,35 @@ public final class VideoReceiver {
 		buffer.close();
 		if (made != 0) {
 			framePointer = made;
+		} else {
+			framePose = oldPose; frameTimeUs = oldTime; frameCapturedUs = oldCapture;
+			bufferWidth = oldWidth; bufferHeight = oldHeight;
 		}
 		return framePointer;
 	}
 
-	/** Paced: one waiting frame to the reader (taken next frame), older ones dropped. */
-	private void releaseNextPending(boolean gotNew) {
-		if (gotNew) {
-			pacedNew++;
-		} else {
-			pacedRepeated++;
-		}
+	/** Paced: release one ready buffer, dropping backlog beyond the configured limit. */
+	private boolean releaseNextPending() {
 		synchronized (pending) {
 			if (pendingCodec == null) {
-				return;
+				return false;
 			}
+			pendingPeak = Math.max(pendingPeak, pending.size());
 			try {
-				while (pending.size() > PENDING_MAX) {
+				while (pending.size() > pendingMax) {
 					pendingCodec.releaseOutputBuffer(pending.poll(), false);
 					pacedSkipped++;
 				}
 				Integer next = pending.poll();
 				if (next != null) {
 					pendingCodec.releaseOutputBuffer(next, true);
+					return true;
 				}
 			} catch (IllegalStateException e) {
 				pending.clear();
 			}
 		}
+		return false;
 	}
 
 	private synchronized void closeFrames() {
@@ -440,9 +555,11 @@ public final class VideoReceiver {
 			previousFrame = null;
 		}
 		if (reader != null) {
+			reader.setOnImageAvailableListener(null, null);
 			reader.close();
 			reader = null;
 		}
+		if (imageThread != null) { imageThread.quitSafely(); imageThread = null; }
 		for (long image : images.values()) {
 			HardwareBuffers.destroy(image);
 		}
@@ -462,6 +579,7 @@ public final class VideoReceiver {
 			connection.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
 			DataInputStream input = new DataInputStream(new BufferedInputStream(connection.getInputStream(), 1 << 16));
 			OutputStream toPc = connection.getOutputStream();
+			if (paced) tell(toPc, 3, 5); // request per-frame timestamps; old servers ignore it
 			long nextClockPing = 0;
 
 			byte[] magic = new byte[4];
@@ -470,12 +588,13 @@ public final class VideoReceiver {
 				throw new IllegalStateException("это не видео WoRkPlace");
 			}
 			int version = input.readInt();
+			videoVersion = version;
 			width = input.readInt();
 			height = input.readInt();
 			int fps = input.readInt();
 			// 3, 4: the PC-drawn eyes (branch pc-render) with a pose id per frame; 4 is HEVC.
-			boolean withPose = version == 3 || version == 4;
-			String mime = version == 4 ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC;
+			boolean withPose = version == 3 || version == 4 || version == 5;
+			String mime = version >= 4 ? MediaFormat.MIMETYPE_VIDEO_HEVC : MediaFormat.MIMETYPE_VIDEO_AVC;
 			if (version != 2 && !withPose) {
 				throw new IllegalStateException("версия видео " + version);
 			}
@@ -495,6 +614,13 @@ public final class VideoReceiver {
 					synchronized (this) {
 						reader = ImageReader.newInstance(width, height, ImageFormat.PRIVATE, paced ? 6 : 4,
 								HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
+						if(paced) {
+							imageThread = new HandlerThread("WoRkPlaceImageReady", android.os.Process.THREAD_PRIORITY_DISPLAY);
+							imageThread.start();
+							reader.setOnImageAvailableListener(unused -> {
+								synchronized(imageReady) { imageReady.notifyAll(); }
+							}, new Handler(imageThread.getLooper()));
+						}
 					}
 					output = reader.getSurface();
 				}
@@ -534,6 +660,9 @@ public final class VideoReceiver {
 				long time = input.readLong();
 				long capturedUs = input.readLong();
 				long pose = withPose ? input.readInt() & 0xffffffffL : 0;
+				long poseWrittenUs = version == 5 ? input.readLong() : 0;
+				long encodeStartedUs = version == 5 ? input.readLong() : 0;
+				long encodedUs = version == 5 ? input.readLong() : 0;
 				int flags = input.readByte();
 				if ((flags & 2) != 0) {
 					addClockSample(time, capturedUs); // the clock's answer: our time, the PC's
@@ -551,7 +680,7 @@ public final class VideoReceiver {
 				tell(toPc, 2, framesReceived + 1);
 				long arrived = System.nanoTime();
 				framesReceived++;
-				bytesReceived += length + 21;
+				bytesReceived += length + (version == 5 ? 49 : (withPose ? 25 : 21));
 
 				int index;
 				while ((index = decoder.dequeueInputBuffer(5000)) < 0) {
@@ -565,7 +694,8 @@ public final class VideoReceiver {
 				ByteBuffer buffer = decoder.getInputBuffer(index);
 				buffer.clear();
 				buffer.put(frame, 0, length);
-				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs, pose });
+				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs, pose,
+					poseWrittenUs, encodeStartedUs, encodedUs, 0 });
 				decoder.queueInputBuffer(index, 0, length, time, key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
 				if (!paced) {
 					drain(decoder, info, queuedAt, 0);
@@ -617,6 +747,7 @@ public final class VideoReceiver {
 			if (queued != null) {
 				long now = System.nanoTime();
 				decodeMs = (now - queued[0]) / 1e6;
+				queued[7] = now;
 				// A picture encoded again (to push the decoder, or the refresh) keeps
 				// its capture time: only its first frame counts.
 				// Neither a picture from before this connection (0) nor the first
@@ -637,6 +768,8 @@ public final class VideoReceiver {
 			if (queued != null && reader != null) {
 				synchronized (this) {
 					posesByTime.put(info.presentationTimeUs, (int) queued[3]);
+					timingsByTime.put(info.presentationTimeUs, queued);
+					while (timingsByTime.size() > 64) timingsByTime.pollFirstEntry();
 					while (posesByTime.size() > 64) {
 						posesByTime.pollFirstEntry();
 					}

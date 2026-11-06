@@ -12,6 +12,11 @@
 #include <array>
 #include <vector>
 #include <cmath>
+#include <algorithm>
+#include <chrono>
+#include <mutex>
+#include <sstream>
+#include <locale>
 
 using namespace godot;
 
@@ -26,6 +31,24 @@ class GameProjection : public OpenXRExtensionWrapper {
  bool ready=false, registered=false;
  bool announced=false;
  String error;
+ std::mutex timing_mutex;
+ using Clock=std::chrono::steady_clock;
+ Clock::time_point copied_at;
+ double source_age_ms=-1;
+ double video_age_ms=-1;
+ uint64_t generation=0, submitted_generation=0, reused=0;
+ std::vector<double> copy_ms, age_ms, submit_wait_ms, video_ms;
+
+ static void sample(std::vector<double> &values,double value) {
+  if(std::isfinite(value) && value>=0 && values.size()<4096) values.push_back(value);
+ }
+ static void summary(std::ostringstream &out,const char *name,std::vector<double> &values) {
+  if(values.empty()) return;
+  std::sort(values.begin(),values.end());
+  auto p=[&](double q){return values[std::max(size_t(1),size_t(std::ceil(values.size()*q)))-1];};
+  out<<"; "<<name<<" n="<<values.size()<<" "<<p(.5)<<"/"<<p(.95)<<"/"<<p(.99)<<"/"<<values.back();
+  values.clear();
+ }
 
  GLuint shader(GLenum type, const char *code) {
   GLuint s=glCreateShader(type); glShaderSource(s,1,&code,nullptr); glCompileShader(s);
@@ -73,7 +96,8 @@ void main(){
  }
 protected:
  static void _bind_methods() {
-  ClassDB::bind_method(D_METHOD("present", "image", "size", "buffer_size", "eyes", "fov", "strength"), &GameProjection::present);
+  ClassDB::bind_method(D_METHOD("present", "image", "size", "buffer_size", "eyes", "fov", "strength", "source_age_ms", "video_age_ms"), &GameProjection::present, DEFVAL(-1.0), DEFVAL(-1.0));
+  ClassDB::bind_method(D_METHOD("timing_report"), &GameProjection::timing_report);
   ClassDB::bind_method(D_METHOD("clear"), &GameProjection::clear);
   ClassDB::bind_method(D_METHOD("get_error"), &GameProjection::get_error);
  }
@@ -89,14 +113,37 @@ public:
  }
  int32_t _get_composition_layer_count() override { return ready ? 1 : 0; }
  uint64_t _get_composition_layer(int32_t) override {
+  {
+   std::lock_guard<std::mutex> lock(timing_mutex);
+   if(generation!=submitted_generation) {
+    double wait=std::chrono::duration<double,std::milli>(Clock::now()-copied_at).count();
+    sample(submit_wait_ms,wait);
+    if(source_age_ms>=0) sample(age_ms,source_age_ms+wait);
+    if(video_age_ms>=0) sample(video_ms,video_age_ms+wait);
+    submitted_generation=generation;
+   } else reused++;
+  }
   layer.space=(XrSpace)api->get_play_space();
   return reinterpret_cast<uint64_t>(&layer);
  }
  // Behind the transparent local UI, above any passthrough.
  int32_t _get_composition_layer_order(int32_t) override { return -1; }
- void clear(){ ready=false; }
+ void clear(){
+  ready=false;
+  std::lock_guard<std::mutex> lock(timing_mutex);
+  copy_ms.clear();age_ms.clear();submit_wait_ms.clear();video_ms.clear();
+  generation=submitted_generation=reused=0;source_age_ms=video_age_ms=-1;
+ }
  String get_error() const {return error;}
- bool present(int64_t image, Vector2i size, Vector2i padded, Array eyes, Array fov, double strength) {
+ String timing_report() {
+  std::lock_guard<std::mutex> lock(timing_mutex);
+  std::ostringstream out;out.imbue(std::locale::classic());out.precision(2);out<<std::fixed<<"ms p50/p95/p99/max";
+  summary(out,"native_copy",copy_ms);summary(out,"copy_to_layer",submit_wait_ms);summary(out,"matched_pose_to_layer",age_ms);summary(out,"pc_submit_to_layer",video_ms);
+  out<<"; layer_reuse="<<reused;reused=0;
+  return String::utf8(out.str().c_str());
+ }
+ bool present(int64_t image, Vector2i size, Vector2i padded, Array eyes, Array fov, double strength,double p_source_age_ms,double p_video_age_ms) {
+  auto copy_started=Clock::now();
   if(!registered || !image || eyes.size()!=2 || fov.size()!=2 || size.x<2 || size.y<1 || padded.x<size.x || padded.y<size.y) return false;
   if(eglGetCurrentContext()==EGL_NO_CONTEXT) {error="No current EGL context: projection requires single-threaded renderer"; return false;}
   if(!graphics())return false;
@@ -143,6 +190,13 @@ public:
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER,old_draw);glBindFramebuffer(GL_READ_FRAMEBUFFER,old_read);glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);glColorMask(mask[0],mask[1],mask[2],mask[3]);
   for(int i=0;i<5;i++)if(enabled[i])glEnable(caps[i]);
   layer.viewCount=2;layer.views=views;ready=ok;
+  if(ok) {
+   std::lock_guard<std::mutex> lock(timing_mutex);
+   copied_at=Clock::now();
+   double elapsed=std::chrono::duration<double,std::milli>(copied_at-copy_started).count();
+   sample(copy_ms,elapsed);source_age_ms=p_source_age_ms<0?-1:p_source_age_ms+elapsed;
+   video_age_ms=p_video_age_ms<0?-1:p_video_age_ms+elapsed;generation++;
+  }
   if(ok && !announced){UtilityFunctions::print("[projection] native OpenXR projection active: ",width,"x",height," per eye");announced=true;}
   return ok;
  }

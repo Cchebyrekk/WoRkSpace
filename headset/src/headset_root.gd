@@ -22,6 +22,10 @@ var _udp := PacketPeerUDP.new()
 var _next_ask := 0.0
 ## Since when the one running has had no PC (-1 while it has).
 var _alone_since := -1.0
+var _cable_probe: StreamPeerTCP
+var _probe_since := 0.0
+var _next_probe := 0.0
+var _probe_mode := -1
 
 
 func _ready() -> void:
@@ -33,12 +37,15 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
 	if _child != null and _child.call(&"connected"):
+		_close_probe()
 		_alone_since = -1.0
 		while _udp.get_available_packet_count() > 0:
 			_udp.get_packet()
 		return
 	if _alone_since < 0.0:
 		_alone_since = now
+	if now - _alone_since >= SWAP_AFTER_SEC and _poll_cable(now):
+		return
 	while _udp.get_available_packet_count() > 0:
 		var answer := LinkProtocol.parse_answer(_udp.get_packet())
 		if answer.is_empty():
@@ -57,6 +64,7 @@ func _process(_delta: float) -> void:
 
 
 func _start(mode: int) -> void:
+	_close_probe()
 	if _child != null:
 		print("[mode] «%s» → «%s»" % [WorkMode.name_of(_mode), WorkMode.name_of(mode)])
 		remove_child(_child)
@@ -78,6 +86,50 @@ func _start(mode: int) -> void:
 	_child.name = "HeadsetWorld" if mode == WorkMode.HEADSET_WORLD else "Player"
 	add_child(_child)
 	print("[mode] запущен режим «%s»" % WorkMode.name_of(mode))
+
+
+func return_from_games(previous_mode: int) -> void:
+	var target := WorkMode.PC_DRAWS if previous_mode == WorkMode.PC_DRAWS else WorkMode.HEADSET_WORLD
+	print("[mode] подтверждён выход из игр; возвращаю «%s»" % WorkMode.name_of(target))
+	_start(target)
+
+
+func _close_probe() -> void:
+	if _cable_probe != null:
+		_cable_probe.disconnect_from_host()
+	_cable_probe = null
+
+
+## USB does not carry UDP discovery. Only probe the OTHER mode's control port:
+## probing the child's own port would replace its real connection on the server.
+func _poll_cable(now: float) -> bool:
+	if _cable_probe != null:
+		_cable_probe.poll()
+		if _cable_probe.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+			var target := _probe_mode
+			print("[mode] USB отвечает: «%s»" % WorkMode.name_of(target))
+			_start(target)
+			return true
+		if now - _probe_since > 0.8 or _cable_probe.get_status() in [StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE]:
+			_close_probe()
+	if _cable_probe == null and now >= _next_probe:
+		_next_probe = now + ASK_SEC
+		if not _cable_allowed():
+			return false
+		_probe_since = now
+		_probe_mode = WorkMode.HEADSET_WORLD if _mode == WorkMode.PC_DRAWS else WorkMode.PC_DRAWS
+		_cable_probe = StreamPeerTCP.new()
+		_cable_probe.connect_to_host("127.0.0.1", _probe_port_for_mode(_probe_mode))
+	return false
+
+
+func _cable_allowed() -> bool:
+	var config := ConfigFile.new()
+	return config.load("user://settings.cfg") != OK or int(config.get_value("headset", "link_mode", 0)) != HeadsetOptions.LINK_WIFI
+
+
+func _probe_port_for_mode(mode: int) -> int:
+	return LinkProtocol.CONTROL_PORT if mode == WorkMode.HEADSET_WORLD else LinkProtocol.REMOTE_CONTROL_PORT
 
 
 func _last_mode() -> int:

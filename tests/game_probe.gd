@@ -14,6 +14,8 @@ var _eyes := StreamPeerTCP.new()
 var _eyes_port := 0
 var _buffer := PackedByteArray()
 var _header_read := false
+var _wire_frame_header := 25
+var _asked_metrics := false
 var _frames := 0
 var _keys := 0
 var _bytes := 0
@@ -68,6 +70,9 @@ func _send_tracking(now: float) -> void:
 
 func _read_eyes(now: float) -> void:
 	_eyes.poll()
+	if not _asked_metrics and _eyes.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		_eyes.put_data(PackedByteArray([3, 0, 0, 0, 0, 0, 0, 0, 5]))
+		_asked_metrics = true
 	var available := _eyes.get_available_bytes()
 	if available > 0:
 		_buffer.append_array(_eyes.get_data(available)[1])
@@ -77,15 +82,16 @@ func _read_eyes(now: float) -> void:
 			return
 		print("[probe] заголовок: %s, версия %d, %dx%d, %d к/с" % [_buffer.slice(0, 4).get_string_from_ascii(),
 				_u32(4), _u32(8), _u32(12), _u32(16)])
+		_wire_frame_header = 49 if _u32(4) == 5 else 25
 		_buffer = _buffer.slice(20)
 		_header_read = true
 	# Frames: u32 length, u64 sample time, u64 capture time, u32 pose, u8 flags, bytes.
-	while _buffer.size() >= 25:
+	while _buffer.size() >= _wire_frame_header:
 		var length := _u32(0)
-		if _buffer.size() < 25 + length:
+		if _buffer.size() < _wire_frame_header + length:
 			break
 		var pose := _u32(20)
-		var flags := _buffer[24]
+		var flags := _buffer[_wire_frame_header - 1]
 		if length > 0:
 			_frames += 1
 			if flags & 1:
@@ -96,7 +102,7 @@ func _read_eyes(now: float) -> void:
 				_last_pose = pose
 				if _sent.has(pose):
 					_delays.append(now - _sent[pose])
-		_buffer = _buffer.slice(25 + length)
+		_buffer = _buffer.slice(_wire_frame_header + length)
 
 
 func _u32(at: int) -> int:

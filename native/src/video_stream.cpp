@@ -192,6 +192,7 @@ class MfStream : public StreamBackend {
 	bool have_picture = false;
 	uint64_t picture_time_us = 0; // when `picture` was captured (StreamBackend::clock_us)
 	uint32_t picture_pose = 0; // the headset's pose an external picture was drawn with
+	uint64_t picture_pose_written_us = 0;
 
 	// External pictures (start_external, branch pc-render).
 	bool external = false;
@@ -209,6 +210,7 @@ class MfStream : public StreamBackend {
 		uint64_t fence_value = 0;
 		uint32_t pose = 0;
 		uint64_t time_us = 0;
+		uint64_t pose_written_us = 0;
 	};
 	std::mutex submitted_mutex;
 	Submitted submitted;
@@ -216,6 +218,7 @@ class MfStream : public StreamBackend {
 	// here, by handle; the query that tells the last copy is done. Under
 	// shared_mutex (the driver's thread copies, this one encodes).
 	bool shared_input = false;
+	std::atomic<size_t> game_max_in_air{MAX_IN_AIR};
 	uint64_t shared_luid = 0;
 	HANDLE first_shared = nullptr;
 	std::mutex shared_mutex;
@@ -245,6 +248,8 @@ class MfStream : public StreamBackend {
 		std::chrono::steady_clock::time_point input;
 		uint64_t captured_us;
 		uint32_t pose;
+		uint64_t pose_written_us;
+		uint64_t encode_started_us;
 	};
 	std::deque<InFlight> in_flight;
 
@@ -256,11 +261,13 @@ class MfStream : public StreamBackend {
 	uint64_t client_since_us = 0;
 	uint64_t acked = 0;
 	bool acks_seen = false;
+	bool client_telemetry = false;
 	// While shutting down: encoded frames are dropped, not sent.
 	bool draining = false;
 	std::chrono::steady_clock::time_point started;
 
 public:
+	void set_queue_limit(int32_t frames) override { game_max_in_air.store(std::clamp(frames,1,6)); }
 	~MfStream() override { stop(); }
 
 	bool start_external(void *p_device, void *p_queue, int32_t p_width, int32_t p_height, int32_t p_out_width,
@@ -296,7 +303,8 @@ public:
 	}
 
 	bool start_shared(uint64_t adapter_luid, void *first_texture, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps,
-			std::string &error) override {
+			std::string &error, int32_t max_in_air) override {
+		game_max_in_air = std::clamp(max_in_air,1,6);
 		stop();
 		external = true;
 		shared_input = true;
@@ -306,7 +314,7 @@ public:
 	}
 
 	// The driver's thread, inside IVRVirtualDisplay::Present.
-	void shared_submit(void *p_texture, uint32_t pose_id) override {
+	void shared_submit(void *p_texture, uint32_t pose_id, uint64_t pose_written_us) override {
 		if (!shared_ready) {
 			return;
 		}
@@ -324,13 +332,13 @@ public:
 				mutex->ReleaseSync(0);
 			}
 			context->Flush();
+			// Publish metadata while the pixel copy is still protected. The encoder
+			// latches both under the same lock before conversion to NV12.
+			std::lock_guard<std::mutex> metadata_lock(submitted_mutex);
+			submitted = { 0, 0, pose_id, StreamBackend::clock_us(), pose_written_us };
 		} catch (const Failure &failure) {
 			trace(port, failure.what.c_str());
 			return;
-		}
-		{
-			std::lock_guard<std::mutex> lock(submitted_mutex);
-			submitted = { 0, 0, pose_id, StreamBackend::clock_us() };
 		}
 		SetEvent(frame_event);
 	}
@@ -595,6 +603,7 @@ private:
 			have_picture = true;
 			picture_time_us = taken.time_us;
 			picture_pose = taken.pose;
+			picture_pose_written_us = taken.pose_written_us;
 			std::lock_guard<std::mutex> lock(stats_mutex);
 			shared_stats.frames_captured++;
 			return true;
@@ -793,6 +802,21 @@ private:
 		MFSetAttributeRatio(in_type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 		in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 		check(encoder->SetInputType(0, in_type.get(), 0), "encoder input type");
+		if(shared_input) {
+			struct Setting { const GUID *key; const char *name; };
+			const Setting settings[]={{&CODECAPI_AVLowLatencyMode,"low_latency"},
+				{&CODECAPI_AVEncCommonRateControlMode,"rate_control"},
+				{&CODECAPI_AVEncCommonMeanBitRate,"bitrate"},
+				{&CODECAPI_AVEncMPVDefaultBPictureCount,"b_frames"}};
+			for(const auto &setting:settings) {
+				VARIANT value{};HRESULT result=codec->GetValue(setting.key,&value);
+				char text[180];
+				long readback=value.vt==VT_BOOL ? (value.boolVal!=VARIANT_FALSE) :
+					(value.vt==VT_UI4 ? long(value.ulVal) : (value.vt==VT_I4 ? value.lVal : -1));
+				std::snprintf(text,sizeof(text),"q4 encoder %s: hr=0x%08lx type=%d value=%ld",setting.name,static_cast<unsigned long>(result),int(value.vt),readback);
+				trace(port,text);VariantClear(&value);
+			}
+		}
 		read_sequence_header();
 
 		events = encoder.as<IMFMediaEventGenerator>();
@@ -862,7 +886,9 @@ private:
 			// takes it along, which then counts as new).
 			bool push = pushes > 0 && now - last_input >= PUSH_INTERVAL;
 			bool due = (fresh && now - last_picture >= interval) || want_key_frame || push || now - last_input >= REFRESH;
-			bool room = !acks_seen || in_flight.size() + (sent_to_client - acked) < MAX_IN_AIR;
+			bool room = (!shared_input && !acks_seen) || in_flight.size() + (sent_to_client - std::min(acked,sent_to_client)) < (shared_input ? game_max_in_air.load() : MAX_IN_AIR);
+			// Do not cycle back to an NV12 surface that the encoder may still own.
+			if(shared_input && in_flight.size() >= SURFACES) room = false;
 			if (client != INVALID_SOCKET && have_picture && need_input > 0 && due && room) {
 				encode_picture();
 				if (fresh) {
@@ -963,12 +989,25 @@ private:
 	}
 
 	void encode_picture() {
+		uint64_t encode_started_us = 0;
 		int index = next_surface;
 		next_surface = (next_surface + 1) % SURFACES;
 		D3D11_VIDEO_PROCESSOR_STREAM stream{};
 		stream.Enable = TRUE;
 		stream.pInputSurface = input_view.get();
-		check(video_context->VideoProcessorBlt(processor.get(), output_views[index].get(), 0, 1, &stream), "convert to NV12");
+		{
+			std::unique_lock<std::mutex> source_lock(shared_mutex,std::defer_lock);
+			if(shared_input) {
+				source_lock.lock();
+				std::lock_guard<std::mutex> metadata_lock(submitted_mutex);
+				picture_pose=submitted.pose;
+				picture_time_us=submitted.time_us;
+				picture_pose_written_us=submitted.pose_written_us;
+				submitted.slot=-1;
+			}
+			encode_started_us=StreamBackend::clock_us();
+			check(video_context->VideoProcessorBlt(processor.get(), output_views[index].get(), 0, 1, &stream), "convert to NV12");
+		}
 
 		winrt::com_ptr<IMFMediaBuffer> buffer;
 		check(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), surfaces[index].get(), 0, FALSE, buffer.put()),
@@ -991,7 +1030,8 @@ private:
 		check(encoder->ProcessInput(0, sample.get(), 0), "encoder input");
 		need_input--;
 		// A picture from before this client came is no measure of the latency.
-		in_flight.push_back({ time, now, picture_time_us >= client_since_us ? picture_time_us : 0, picture_pose });
+		in_flight.push_back({ time, now, picture_time_us >= client_since_us ? picture_time_us : 0, picture_pose,
+			picture_pose_written_us, encode_started_us });
 	}
 
 	void pump_events() {
@@ -1041,10 +1081,14 @@ private:
 		double encode_ms = 0.0;
 		uint64_t captured_us = 0;
 		uint32_t pose = 0;
+		uint64_t pose_written_us = 0, encode_started_us = 0;
+		const uint64_t encoded_us = StreamBackend::clock_us();
 		if (!in_flight.empty() && in_flight.front().time == time) {
 			encode_ms = std::chrono::duration<double, std::milli>(now - in_flight.front().input).count();
 			captured_us = in_flight.front().captured_us;
 			pose = in_flight.front().pose;
+			pose_written_us = in_flight.front().pose_written_us;
+			encode_started_us = in_flight.front().encode_started_us;
 			in_flight.pop_front();
 		}
 		bool key = MFGetAttributeUINT32(sample.get(), MFSampleExtension_CleanPoint, 0) != 0;
@@ -1061,6 +1105,12 @@ private:
 		put_u64(packet, captured_us);
 		if (external) {
 			put_u32(packet, pose);
+		}
+		// Version 5 is confined to SteamVR: screen and PC-draw streams stay 2/4.
+		if (client_telemetry) {
+			put_u64(packet, pose_written_us);
+			put_u64(packet, encode_started_us);
+			put_u64(packet, encoded_us);
 		}
 		packet.push_back(key ? 1 : 0);
 		if (prefix) {
@@ -1093,6 +1143,7 @@ private:
 		trace(port, "client accepted");
 		close_client();
 		client = incoming;
+		client_telemetry = false;
 		u_long blocking = 0;
 		ioctlsocket(client, FIONBIO, &blocking);
 		BOOL no_delay = TRUE;
@@ -1100,7 +1151,24 @@ private:
 		DWORD timeout_ms = 3000;
 		setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&timeout_ms), sizeof(timeout_ms));
 		std::vector<uint8_t> header{ 'W', 'R', 'K', 'V' };
-		put_u32(header, external ? EYES_STREAM_VERSION : STREAM_VERSION);
+		// New game clients send the existing 9-byte control message 3, value 5
+		// before reading the header. Old APKs receive the unchanged version 4.
+		if(shared_input) {
+			auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(40);
+			u_long available=0;
+			while(std::chrono::steady_clock::now()<deadline) {
+				if(ioctlsocket(client,FIONREAD,&available)!=0 || available>=9) break;
+				Sleep(1);
+			}
+			if(available>=9) {
+				uint8_t capability[9]{};
+				if(recv(client,reinterpret_cast<char *>(capability),9,0)==9) {
+					uint64_t value=0;for(int i=1;i<9;i++) value=(value<<8)|capability[i];
+					client_telemetry=capability[0]==3 && value==5;
+				}
+			}
+		}
+		put_u32(header, client_telemetry ? 5 : (external ? EYES_STREAM_VERSION : STREAM_VERSION));
 		put_u32(header, static_cast<uint32_t>(width));
 		put_u32(header, static_cast<uint32_t>(height));
 		put_u32(header, static_cast<uint32_t>(fps));
@@ -1140,6 +1208,7 @@ private:
 				if (external) {
 					put_u32(answer, 0);
 				}
+				if (client_telemetry) { put_u64(answer, 0); put_u64(answer, 0); put_u64(answer, 0); }
 				answer.push_back(2);
 				send_all(answer);
 			} else if (message[0] == 2) {

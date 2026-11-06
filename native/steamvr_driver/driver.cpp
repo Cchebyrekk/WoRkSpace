@@ -12,6 +12,7 @@
 // picture shook in the headset (04.11.2026). No Godot here.
 
 #include "frame_compositor.h"
+#include "game_quality.h"
 #include "game_link.h"
 #include "win_backend.h"
 
@@ -153,6 +154,8 @@ class Headset : public vr::ITrackedDeviceServerDriver,
 				public vr::IVRDisplayComponent,
 				public vr::IVRDriverDirectModeComponent {
 	workplace::GameLink *link = nullptr;
+	GameQuality quality=GameQuality::load();
+	int last_profile=-2;
 	uint32_t id = vr::k_unTrackedDeviceIndexInvalid;
 	std::atomic<bool> running{ false };
 	std::thread pose_thread;
@@ -197,6 +200,7 @@ class Headset : public vr::ITrackedDeviceServerDriver,
 	workplace::StreamStats reported;
 	uint32_t reported_presented = 0;
 	std::chrono::steady_clock::time_point next_report = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point last_report = std::chrono::steady_clock::now();
 
 public:
 	explicit Headset(workplace::GameLink *p_link) : link(p_link) { load_fov(); }
@@ -293,8 +297,8 @@ public:
 	bool IsDisplayRealDisplay() override { return false; }
 
 	void GetRecommendedRenderTargetSize(uint32_t *width, uint32_t *height) override {
-		*width = static_cast<uint32_t>(EYE_WIDTH * RENDER_SCALE);
-		*height = static_cast<uint32_t>(EYE_HEIGHT * RENDER_SCALE);
+		*width = EYE_WIDTH * quality.render_percent / 100;
+		*height = EYE_HEIGHT * quality.render_percent / 100;
 	}
 
 	void GetEyeOutputViewport(vr::EVREye eye, uint32_t *x, uint32_t *y, uint32_t *width, uint32_t *height) override {
@@ -371,7 +375,10 @@ public:
 		}
 		std::lock_guard<std::mutex> lock(stream_mutex);
 		if (stream) {
-			stream->shared_submit(compositor.output_handle(), pose_id);
+			int profile=link->game_profile.load();
+			stream->set_queue_limit(profile==0 ? 6 : (profile==1 ? 3 : quality.queue_frames));
+			if(profile!=last_profile) {log("q4 comparison profile %d",profile);last_profile=profile;}
+			stream->shared_submit(compositor.output_handle(), pose_id, written_us);
 			link->frames_presented = ++presented;
 			report();
 		}
@@ -388,11 +395,13 @@ public:
 			return;
 		}
 		next_report = now + std::chrono::seconds(10);
+		double elapsed = std::max(0.001,std::chrono::duration<double>(now-last_report).count());
+		last_report=now;
 		workplace::StreamStats stats = stream->stats();
 		uint64_t encoded = stats.frames_encoded - reported.frames_encoded;
-		log("10 s: presented %u, taken %llu, encoded %llu, sent %llu, %.1f Mbit/s, encoding %.1f ms on average%s%s",
-				presented - reported_presented, stats.frames_captured - reported.frames_captured, encoded,
-				stats.frames_sent - reported.frames_sent, (stats.bytes_sent - reported.bytes_sent) * 8.0 / 10e6,
+		log("window %.3f s: presented %u, taken %llu, encoded %llu, sent %llu, %.1f Mbit/s, encoding %.1f ms on average%s%s",
+				elapsed,presented - reported_presented, stats.frames_captured - reported.frames_captured, encoded,
+				stats.frames_sent - reported.frames_sent, (stats.bytes_sent - reported.bytes_sent) * 8.0 / (elapsed*1e6),
 				encoded > 0 ? (stats.encode_ms_sum - reported.encode_ms_sum) / encoded : 0.0,
 				stats.client.empty() ? ", no headset" : "", stats.error.empty() ? "" : (", error: " + stats.error).c_str());
 		reported = stats;
@@ -481,6 +490,8 @@ private:
 		while (running) {
 			next += period;
 			std::this_thread::sleep_until(next);
+			auto now=std::chrono::steady_clock::now();
+			if(now-next>period) next=now; // skip missed ticks instead of a burst of old VSyncs
 			vr::VRServerDriverHost()->VsyncEvent(0.0);
 		}
 	}
@@ -622,13 +633,14 @@ private:
 		stream_starter = std::thread([this] {
 			workplace::StreamBackend *created = workplace::StreamBackend::create();
 			std::string error;
-			if (!created->start_shared(compositor.adapter_luid(), compositor.output_handle(), EYES_PORT, EYES_KBPS,
-						static_cast<int32_t>(REFRESH_HZ), error)) {
+			if (!created->start_shared(compositor.adapter_luid(), compositor.output_handle(), EYES_PORT, quality.bitrate_mbps*1000,
+						static_cast<int32_t>(REFRESH_HZ), error, quality.queue_frames)) {
 				log("eyes' stream did not start: %s", error.c_str());
 				delete created;
 				return; // stays "starting": no retry every frame
 			}
 			workplace::StreamStats stats = created->stats();
+			log("q4 encoder: %s",stats.encoder.c_str());
 			{
 				std::lock_guard<std::mutex> lock(stream_mutex);
 				stream = created;
@@ -637,8 +649,9 @@ private:
 			link->eyes_height = static_cast<uint32_t>(stats.height);
 			link->eyes_port = EYES_PORT;
 			stream_up = true;
-			log("eyes' stream: %dx%d HEVC %d kbit/s on port %d, foveation %.2f", stats.width, stats.height, EYES_KBPS,
+			log("eyes' stream: %dx%d HEVC %d kbit/s on port %d, foveation %.2f", stats.width, stats.height, quality.bitrate_mbps*1000,
 					EYES_PORT, FOVEATION);
+			log("q4 quality: render %d percent, PC queue %d, encoder surfaces %d",quality.render_percent,quality.queue_frames,4);
 		});
 	}
 };
