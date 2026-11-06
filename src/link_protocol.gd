@@ -72,6 +72,12 @@ const FIELDS := {
 	# Branch pc-render: the headset's poses (each frame) and the PC's stream of its eyes.
 	"tracking": ["id", "head", "head_ok", "eyes", "fov", "hands", "controllers"],
 	"eyes": ["port", "w", "h"],
+	# Slice q1: the headset leaves the PC VR games (SteamVR closes, the world comes back).
+	"games_exit": [],
+	# The PC that answers runs the games (sent at once on hello): the headset's
+	# tracking says "game" from then on, and only that is given to SteamVR.
+	"games": [],
+	"haptic": ["hand", "duration", "amplitude", "frequency"],
 	## The screens' layers the headset shows from the eyes' picture of pose `pose` on.
 	"layers": ["pose", "layers"],
 	"video_stats": ["streams", "watched", "fps", "mbps", "encode_ms"],

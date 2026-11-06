@@ -89,6 +89,18 @@ public:
 			int32_t out_height, int32_t port, int32_t bitrate_kbps, int32_t fps, std::string &error) = 0;
 	virtual void *external_texture(int32_t slot) const = 0;
 	virtual void external_submit(int32_t slot, uint32_t pose_id) = 0;
+	// Slice q1, the SteamVR driver: streams what the SteamVR compositor presents
+	// (both eyes side by side) — textures of its own device, shared by legacy
+	// handles. `first_texture` (one of them) gives the size and format; the stream's
+	// device is made on the adapter with `adapter_luid`. Same stream as the eyes'
+	// (HEVC, pose ids).
+	virtual bool start_shared(uint64_t adapter_luid, void *first_texture, int32_t port, int32_t bitrate_kbps, int32_t fps,
+			std::string &error) = 0;
+	// Copies the presented texture at once (the compositor draws into it again
+	// soon) and has it encoded. shared_wait blocks until the copy is done on the
+	// GPU, at most `timeout_ms` (IVRVirtualDisplay::WaitForPresent).
+	virtual void shared_submit(void *texture, uint32_t pose_id) = 0;
+	virtual void shared_wait(int32_t timeout_ms) = 0;
 	virtual void stop() = 0;
 	virtual bool running() const = 0;
 	virtual StreamStats stats() const = 0;
@@ -131,6 +143,14 @@ public:
 	virtual bool running() const = 0;
 	virtual SoundStats stats() const = 0;
 };
+
+// Slice q1: the game host's side of the GameLink mapping (game_link.h), made on
+// first use and kept until shutdown_backend. Null (with `error`) if Windows
+// refused it. game_link_signal wakes the driver's pose thread.
+struct GameLink;
+GameLink *game_link_open(std::string &error);
+void game_link_signal();
+void game_link_close();
 
 // Mouse input injected into Windows with SendInput. Coordinates are pixels of the
 // virtual desktop (the same space as MonitorInfo::x / y).

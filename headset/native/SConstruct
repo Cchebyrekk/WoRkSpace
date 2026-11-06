@@ -1,0 +1,5 @@
+env = SConscript('../../native/godot-cpp/SConstruct', {'api_version': '4.7'})
+env.Append(CPPPATH=['include'])
+env.Append(LIBS=['GLESv3', 'EGL', 'android', 'log'])
+library = env.SharedLibrary('../addons/workplace_projection/bin/libworkplace_projection', ['projection.cpp'])
+Default(library)

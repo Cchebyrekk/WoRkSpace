@@ -15,7 +15,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.TreeMap;
 
 /**
@@ -88,6 +90,35 @@ public final class VideoReceiver {
 	private volatile int bufferHeight;
 	/** EGLImage of each of the reader's buffers (by HardwareBuffer id), made once. */
 	private final HashMap<Long, Long> images = new HashMap<>();
+	/**
+	 * Paced texture mode (slice q1, a PC VR game's eyes): Wi-Fi brings frames
+	 * unevenly, two at once and then none; showing only the newest skipped one
+	 * and repeated the next, and the game's motion stuttered (04.11.2026). Paced,
+	 * each Godot frame takes the next frame in order, as WiVRn and ALVR show them
+	 * one per display frame. Released to the reader as soon as decoded, a fifth of
+	 * them still vanished on the way to it when two came close together (716 out
+	 * of the decoder, 585 shown). So paced frames wait in the decoder (pending:
+	 * output buffer indices) and each Godot frame releases one to the reader and
+	 * takes the one released the frame before: one frame more latency, none lost;
+	 * over PENDING_MAX waiting, the oldest are dropped. Counted for pacingReport.
+	 */
+	private volatile boolean paced;
+	private long pacedNew;
+	private long pacedSkipped;
+	private long pacedRepeated;
+	private long reportedReceived;
+	private long reportedShown;
+	/**
+	 * Paced: the decoder's frames are taken by a thread of their own as soon as
+	 * they are out; taken only when the next frame came in from the network,
+	 * they waited a frame and came out two at once.
+	 */
+	private volatile boolean outputStop;
+	private Thread outputThread;
+	private final ArrayDeque<Integer> pending = new ArrayDeque<>();
+	private MediaCodec pendingCodec;
+	/** Decoded frames left waiting at most: older ones are dropped (latency). */
+	private static final int PENDING_MAX = 2;
 
 	private VideoReceiver() {
 	}
@@ -98,6 +129,31 @@ public final class VideoReceiver {
 	 */
 	public static synchronized void startTexture(int id, String host, int port) {
 		start(id, null, host, port);
+	}
+
+	/** startTexture, with the frames taken in order, one per call (see paced). */
+	public static synchronized void startTexturePaced(int id, String host, int port) {
+		start(id, null, host, port);
+		receivers.get(id).paced = true;
+	}
+
+	/** New, skipped and repeated frames of a paced receiver since the last call. */
+	public static String pacingReport(int id) {
+		VideoReceiver receiver = get(id);
+		if (receiver == null) {
+			return "";
+		}
+		synchronized (receiver) {
+			long received = receiver.framesReceived;
+			long shown = receiver.framesShown;
+			String report = "принято " + (received - receiver.reportedReceived) + ", из декодера "
+					+ (shown - receiver.reportedShown) + ", показано новых " + receiver.pacedNew + ", пропущено "
+					+ receiver.pacedSkipped + ", без нового " + receiver.pacedRepeated;
+			receiver.reportedReceived = received;
+			receiver.reportedShown = shown;
+			receiver.pacedNew = receiver.pacedSkipped = receiver.pacedRepeated = 0;
+			return report;
+		}
 	}
 
 	/**
@@ -307,6 +363,9 @@ public final class VideoReceiver {
 		Image image;
 		try {
 			image = reader.acquireLatestImage();
+			if (paced) {
+				releaseNextPending(image != null);
+			}
 			if (image != null) {
 				Integer pose = posesByTime.get(image.getTimestamp() / 1000);
 				if (pose != null) {
@@ -343,6 +402,32 @@ public final class VideoReceiver {
 			framePointer = made;
 		}
 		return framePointer;
+	}
+
+	/** Paced: one waiting frame to the reader (taken next frame), older ones dropped. */
+	private void releaseNextPending(boolean gotNew) {
+		if (gotNew) {
+			pacedNew++;
+		} else {
+			pacedRepeated++;
+		}
+		synchronized (pending) {
+			if (pendingCodec == null) {
+				return;
+			}
+			try {
+				while (pending.size() > PENDING_MAX) {
+					pendingCodec.releaseOutputBuffer(pending.poll(), false);
+					pacedSkipped++;
+				}
+				Integer next = pending.poll();
+				if (next != null) {
+					pendingCodec.releaseOutputBuffer(next, true);
+				}
+			} catch (IllegalStateException e) {
+				pending.clear();
+			}
+		}
 	}
 
 	private synchronized void closeFrames() {
@@ -405,9 +490,10 @@ public final class VideoReceiver {
 				decoder = MediaCodec.createDecoderByType(mime);
 				Surface output = surface;
 				if (output == null) {
-					// Texture mode: 4 buffers, 2 held for Godot, 2 for the decoder.
+					// Texture mode: 4 buffers, 2 held for Godot, 2 for the decoder;
+					// paced, 2 more wait their turn.
 					synchronized (this) {
-						reader = ImageReader.newInstance(width, height, ImageFormat.PRIVATE, 4,
+						reader = ImageReader.newInstance(width, height, ImageFormat.PRIVATE, paced ? 6 : 4,
 								HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
 					}
 					output = reader.getSurface();
@@ -421,7 +507,22 @@ public final class VideoReceiver {
 			status = "показываю " + width + "×" + height;
 
 			MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-			HashMap<Long, long[]> queuedAt = new HashMap<>();
+			Map<Long, long[]> queuedAt = Collections.synchronizedMap(new HashMap<>());
+			if (paced) {
+				MediaCodec codec = decoder;
+				outputStop = false;
+				outputThread = new Thread(() -> {
+					MediaCodec.BufferInfo outInfo = new MediaCodec.BufferInfo();
+					try {
+						while (running && !outputStop) {
+							drain(codec, outInfo, queuedAt, 4000);
+						}
+					} catch (Exception e) {
+						status = "ошибка вывода: " + e;
+					}
+				}, "WoRkPlaceVideoOut");
+				outputThread.start();
+			}
 			byte[] frame = new byte[1 << 20];
 			while (running) {
 				long nowMs = System.nanoTime() / 1_000_000;
@@ -454,7 +555,9 @@ public final class VideoReceiver {
 
 				int index;
 				while ((index = decoder.dequeueInputBuffer(5000)) < 0) {
-					drain(decoder, info, queuedAt);
+					if (!paced) {
+						drain(decoder, info, queuedAt, 0);
+					}
 					if (!running) {
 						return;
 					}
@@ -464,13 +567,27 @@ public final class VideoReceiver {
 				buffer.put(frame, 0, length);
 				queuedAt.put(time, new long[] { System.nanoTime(), arrived, capturedUs, pose });
 				decoder.queueInputBuffer(index, 0, length, time, key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
-				drain(decoder, info, queuedAt);
+				if (!paced) {
+					drain(decoder, info, queuedAt, 0);
+				}
 			}
 		} catch (Exception e) {
 			if (running) {
 				status = "ошибка: " + e;
 			}
 		} finally {
+			synchronized (pending) {
+				pending.clear();
+				pendingCodec = null;
+			}
+			if (outputThread != null) {
+				outputStop = true;
+				try {
+					outputThread.join(1000);
+				} catch (InterruptedException ignored) {
+				}
+				outputThread = null;
+			}
 			if (decoder != null) {
 				try {
 					decoder.stop();
@@ -488,9 +605,11 @@ public final class VideoReceiver {
 		}
 	}
 
-	private void drain(MediaCodec decoder, MediaCodec.BufferInfo info, HashMap<Long, long[]> queuedAt) {
+	/** Shows what the decoder has done; waits up to timeoutUs for the first of it. */
+	private void drain(MediaCodec decoder, MediaCodec.BufferInfo info, Map<Long, long[]> queuedAt, long timeoutUs) {
 		int index;
-		while ((index = decoder.dequeueOutputBuffer(info, 0)) != MediaCodec.INFO_TRY_AGAIN_LATER) {
+		while ((index = decoder.dequeueOutputBuffer(info, timeoutUs)) != MediaCodec.INFO_TRY_AGAIN_LATER) {
+			timeoutUs = 0;
 			if (index < 0) {
 				continue; // The output format or buffers changed; nothing to show yet.
 			}
@@ -523,7 +642,14 @@ public final class VideoReceiver {
 					}
 				}
 			}
-			decoder.releaseOutputBuffer(index, true);
+			if (paced) {
+				synchronized (pending) {
+					pendingCodec = decoder;
+					pending.add(index);
+				}
+			} else {
+				decoder.releaseOutputBuffer(index, true);
+			}
 			framesShown++;
 		}
 		if (queuedAt.size() > 120) {

@@ -1,0 +1,14 @@
+config_version=5
+
+[application]
+config/name="WoRkPlace SteamVR geometry probe"
+run/main_scene="res://room.tscn"
+
+[rendering]
+rendering_device/driver.windows="d3d12"
+renderer/rendering_method="mobile"
+
+[xr]
+openxr/enabled=true
+shaders/enabled=true
+openxr/reference_space=1

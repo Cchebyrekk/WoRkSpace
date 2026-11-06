@@ -13,11 +13,11 @@ env.Append(LIBS=["d3d11", "d3d12", "dxgi", "windowsapp", "user32", "advapi32", "
 
 # The Windows-only file is built as C++20: in C++17 mode C++/WinRT pulls in
 # <experimental/coroutine>, which current MSVC rejects.
-windows_sources = ["src/win_backend.cpp", "src/video_stream.cpp", "src/audio_stream.cpp"]
+windows_sources = ["src/win_backend.cpp", "src/video_stream.cpp", "src/audio_stream.cpp", "src/game_link.cpp"]
 windows_env = env.Clone()
 windows_env.Append(CXXFLAGS=["/std:c++20"])
 
-godot_sources = [source for source in Glob("src/*.cpp") if source.name not in ("win_backend.cpp", "video_stream.cpp", "audio_stream.cpp")]
+godot_sources = [source for source in Glob("src/*.cpp") if source.name not in ("win_backend.cpp", "video_stream.cpp", "audio_stream.cpp", "game_link.cpp")]
 objects = env.SharedObject(godot_sources) + windows_env.SharedObject(windows_sources)
 
 library = env.SharedLibrary(
@@ -46,3 +46,25 @@ agent = agent_env.Program(
     ],
 )
 Default(agent)
+
+# The SteamVR driver (slice q1, see steamvr_driver/driver.cpp): a plain DLL that
+# vrserver.exe loads from steamvr_driver/workplace (registered with
+# tools/install_steamvr_driver.ps1). It shares the eyes' stream code with the
+# module (video_stream.cpp, game_link.cpp; built again here without Godot). The
+# OpenVR header is downloaded separately (see CLAUDE.md), like godot-cpp.
+# SteamVR keeps the DLL open while it runs: close SteamVR before building.
+driver_env = Environment(TARGET_ARCH="x86_64", tools=["msvc", "mslink"])
+driver_env.Append(CPPPATH=["src/", "openvr/"])
+driver_env.Append(CPPDEFINES=["NOMINMAX", "WIN32_LEAN_AND_MEAN", "_CRT_SECURE_NO_WARNINGS"])
+driver_env.Append(CXXFLAGS=["/std:c++20", "/EHsc", "/MT", "/O2", "/W3", "/bigobj"])
+driver_env.Append(LIBS=["d3d11", "d3dcompiler", "dxgi", "windowsapp", "user32", "advapi32", "mfplat", "mfuuid", "ws2_32", "ole32"])
+driver = driver_env.SharedLibrary(
+    "steamvr_driver/workplace/bin/win64/driver_workplace.dll",
+    [
+        driver_env.SharedObject("steamvr_driver/driver.obj", "steamvr_driver/driver.cpp"),
+        driver_env.SharedObject("steamvr_driver/frame_compositor.obj", "steamvr_driver/frame_compositor.cpp"),
+        driver_env.SharedObject("steamvr_driver/video_stream_driver.obj", "src/video_stream.cpp"),
+        driver_env.SharedObject("steamvr_driver/game_link_driver.obj", "src/game_link.cpp"),
+    ],
+)
+Default(driver)

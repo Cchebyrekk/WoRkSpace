@@ -212,6 +212,16 @@ class MfStream : public StreamBackend {
 	};
 	std::mutex submitted_mutex;
 	Submitted submitted;
+	// Shared pictures (start_shared, slice q1): the compositor's textures opened
+	// here, by handle; the query that tells the last copy is done. Under
+	// shared_mutex (the driver's thread copies, this one encodes).
+	bool shared_input = false;
+	uint64_t shared_luid = 0;
+	HANDLE first_shared = nullptr;
+	std::mutex shared_mutex;
+	std::atomic<bool> shared_ready{ false };
+	std::vector<std::pair<HANDLE, winrt::com_ptr<ID3D11Texture2D>>> shared_opened;
+	winrt::com_ptr<ID3D11Query> shared_copied;
 	winrt::com_ptr<ID3D11VideoDevice> video_device;
 	winrt::com_ptr<ID3D11VideoContext> video_context;
 	winrt::com_ptr<ID3D11VideoProcessorEnumerator> processor_enum;
@@ -257,6 +267,7 @@ public:
 			int32_t p_out_height, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps, std::string &error) override {
 		stop();
 		external = true;
+		shared_input = false;
 		d3d12_device = static_cast<ID3D12Device *>(p_device);
 		d3d12_queue = static_cast<ID3D12CommandQueue *>(p_queue);
 		capture_width = p_width & ~1;
@@ -284,10 +295,71 @@ public:
 		SetEvent(frame_event);
 	}
 
+	bool start_shared(uint64_t adapter_luid, void *first_texture, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps,
+			std::string &error) override {
+		stop();
+		external = true;
+		shared_input = true;
+		shared_luid = adapter_luid;
+		first_shared = static_cast<HANDLE>(first_texture);
+		return start(nullptr, p_port, p_bitrate_kbps, p_fps, error);
+	}
+
+	// The driver's thread, inside IVRVirtualDisplay::Present.
+	void shared_submit(void *p_texture, uint32_t pose_id) override {
+		if (!shared_ready) {
+			return;
+		}
+		try {
+			std::lock_guard<std::mutex> lock(shared_mutex);
+			HANDLE handle = static_cast<HANDLE>(p_texture);
+			winrt::com_ptr<ID3D11Texture2D> texture = open_shared_texture(handle);
+			auto mutex = texture.try_as<IDXGIKeyedMutex>();
+			if (mutex && mutex->AcquireSync(0, 50) != S_OK) {
+				return;
+			}
+			context->CopyResource(picture.get(), texture.get());
+			context->End(shared_copied.get());
+			if (mutex) {
+				mutex->ReleaseSync(0);
+			}
+			context->Flush();
+		} catch (const Failure &failure) {
+			trace(port, failure.what.c_str());
+			return;
+		}
+		{
+			std::lock_guard<std::mutex> lock(submitted_mutex);
+			submitted = { 0, 0, pose_id, StreamBackend::clock_us() };
+		}
+		SetEvent(frame_event);
+	}
+
+	void shared_wait(int32_t timeout_ms) override {
+		if (!shared_ready) {
+			return;
+		}
+		auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+		for (;;) {
+			{
+				std::lock_guard<std::mutex> lock(shared_mutex);
+				BOOL done = FALSE;
+				if (context->GetData(shared_copied.get(), &done, sizeof(done), 0) != S_FALSE) {
+					return;
+				}
+			}
+			if (std::chrono::steady_clock::now() >= until) {
+				return;
+			}
+			std::this_thread::sleep_for(std::chrono::microseconds(200));
+		}
+	}
+
 	bool start(void *monitor_handle, int32_t p_port, int32_t p_bitrate_kbps, int32_t p_fps, std::string &error) override {
 		if (monitor_handle != nullptr) {
 			stop();
 			external = false;
+			shared_input = false;
 		}
 		monitor = static_cast<HMONITOR>(monitor_handle);
 		port = p_port;
@@ -360,6 +432,7 @@ private:
 			trace(port, "start: running");
 			started = std::chrono::steady_clock::now();
 			alive = true;
+			shared_ready = shared_input;
 			reported = true;
 			ready.set_value("");
 			loop();
@@ -436,6 +509,76 @@ private:
 		shared_stats.height = height;
 	}
 
+	// A compositor texture on this device (opened once per handle; the compositor
+	// keeps a few and cycles through them). Under shared_mutex or before running.
+	winrt::com_ptr<ID3D11Texture2D> open_shared_texture(HANDLE handle) {
+		for (auto &entry : shared_opened) {
+			if (entry.first == handle) {
+				return entry.second;
+			}
+		}
+		winrt::com_ptr<ID3D11Texture2D> texture;
+		check(device->OpenSharedResource(handle, IID_PPV_ARGS(texture.put())), "open compositor texture");
+		if (shared_opened.size() >= 8) {
+			shared_opened.erase(shared_opened.begin());
+		}
+		shared_opened.emplace_back(handle, texture);
+		return texture;
+	}
+
+	// The device on the compositor's adapter and the picture in the format of its
+	// textures (slice q1).
+	void open_shared() {
+		winrt::com_ptr<IDXGIFactory4> factory;
+		check(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())), "DXGI factory");
+		LUID luid{ static_cast<DWORD>(shared_luid & 0xffffffff), static_cast<LONG>(shared_luid >> 32) };
+		winrt::com_ptr<IDXGIAdapter1> adapter;
+		check(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(adapter.put())), "the compositor's adapter");
+		check(D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+					  D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT, nullptr, 0,
+					  D3D11_SDK_VERSION, device.put(), nullptr, context.put()),
+				"D3D11CreateDevice");
+		context.as<ID3D11Multithread>()->SetMultithreadProtected(TRUE);
+		D3D11_TEXTURE2D_DESC desc{};
+		open_shared_texture(first_shared)->GetDesc(&desc);
+		// The copy keeps the bytes; an sRGB texture's bytes are already the picture.
+		switch (desc.Format) {
+			case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+			case DXGI_FORMAT_R8G8B8A8_UNORM:
+			case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+				desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+				break;
+			case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+			case DXGI_FORMAT_B8G8R8A8_UNORM:
+			case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+				desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+				break;
+			default:
+				throw Failure{ "compositor texture format " + std::to_string(desc.Format) + " is not 8-bit RGBA" };
+		}
+		capture_width = static_cast<int>(desc.Width) & ~1;
+		capture_height = static_cast<int>(desc.Height) & ~1;
+		double scale = std::min(1.0, static_cast<double>(MAX_SIDE) / std::max(capture_width, capture_height));
+		width = static_cast<int>(capture_width * scale) & ~1;
+		height = static_cast<int>(capture_height * scale) & ~1;
+		desc.Width = static_cast<UINT>(capture_width);
+		desc.Height = static_cast<UINT>(capture_height);
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.CPUAccessFlags = 0;
+		desc.MiscFlags = 0;
+		check(device->CreateTexture2D(&desc, nullptr, picture.put()), "picture texture");
+		D3D11_QUERY_DESC query{ D3D11_QUERY_EVENT, 0 };
+		check(device->CreateQuery(&query, shared_copied.put()), "copy query");
+		frame_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+		std::lock_guard<std::mutex> lock(stats_mutex);
+		shared_stats.width = width;
+		shared_stats.height = height;
+	}
+
 	// The newest picture Godot submitted, once its GPU work is done.
 	bool take_external() {
 		Submitted taken;
@@ -446,6 +589,15 @@ private:
 		}
 		if (taken.slot < 0) {
 			return false;
+		}
+		if (shared_input) {
+			// shared_submit has copied it already.
+			have_picture = true;
+			picture_time_us = taken.time_us;
+			picture_pose = taken.pose;
+			std::lock_guard<std::mutex> lock(stats_mutex);
+			shared_stats.frames_captured++;
+			return true;
 		}
 		check(context.as<ID3D11DeviceContext4>()->Wait(fence.get(), taken.fence_value), "fence wait");
 		context->CopyResource(picture.get(), shared[taken.slot].get());
@@ -459,7 +611,11 @@ private:
 
 	void open_capture() {
 		if (external) {
-			open_external();
+			if (shared_input) {
+				open_shared();
+			} else {
+				open_external();
+			}
 			return;
 		}
 		check(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -710,7 +866,9 @@ private:
 			if (client != INVALID_SOCKET && have_picture && need_input > 0 && due && room) {
 				encode_picture();
 				if (fresh) {
-					pushes = PUSH_REPEATS;
+					// Not for a game's frames (slice q1): 72 new ones a second at 3664x1920,
+					// the repeats tripled the headset's decoding and it fell behind.
+					pushes = shared_input ? 0 : PUSH_REPEATS;
 					last_picture = now;
 					fresh = false;
 				} else if (push) {
@@ -1056,6 +1214,12 @@ private:
 	}
 
 	void close_all() {
+		{
+			std::lock_guard<std::mutex> lock(shared_mutex);
+			shared_ready = false;
+			shared_opened.clear();
+			shared_copied = nullptr;
+		}
 		close_client();
 		if (listener != INVALID_SOCKET) {
 			closesocket(listener);

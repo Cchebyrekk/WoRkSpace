@@ -111,6 +111,30 @@ public:
 	String get_last_error() const;
 };
 
+// Slice q1, PC VR games: hands the headset's poses to the WoRkPlace SteamVR
+// driver (a shared mapping, game_link.h) and tells what the driver does.
+class GameBridge : public RefCounted {
+	GDCLASS(GameBridge, RefCounted)
+
+	String last_error;
+
+protected:
+	static void _bind_methods();
+
+public:
+	bool open();
+	String get_last_error() const;
+	void set_headset(bool p_connected);
+	// eyes: two Transform3D relative to the head; fov: two Vector4 of tangents
+	// (left, right, down, up), as the headset's `tracking` has them.
+	void write_head(int64_t p_pose_id, const Transform3D &p_head, bool p_head_ok, const Array &p_eyes, const Array &p_fov);
+	void write_controllers(const Array &p_controllers);
+	Array take_haptics();
+	void write_hands(const Array &p_hands);
+	// driver ("alive" within the last 2 s), port, width, height, frames.
+	Dictionary get_driver() const;
+};
+
 // Branch pc-render: streams what Godot draws for the headset (both eyes side by
 // side) like ScreenStreamer streams a monitor. Each frame: copy_eyes with the
 // render target (a 2-layer array) while the frame is drawn, then submit once

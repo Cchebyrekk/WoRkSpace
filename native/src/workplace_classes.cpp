@@ -1,5 +1,6 @@
 #include "workplace_classes.h"
 
+#include "game_link.h"
 #include "win_backend.h"
 
 #include <godot_cpp/classes/image.hpp>
@@ -93,6 +94,184 @@ Dictionary SoundStreamer::get_stats() const {
 
 String SoundStreamer::get_last_error() const {
 	return last_error;
+}
+
+void GameBridge::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("open"), &GameBridge::open);
+	ClassDB::bind_method(D_METHOD("get_last_error"), &GameBridge::get_last_error);
+	ClassDB::bind_method(D_METHOD("set_headset", "connected"), &GameBridge::set_headset);
+	ClassDB::bind_method(D_METHOD("write_head", "pose_id", "head", "head_ok", "eyes", "fov"), &GameBridge::write_head);
+	ClassDB::bind_method(D_METHOD("write_controllers", "controllers"), &GameBridge::write_controllers);
+	ClassDB::bind_method(D_METHOD("take_haptics"), &GameBridge::take_haptics);
+	ClassDB::bind_method(D_METHOD("write_hands", "hands"), &GameBridge::write_hands);
+	ClassDB::bind_method(D_METHOD("get_driver"), &GameBridge::get_driver);
+}
+
+namespace {
+
+workplace::GameLink *game_link() {
+	std::string error;
+	return workplace::game_link_open(error);
+}
+
+void put_transform(workplace::GameTransform &out, const Transform3D &transform) {
+	Quaternion rotation = transform.basis.get_rotation_quaternion();
+	out.rotation[0] = rotation.x;
+	out.rotation[1] = rotation.y;
+	out.rotation[2] = rotation.z;
+	out.rotation[3] = rotation.w;
+	out.position[0] = transform.origin.x;
+	out.position[1] = transform.origin.y;
+	out.position[2] = transform.origin.z;
+}
+
+} // namespace
+
+bool GameBridge::open() {
+	std::string error;
+	if (!workplace::game_link_open(error)) {
+		last_error = String::utf8(error.c_str());
+		return false;
+	}
+	last_error = "";
+	return true;
+}
+
+String GameBridge::get_last_error() const {
+	return last_error;
+}
+
+void GameBridge::set_headset(bool p_connected) {
+	workplace::GameLink *link = game_link();
+	if (!link) {
+		return;
+	}
+	link->sequence.fetch_add(1);
+	link->headset = p_connected ? 1 : 0;
+	link->sequence.fetch_add(1);
+	workplace::game_link_signal();
+}
+
+void GameBridge::write_head(int64_t p_pose_id, const Transform3D &p_head, bool p_head_ok, const Array &p_eyes, const Array &p_fov) {
+	workplace::GameLink *link = game_link();
+	if (!link || p_eyes.size() < 2 || p_fov.size() < 2) {
+		return;
+	}
+	link->sequence.fetch_add(1);
+	link->headset = 1;
+	link->pose_id = static_cast<uint32_t>(p_pose_id);
+	link->head_ok = p_head_ok ? 1 : 0;
+	link->written_us = workplace::StreamBackend::clock_us();
+	put_transform(link->head, p_head);
+	for (int i = 0; i < 2; i++) {
+		put_transform(link->eyes[i], p_eyes[i]);
+		Vector4 fov = p_fov[i];
+		link->fov[i][0] = fov.x;
+		link->fov[i][1] = fov.y;
+		link->fov[i][2] = fov.z;
+		link->fov[i][3] = fov.w;
+	}
+	link->sequence.fetch_add(1);
+	workplace::game_link_signal();
+}
+
+void GameBridge::write_controllers(const Array &controllers) {
+	auto *link = game_link();
+	if (!link || controllers.size() != 2) return;
+	link->sequence.fetch_add(1);
+	for (int i = 0; i < 2; i++) {
+		auto &out = link->controllers[i];
+		out = {};
+		Dictionary data = controllers[i];
+		String profile = data.get("profile", "");
+		if (!bool(data.get("ok", false)) || profile.is_empty() || profile.contains("hand_interaction")) continue;
+		out.ok = 1;
+		put_transform(out.aim, data.get("aim", Transform3D()));
+		put_transform(out.grip, data.get("grip", Transform3D()));
+		Dictionary inputs = data.get("inputs", Dictionary());
+		out.trigger = CLAMP(double(inputs.get("trigger", 0.0)), 0.0, 1.0);
+		out.grip_value = CLAMP(double(inputs.get("grip", 0.0)), 0.0, 1.0);
+		Vector2 stick = inputs.get("primary", Vector2());
+		out.stick[0] = CLAMP(stick.x, -1.0, 1.0); out.stick[1] = CLAMP(stick.y, -1.0, 1.0);
+		const char *clicks[] = {"ax_button", "by_button", "menu_button", "primary_click", "trigger_click", "grip_click", "thumbrest_touch"};
+		const char *touches[] = {"ax_touch", "by_touch", "", "primary_touch", "trigger_touch", "", "thumbrest_touch"};
+		for(int bit=0;bit<7;bit++) {
+			if(bool(inputs.get(clicks[bit], false))) out.buttons |= 1u << bit;
+			if(bool(inputs.get(touches[bit], false))) out.touches |= 1u << bit;
+		}
+	}
+	link->sequence.fetch_add(1);
+	workplace::game_link_signal();
+}
+
+void GameBridge::write_hands(const Array &hands) {
+	auto *link=game_link(); if(!link || hands.size()!=2) return;
+	link->sequence.fetch_add(1);
+	for(int h=0;h<2;h++) {
+		link->hand_ok[h]=0;
+		Dictionary data=hands[h];
+		// Controller-generated fingers are not optical hands.
+		int source=int(data.get("source",0));
+		if(!bool(data.get("ok",false)) || source==2 || source==3 || (source==0 && link->controllers[h].ok)) continue;
+		PackedFloat32Array joints=data.get("joints",PackedFloat32Array());
+		PackedInt32Array flags=data.get("flags",PackedInt32Array());
+		if(joints.size()!=26*7 || flags.size()!=26) continue;
+		Transform3D world[31]; bool valid=true;
+		for(int j=0;j<26;j++) {
+			if((flags[j]&5)!=5) {valid=false;break;}
+			Quaternion q(joints[j*7],joints[j*7+1],joints[j*7+2],joints[j*7+3]);
+			if(!q.is_finite() || q.length_squared()<0.5) {valid=false;break;}
+			Vector3 p(joints[j*7+4],joints[j*7+5],joints[j*7+6]);
+			if(!p.is_finite()) {valid=false;break;}
+			world[j]=Transform3D(Basis(q.normalized()),p);
+		}
+		if(!valid) continue;
+		put_transform(link->wrist[h],world[1]);
+		world[0]=world[1];
+		const int tips[]={5,10,15,20,25};
+		for(int i=0;i<5;i++) world[26+i]=world[tips[i]];
+		for(int j=0;j<31;j++) {
+			int parent=j-1;
+			if(j==0 || j==1) parent=0;
+			if(j==2||j==6||j==11||j==16||j==21) parent=1;
+			if(j>=26) parent=0;
+			put_transform(link->bones[h][j],world[parent].affine_inverse()*world[j]);
+		}
+		link->hand_ok[h]=1;
+	}
+	link->sequence.fetch_add(1);
+	workplace::game_link_signal();
+}
+
+Array GameBridge::take_haptics() {
+	Array result;
+	auto *link = game_link(); if(!link) return result;
+	for(int hand=0;hand<2;hand++) {
+		uint64_t pulse = link->haptics[hand].exchange(0);
+		if(!pulse) continue;
+		Dictionary item; item["t"]="haptic"; item["hand"]=hand;
+		item["duration"]=double(pulse & 65535)/1000.0;
+		item["amplitude"]=double((pulse >> 16)&1023)/1000.0;
+		item["frequency"]=double((pulse >> 26)&65535);
+		result.append(item);
+	}
+	return result;
+}
+
+Dictionary GameBridge::get_driver() const {
+	Dictionary result;
+	workplace::GameLink *link = game_link();
+	if (!link) {
+		return result;
+	}
+	uint64_t beat = link->driver_beat_us.load();
+	uint64_t now = workplace::StreamBackend::clock_us();
+	result["alive"] = beat != 0 && now >= beat && now - beat < 2'000'000;
+	result["port"] = static_cast<int64_t>(link->eyes_port.load());
+	result["width"] = static_cast<int64_t>(link->eyes_width.load());
+	result["height"] = static_cast<int64_t>(link->eyes_height.load());
+	result["frames"] = static_cast<int64_t>(link->frames_presented.load());
+	return result;
 }
 
 void EyeStreamer::_bind_methods() {

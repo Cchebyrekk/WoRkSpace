@@ -29,6 +29,9 @@ const RECEIVER_ID := 1
 ## The PC draws this much more than the eyes see on each side: a picture shown
 ## a little late still covers the view when the head turns (its edges showed).
 const FOV_MARGIN := 0.15
+## A game's (04.11.2026): at 15 % a quick turn showed the edge pixels drawn out
+## for a moment; the latency there is longer (SteamVR, the paced frames).
+const GAME_FOV_MARGIN := 0.3
 ## Each eye's plane is this much larger than its picture, the picture's edge
 ## drawn out over the rest: past the margin a quick turn shows a smear, not black.
 const PLANE_EXTEND := 2.0
@@ -102,6 +105,24 @@ var _screens: ScreenLayers
 ## The eyes' video: rows of the eyes, of the alpha mask under them.
 var _eye_rows := 1
 var _plane_distance := PLANE_DISTANCE
+## Slice q1: the eyes come from a PC VR game through SteamVR (game_host.gd), not
+## from WoRkPlace: no screens to put the planes at, and nothing of the game's
+## depth — the planes stand far, which keeps turns of the head right.
+var _game := false
+var _game_fov_margin := GAME_FOV_MARGIN
+var _projection: Object
+var _projection_strength := 0.55
+var _projection_error := ""
+## Leaving the games (04.11.2026: SteamVR had no way out from the headset): the
+## left menu button (≡, or the left hand's menu gesture) held EXIT_HOLD_SEC or
+## pressed twice within EXIT_TAP_SEC — the PC closes SteamVR and goes back to the
+## world in the headset.
+const EXIT_HOLD_SEC := 1.5
+const EXIT_TAP_SEC := 1.0
+var _menu_down := false
+var _menu_since := 0.0
+var _menu_last_tap := -10.0
+var _exit_sent := false
 ## The picture's share of the decoder's buffer (EYE_SHADER's crop).
 var _crop := Vector2.ONE
 var _mask_rows := 0
@@ -135,10 +156,15 @@ var _delay := DELAY_START_SEC
 var _last_head := Transform3D.IDENTITY
 var _last_head_time := -1.0
 var _angular_velocity := Vector3.ZERO
+## A game's: the sensors' angular velocity, smoothed by this much per frame.
+const GAME_SPIN_SMOOTHING := 0.35
+var _game_spin := Vector3.ZERO
 var _linear_velocity := Vector3.ZERO
 
 
 func _ready() -> void:
+	if Engine.has_singleton("GameProjection"):
+		_projection = Engine.get_singleton("GameProjection")
 	_xr = XRServer.find_interface("OpenXR")
 	if _xr == null or not _xr.is_initialized():
 		print("[player] OpenXR не поднялся")
@@ -191,12 +217,15 @@ func _process(_delta: float) -> void:
 	else:
 		_serve(now)
 	_show_picture()
-	_status.visible = not _receiving or _buffer == 0
-	_status.text = _describe()
+	_status.visible = _exit_sent or not _receiving or _buffer == 0
+	_status.text = "Закрываю SteamVR, возвращаюсь в мир…" if _exit_sent else _describe()
 	if now >= _next_log:
 		_next_log = now + 10.0
 		print("[player] %s; поз отправлено %d, картинок %d за 10 с, задержка %.0f мс, кадр глаза %s" % [_describe(), _sent,
 				_pictures, _delay * 1000.0, _xr.get_render_target_size()])
+		if _game and _receiver != null:
+			print("[player] кадры игры за 10 с: %s" % _receiver.pacingReport(RECEIVER_ID))
+			print("[player] задержка кадра игры от ПК: %s" % _receiver.latencyReport())
 		_sent = 0
 		_pictures = 0
 
@@ -294,7 +323,10 @@ func _serve(now: float) -> void:
 			"eyes":
 				_eyes_port = message["port"]
 				var strength: float = message.get("foveation", 1.0)
+				_projection_strength = strength
 				_mask_rows = message.get("mask", 0)
+				_game = message.get("game", false)
+				_exit_sent = false
 				_eye_rows = message["h"] - _mask_rows
 				for mesh in _eyes:
 					mesh.mesh = _plane_mesh(strength)
@@ -304,9 +336,16 @@ func _serve(now: float) -> void:
 				_screens.set_address(_pc_address)
 				print("[player] ПК рисует %dx%d, поток на порту %d" % [message["w"], message["h"], _eyes_port])
 				if _receiver != null:
-					_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+					_start_eyes()
 					_receiving = true
 					_buffer = 0
+			"games":
+				_game = true
+				_game_fov_margin = clampf(float(message.get("fov_percent", 30.0)), 0.0, 100.0) / 100.0
+			"haptic":
+				var hand := int(message["hand"])
+				if _game and hand >= 0 and hand < 2:
+					_xr.trigger_haptic_pulse("haptic", CONTROLLER_TRACKER_NAMES[hand], clampf(float(message["frequency"]), 0, 1000), clampf(float(message["amplitude"]), 0, 1), clampf(float(message["duration"]), 0, 5), 0)
 			"videos":
 				_screens.set_videos(message["videos"])
 			"layers":
@@ -322,13 +361,44 @@ func _serve(now: float) -> void:
 		_channel.put_var(LinkProtocol.ping(now))
 	if _receiving and _receiver != null and not _receiver.isAlive(RECEIVER_ID):
 		print("[player] поток глаз прервался: %s, снова" % _receiver.status(RECEIVER_ID))
-		_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+		_start_eyes()
 		_buffer = 0
 	_screens.poll(now, _camera.transform.origin)
 	_send_tracking()
+	_check_exit(now)
+
+
+## A game's eyes are paced (VideoReceiver: one frame per frame here, in order):
+## the newest only, its motion stuttered over Wi-Fi.
+func _start_eyes() -> void:
+	if _game:
+		_receiver.startTexturePaced(RECEIVER_ID, _pc_address, _eyes_port)
+	else:
+		_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+
+
+func _check_exit(now: float) -> void:
+	if not _game or _exit_sent or _channel == null:
+		return
+	var tracker := XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[0]) as XRControllerTracker
+	var down: bool = tracker != null and tracker.get_input(&"menu_button") == true
+	var leave := false
+	if down and not _menu_down:
+		_menu_since = now
+		leave = now - _menu_last_tap < EXIT_TAP_SEC
+		_menu_last_tap = now
+	elif down and now - _menu_since >= EXIT_HOLD_SEC:
+		leave = true
+	_menu_down = down
+	if leave:
+		_exit_sent = true
+		_channel.put_var({"t": "games_exit"})
+		print("[player] выход из игр: ПК закрывает SteamVR")
 
 
 func _reset(why: String) -> void:
+	if _projection != null:
+		_projection.clear()
 	print("[player] %s, ищу снова" % why)
 	if _receiver != null:
 		_receiver.stopAll()
@@ -339,6 +409,7 @@ func _reset(why: String) -> void:
 	_tcp = null
 	_channel = null
 	_greeted = false
+	_game = false
 	_receiving = false
 	_buffer = 0
 	_screens.reset()
@@ -357,8 +428,8 @@ func _send_tracking() -> void:
 		eyes.append(measured.affine_inverse() * _xr.get_transform_for_view(view, Transform3D.IDENTITY))
 		var p := _xr.get_projection_for_view(view, 1.0, 0.05, 100.0)
 		fov.append(Vector4((p[2][0] - 1.0) / p[0][0], (p[2][0] + 1.0) / p[0][0],
-				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + FOV_MARGIN))
-	var head := _predict(measured)
+				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + (_game_fov_margin if _game else FOV_MARGIN)))
+	var head := _predict(measured, head_pose)
 	var hands: Array = []
 	var controllers: Array = []
 	for i in 2:
@@ -366,7 +437,7 @@ func _send_tracking() -> void:
 		controllers.append(_controller(XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[i]) as XRControllerTracker))
 	_channel.put_var({"t": "tracking", "id": _pose_id, "head": head,
 			"head_ok": head_pose != null and head_pose.has_tracking_data, "eyes": eyes, "fov": fov,
-			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys()})
+			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys(), "game": _game})
 	_poses[_pose_id] = [head, eyes, fov]
 	_poses.erase(_pose_id - POSES_KEPT)
 	_sent_at[_pose_id] = Time.get_ticks_usec() / 1e6
@@ -376,7 +447,24 @@ func _send_tracking() -> void:
 
 ## The head `_delay` and a frame from now, going on as it moves (its speed
 ## smoothed over the last frames).
-func _predict(head: Transform3D) -> Transform3D:
+## In the games (04.11.2026, «the picture shrinks and grows while moving»): the
+## turn is foreseen by the runtime's own angular velocity (its sensors, as ALVR
+## takes it), the place not at all — the planes put a missed turn right, but a
+## missed step shows as the whole picture swelling and shrinking, and the speed
+## differenced from frame to frame overshot each start and stop. The sensors'
+## speed is smoothed too (GAME_SPIN_SMOOTHING; «it trembles a little», the user
+## chose smoothing the prediction): a jitter of it, times 80 ms ahead, shook
+## the pose the game drew with.
+func _predict(head: Transform3D, pose: XRPose = null) -> Transform3D:
+	if _game:
+		var ahead_game := _delay + 1.0 / maxf(Engine.get_frames_per_second(), 60.0)
+		var measured_spin := pose.angular_velocity if pose != null else Vector3.ZERO
+		_game_spin = _game_spin.lerp(measured_spin, GAME_SPIN_SMOOTHING)
+		var spin := _game_spin
+		var predicted_game := head
+		if spin.length() > 1e-4:
+			predicted_game.basis = Basis(spin.normalized(), spin.length() * ahead_game) * head.basis
+		return predicted_game
 	var now := Time.get_ticks_usec() / 1e6
 	var dt := now - _last_head_time
 	if _last_head_time >= 0.0 and dt > 0.001 and dt < 0.1:
@@ -486,8 +574,21 @@ func _show_picture() -> void:
 		_delay = clampf(lerpf(_delay, delay, DELAY_SMOOTHING), 0.0, DELAY_MAX_SEC)
 	var pose: Array = _poses[pose_id]
 	var head: Transform3D = pose[0]
+	if _game and _projection != null:
+		var eye_poses: Array = [head * (pose[1][0] as Transform3D), head * (pose[1][1] as Transform3D)]
+		var size := Vector2i(_receiver.textureWidth(RECEIVER_ID), _receiver.textureHeight(RECEIVER_ID))
+		var padded := Vector2i(_receiver.textureBufferWidth(RECEIVER_ID), _receiver.textureBufferHeight(RECEIVER_ID))
+		var submitted: bool = _projection.present(buffer, size, padded, eye_poses, pose[2], _projection_strength)
+		for mesh in _eyes:
+			mesh.visible = false
+		if not submitted:
+			var problem: String = _projection.get_error()
+			if problem != _projection_error:
+				_projection_error = problem
+				print("[projection] ", problem)
+		return
 	var looked_at := _screens.looked_at_distance(head.origin, -head.basis.z, LOOK_CONE)
-	var target := looked_at if looked_at > 0.0 else PLANE_DISTANCE
+	var target := PLANE_DISTANCE_RANGE.y if _game else (looked_at if looked_at > 0.0 else PLANE_DISTANCE)
 	_plane_distance = clampf(lerpf(_plane_distance, target, PLANE_DISTANCE_SMOOTHING),
 			PLANE_DISTANCE_RANGE.x, PLANE_DISTANCE_RANGE.y)
 	for eye in 2:

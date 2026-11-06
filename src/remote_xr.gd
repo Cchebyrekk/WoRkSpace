@@ -17,7 +17,7 @@ const CONTROLLER_TRACKER_NAMES: Array[StringName] = [&"left_hand", &"right_hand"
 const FLOAT_INPUTS: Array[StringName] = [&"trigger", &"grip"]
 const VECTOR_INPUTS: Array[StringName] = [&"primary"]
 const BUTTON_INPUTS: Array[StringName] = [&"trigger_click", &"trigger_touch", &"grip_click", &"primary_click",
-		&"primary_touch", &"ax_button", &"ax_touch", &"by_button", &"by_touch", &"menu_button"]
+		&"primary_touch", &"ax_button", &"ax_touch", &"by_button", &"by_touch", &"menu_button", &"thumbrest_touch"]
 
 ## Per-eye picture size; the headset's own is larger, a stream this size keeps the bitrate sane.
 var render_size := Vector2i(1440, 1536)

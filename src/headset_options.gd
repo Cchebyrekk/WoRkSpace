@@ -31,6 +31,8 @@ var link_mode := LINK_AUTO
 ## new pictures a second; the PC restarts its streams when either changes.
 var video_mbps := 12.0
 var video_fps := 60
+## Extra tangent coverage for PC VR games, percent. Applied on next game link.
+var game_fov_percent := 30.0
 ## A line under the view: the latency from the PC's capture to the decoder, and
 ## what the PC's encoder and the headset's decoders take.
 var video_stats := 0
