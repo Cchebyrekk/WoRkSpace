@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -102,7 +103,9 @@ bool read_link(workplace::GameLink *link, workplace::GameLink &out) {
 		std::memcpy(out.fov, link->fov, sizeof(out.fov));
 		std::memcpy(out.controllers, link->controllers, sizeof(out.controllers));
 		std::memcpy(out.hand_ok,link->hand_ok,sizeof(out.hand_ok));
+		std::memcpy(out.hand_trigger,link->hand_trigger,sizeof(out.hand_trigger));
 		std::memcpy(out.wrist,link->wrist,sizeof(out.wrist));
+		std::memcpy(out.hand_grip,link->hand_grip,sizeof(out.hand_grip));
 		std::memcpy(out.bones,link->bones,sizeof(out.bones));
 		std::atomic_thread_fence(std::memory_order_acquire);
 		if (link->sequence.load(std::memory_order_relaxed) == before) {
@@ -132,6 +135,18 @@ vr::HmdMatrix34_t matrix(const workplace::GameTransform &t) {
 	m.m[1][3] = t.position[1];
 	m.m[2][3] = t.position[2];
 	return m;
+}
+
+// Pose components take an offset in the device's local frame, not a world pose.
+vr::HmdMatrix34_t relative_pose(const workplace::GameTransform &raw, const workplace::GameTransform &target) {
+	auto a=matrix(raw), b=matrix(target);
+	vr::HmdMatrix34_t result{};
+	for(int row=0;row<3;row++) {
+		for(int col=0;col<3;col++)
+			for(int k=0;k<3;k++) result.m[row][col]+=a.m[k][row]*b.m[k][col];
+		for(int k=0;k<3;k++) result.m[row][3]+=a.m[k][row]*(b.m[k][3]-a.m[k][3]);
+	}
+	return result;
 }
 
 class Headset : public vr::ITrackedDeviceServerDriver,
@@ -189,9 +204,11 @@ public:
 	vr::EVRInitError Activate(uint32_t p_id) override {
 		id = p_id;
 		vr::PropertyContainerHandle_t props = vr::VRProperties()->TrackedDeviceToPropertyContainer(id);
-		vr::VRProperties()->SetStringProperty(props, vr::Prop_ModelNumber_String, "WoRkPlace Quest");
-		vr::VRProperties()->SetStringProperty(props, vr::Prop_ManufacturerName_String, "WoRkPlace");
-		vr::VRProperties()->SetStringProperty(props, vr::Prop_TrackingSystemName_String, "workplace");
+		// Old OpenVR games select Touch controls from the HMD family as well.
+		// Match the real headset's properties exposed by the Oculus driver.
+		vr::VRProperties()->SetStringProperty(props, vr::Prop_ModelNumber_String, "Meta Quest 3S");
+		vr::VRProperties()->SetStringProperty(props, vr::Prop_ManufacturerName_String, "Oculus");
+		vr::VRProperties()->SetStringProperty(props, vr::Prop_TrackingSystemName_String, "oculus");
 		vr::VRProperties()->SetFloatProperty(props, vr::Prop_UserIpdMeters_Float, DEFAULT_IPD);
 		vr::VRProperties()->SetFloatProperty(props, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
 		vr::VRProperties()->SetFloatProperty(props, vr::Prop_DisplayFrequency_Float, REFRESH_HZ);
@@ -633,16 +650,33 @@ class Controller : public vr::ITrackedDeviceServerDriver {
 	vr::DriverPose_t pose{};
 	vr::VRInputComponentHandle_t clicks[7]{}, touches[7]{}, scalars[4]{}, haptic=0;
 	vr::VRInputComponentHandle_t skeleton=0;
+	vr::VRInputComponentHandle_t pose_components[4]{}; // tip, OpenXR aim, handgrip, OpenXR grip
+	bool pose_error_logged=false;
 public:
 	explicit Controller(int p_hand) : hand(p_hand) {}
 	vr::EVRInitError Activate(uint32_t object) override {
 		id = object;
 		auto properties = vr::VRProperties()->TrackedDeviceToPropertyContainer(id);
-		vr::VRProperties()->SetStringProperty(properties, vr::Prop_TrackingSystemName_String, "workplace");
-		vr::VRProperties()->SetStringProperty(properties, vr::Prop_ModelNumber_String, "WoRkPlace Touch");
+		// Legacy games choose the Touch layout from these properties, before
+		// action bindings are available. The render model remains our simple box.
+		vr::VRProperties()->SetStringProperty(properties, vr::Prop_TrackingSystemName_String, "oculus");
+		vr::VRProperties()->SetStringProperty(properties, vr::Prop_ManufacturerName_String, "Oculus");
+		vr::VRProperties()->SetStringProperty(properties, vr::Prop_ModelNumber_String,
+				hand==0 ? "Oculus Quest2 (Left Controller)" : "Oculus Quest2 (Right Controller)");
 		vr::VRProperties()->SetStringProperty(properties, vr::Prop_RenderModelName_String, "{workplace}controller_box");
 		vr::VRProperties()->SetStringProperty(properties, vr::Prop_ControllerType_String, "oculus_touch");
 		vr::VRProperties()->SetStringProperty(properties, vr::Prop_InputProfilePath_String, "{oculus}/input/touch_profile.json");
+		vr::VRProperties()->SetUint64Property(properties,vr::Prop_SupportedButtons_Uint64,
+				(1ull<<0)|(1ull<<1)|(1ull<<2)|(1ull<<7)|(1ull<<32)|(1ull<<33)|(1ull<<34));
+		const int axis_types[]={vr::k_eControllerAxis_Joystick,vr::k_eControllerAxis_Trigger,vr::k_eControllerAxis_Trigger,
+				vr::k_eControllerAxis_None,vr::k_eControllerAxis_None};
+		for(int i=0;i<5;i++) vr::VRProperties()->SetInt32Property(properties,
+				static_cast<vr::ETrackedDeviceProperty>(vr::Prop_Axis0Type_Int32+i),axis_types[i]);
+		const char *pose_paths[]={"/pose/tip","/pose/openxr_aim","/pose/handgrip","/pose/openxr_grip"};
+		for(int i=0;i<4;i++) {
+			auto error=vr::VRDriverInput()->CreatePoseComponent(properties,pose_paths[i],&pose_components[i]);
+			log("controller %d pose %s: creation result %d",hand,pose_paths[i],int(error));
+		}
 		const char *names[] = {hand == 0 ? "x" : "a", hand == 0 ? "y" : "b", "system", "joystick", "trigger", "grip", "thumbrest"};
 		for(int i=0;i<7;i++) {
 			std::string base=std::string("/input/")+names[i];
@@ -658,7 +692,7 @@ public:
 		log("hand skeleton %d: creation result %d",hand,int(result));
 		vr::VRProperties()->SetInt32Property(properties, vr::Prop_ControllerRoleHint_Int32,
 				hand == 0 ? vr::TrackedControllerRole_LeftHand : vr::TrackedControllerRole_RightHand);
-		log("controller %s activated as %u (pose only)", hand == 0 ? "left" : "right", id);
+		log("controller %s activated as %u (Touch, legacy axes, separate aim/grip)", hand == 0 ? "left" : "right", id);
 		return vr::VRInitError_None;
 	}
 	void Deactivate() override { id = vr::k_unTrackedDeviceIndexInvalid; }
@@ -670,7 +704,12 @@ public:
 		if (id == vr::k_unTrackedDeviceIndexInvalid) return;
 		auto controller = state.controllers[hand];
 		bool optical=state.hand_ok[hand] && !controller.ok;
-		if(optical) {controller.ok=1;controller.grip=state.wrist[hand];}
+		if(optical) {
+			controller.ok=1;controller.grip=state.wrist[hand];
+			controller.aim=state.wrist[hand];
+			controller.trigger=state.hand_trigger[hand];
+			controller.touches|=workplace::GAME_BUTTON_TRIGGER;
+		}
 		pose = {};
 		pose.qWorldFromDriverRotation = {1,0,0,0};
 		pose.qDriverFromHeadRotation = {1,0,0,0};
@@ -682,6 +721,14 @@ public:
 		if (pose.poseIsValid) {
 			pose.qRotation = quaternion(controller.grip.rotation);
 			for(int i=0;i<3;i++) pose.vecPosition[i] = controller.grip.position[i];
+			auto aim=relative_pose(controller.grip,controller.aim);
+			auto grip=relative_pose(controller.grip,optical ? state.hand_grip[hand] : controller.grip);
+			for(int i=0;i<4;i++) if(pose_components[i]) {
+				auto error=vr::VRDriverInput()->UpdatePoseComponent(pose_components[i],i<2?&aim:&grip,0);
+				if(error!=vr::VRInputError_None && !pose_error_logged) {
+					log("controller %d pose update failed: %d",hand,int(error));pose_error_logged=true;
+				}
+			}
 		}
 		vr::VRServerDriverHost()->TrackedDevicePoseUpdated(id, pose, sizeof(pose));
 		if(optical && pose.poseIsValid && skeleton) {
@@ -723,6 +770,25 @@ class Provider : public vr::IServerTrackedDeviceProvider {
 public:
 	vr::EVRInitError Init(vr::IVRDriverContext *context) override {
 		VR_INIT_SERVER_DRIVER_CONTEXT(context);
+		// Starting SteamVR directly also starts our session watchdog. It holds a
+		// mutex, so the normal mode-3 launch does not create a second host.
+		HMODULE module=nullptr;
+		if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&matrix),&module)) {
+			wchar_t filename[32768]{};
+			if(GetModuleFileNameW(module,filename,32768)) {
+				auto root=std::filesystem::path(filename).parent_path();
+				for(int i=0;i<5;i++) root=root.parent_path();
+				auto script=root/L"tools"/L"link_server_watch.ps1";
+				if(std::filesystem::exists(script)) {
+					std::wstring command=L"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \""+script.wstring()+L"\" -Mode 3";
+					STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
+					if(CreateProcessW(nullptr,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,root.c_str(),&startup,&process)) {
+						CloseHandle(process.hThread);CloseHandle(process.hProcess);
+					}
+				}
+			}
+		}
 		std::string error;
 		link = workplace::game_link_open(error);
 		if (!link) {
@@ -771,6 +837,16 @@ public:
 		}
 		vr::VREvent_t event;
 		while (vr::VRServerDriverHost()->PollNextEvent(&event, sizeof(event))) {
+			if(event.eventType==vr::VREvent_SceneApplicationChanged) {
+				uint32_t pid=event.data.process.pid;
+				wchar_t path[32768]{}; DWORD length=32768;
+				HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+				if(process) {QueryFullProcessImageNameW(process,0,path,&length);CloseHandle(process);}
+				auto name=std::filesystem::path(path).filename().wstring();
+				if(name==L"steamtours.exe" || name==L"vrcompositor.exe" || name==L"vrserver.exe" || name==L"vrwebhelper.exe") pid=0;
+				link->scene_pid=pid;
+				log("scene application changed: pid %u",pid);
+			}
 			for(auto *controller:controllers) if(controller) controller->pulse(event,link);
 		}
 	}

@@ -2247,7 +2247,8 @@ func _test_work_mode() -> void:
 	_check(WorkMode.parse("2
 ") == WorkMode.PC_DRAWS, "режим: читается из файла")
 	_check(WorkMode.parse(" 0 ") == WorkMode.OPENXR, "режим: пробелы не мешают")
-	_check(WorkMode.parse("3") == -1 and WorkMode.parse("") == -1 and WorkMode.parse("x") == -1, "режим: чужое не принимается")
+	_check(WorkMode.parse("3") == WorkMode.PC_GAMES, "режим: игры с ПК")
+	_check(WorkMode.parse("4") == -1 and WorkMode.parse("") == -1 and WorkMode.parse("x") == -1, "режим: чужое не принимается")
 	_check(WorkMode.current() == WorkMode.OPENXR, "режим: без WORKPLACE_REMOTE — OpenXR на ПК")
 	_check(WorkMode.name_of(WorkMode.HEADSET_WORLD) == "мир в шлеме", "режим: имя")
 	_check(LinkProtocol.CALLS.has("app") and "work_mode" in LinkProtocol.CALLS["app"], "режим: шлем может попросить ПК")

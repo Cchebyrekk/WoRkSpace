@@ -33,12 +33,16 @@ function Write-Log([string]$text) {
 function Read-Mode {
     try {
         $text = (Get-Content -Path $ModeFile -TotalCount 1 -ErrorAction Stop).Trim()
-        if ($text -match '^[0-2]$') { return [int]$text }
+        if ($text -match '^[0-3]$') { return [int]$text }
     } catch {}
     return 1
 }
 
-if ($Mode -ge 0 -and $Mode -le 2) {
+if ($Mode -ge 0 -and $Mode -le 3) {
+    $previous = Read-Mode
+    if ($Mode -eq 3 -and $previous -ge 0 -and $previous -lt 3) {
+        Set-Content (Join-Path $Dir 'before_games.txt') $previous -Encoding ASCII
+    }
     Set-Content -Path $ModeFile -Value $Mode -Encoding ASCII
 }
 
@@ -48,8 +52,13 @@ if (-not $mutex.WaitOne(0)) { exit }
 Remove-Item -Force -ErrorAction SilentlyContinue $StopFile
 
 function Start-ForMode([int]$mode) {
+    if ($mode -eq 3) {
+        return Start-Process powershell.exe -WindowStyle Hidden -WorkingDirectory $Root -PassThru `
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'game_session.ps1') + '"')
+    }
     if ($mode -eq 1) {
         return Start-Process -FilePath $Godot -WorkingDirectory $Root -PassThru `
+            -WindowStyle Hidden `
             -ArgumentList '--headless', '--xr-mode', 'off', '--path', ('"' + $Root + '"'), 'res://scenes/link_server.tscn'
     }
     # --xr-mode on: Godot builds its two-eye shaders only then; without a headset

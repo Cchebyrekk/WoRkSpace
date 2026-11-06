@@ -31,7 +31,7 @@ const RECEIVER_ID := 1
 const FOV_MARGIN := 0.15
 ## A game's (04.11.2026): at 15 % a quick turn showed the edge pixels drawn out
 ## for a moment; the latency there is longer (SteamVR, the paced frames).
-const GAME_FOV_MARGIN := 0.3
+const GAME_FOV_MARGIN := 0.0
 ## Each eye's plane is this much larger than its picture, the picture's edge
 ## drawn out over the rest: past the margin a quick turn shows a smear, not black.
 const PLANE_EXTEND := 2.0
@@ -109,6 +109,10 @@ var _plane_distance := PLANE_DISTANCE
 ## from WoRkPlace: no screens to put the planes at, and nothing of the game's
 ## depth — the planes stand far, which keeps turns of the head right.
 var _game := false
+var _ray_settings: Dictionary = {}
+var _ray_forward: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _ray_time := -1.0
+var _link_mode := HeadsetOptions.LINK_AUTO
 var _game_fov_margin := GAME_FOV_MARGIN
 var _projection: Object
 var _projection_strength := 0.55
@@ -163,6 +167,10 @@ var _linear_velocity := Vector3.ZERO
 
 
 func _ready() -> void:
+	var config := ConfigFile.new()
+	if config.load("user://settings.cfg") == OK:
+		_link_mode = clampi(int(config.get_value("headset", "link_mode", 0)), 0, 2)
+		_game_fov_margin = clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0, 100) / 100.0
 	if Engine.has_singleton("GameProjection"):
 		_projection = Engine.get_singleton("GameProjection")
 	_xr = XRServer.find_interface("OpenXR")
@@ -251,8 +259,16 @@ func _describe() -> String:
 
 
 func _search(now: float) -> void:
+	# Auto prefers USB on the first attempt; Wi-Fi is the fallback if no reverse
+	# is available. Cable-only never discovers a Wi-Fi host.
+	if _tcp == null and _rounds == 0 and _link_mode != HeadsetOptions.LINK_WIFI:
+		_rounds = 1
+		_connect(LOCALHOST, LinkProtocol.REMOTE_CONTROL_PORT, now)
+		return
 	while _udp.get_available_packet_count() > 0:
 		var answer := LinkProtocol.parse_answer(_udp.get_packet())
+		if _link_mode == HeadsetOptions.LINK_CABLE:
+			continue
 		# A PC that answered over Wi-Fi wins over a try at the cable: with a stale
 		# `adb reverse` that one connects and drops at once, round after round.
 		if not answer.is_empty() and (_tcp == null or _pc_address == LOCALHOST):
@@ -282,12 +298,14 @@ func _search(now: float) -> void:
 		return
 	_next_search = now + SEARCH_SEC
 	for address in _broadcast_addresses():
+		if _link_mode == HeadsetOptions.LINK_CABLE:
+			break
 		_udp.set_dest_address(address, LinkProtocol.REMOTE_DISCOVERY_PORT)
 		_udp.put_packet(LinkProtocol.ask_packet())
 	# Over the cable (adb reverse tcp:47902 tcp:47902, tcp:47903 tcp:47903), every
 	# other round, so a Wi-Fi answer has time to come first.
 	_rounds += 1
-	if _rounds % 2 == 0:
+	if _link_mode != HeadsetOptions.LINK_WIFI and (_rounds % 2 == 0 or _link_mode == HeadsetOptions.LINK_CABLE):
 		_connect(LOCALHOST, LinkProtocol.REMOTE_CONTROL_PORT, now)
 
 
@@ -322,6 +340,7 @@ func _serve(now: float) -> void:
 		match message["t"]:
 			"eyes":
 				_eyes_port = message["port"]
+				_game_fov_margin = clampf(float(message.get("fov_percent", _game_fov_margin * 100)), 0, 100) / 100.0
 				var strength: float = message.get("foveation", 1.0)
 				_projection_strength = strength
 				_mask_rows = message.get("mask", 0)
@@ -341,7 +360,8 @@ func _serve(now: float) -> void:
 					_buffer = 0
 			"games":
 				_game = true
-				_game_fov_margin = clampf(float(message.get("fov_percent", 30.0)), 0.0, 100.0) / 100.0
+				_ray_settings = message.get("ray", {})
+				_game_fov_margin = clampf(float(message.get("fov_percent", 0.0)), 0.0, 100.0) / 100.0
 			"haptic":
 				var hand := int(message["hand"])
 				if _game and hand >= 0 and hand < 2:
@@ -410,6 +430,7 @@ func _reset(why: String) -> void:
 	_channel = null
 	_greeted = false
 	_game = false
+	_rounds = 0
 	_receiving = false
 	_buffer = 0
 	_screens.reset()
@@ -428,13 +449,20 @@ func _send_tracking() -> void:
 		eyes.append(measured.affine_inverse() * _xr.get_transform_for_view(view, Transform3D.IDENTITY))
 		var p := _xr.get_projection_for_view(view, 1.0, 0.05, 100.0)
 		fov.append(Vector4((p[2][0] - 1.0) / p[0][0], (p[2][0] + 1.0) / p[0][0],
-				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + (_game_fov_margin if _game else FOV_MARGIN)))
+				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + _game_fov_margin))
 	var head := _predict(measured, head_pose)
 	var hands: Array = []
 	var controllers: Array = []
 	for i in 2:
 		hands.append(_hand(XRServer.get_tracker(HAND_TRACKER_NAMES[i]) as XRHandTracker))
 		controllers.append(_controller(XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[i]) as XRControllerTracker))
+	var now := Time.get_ticks_usec() / 1e6
+	var dt := clampf(now - _ray_time, 0.001, 0.1) if _ray_time > 0 else 1.0 / 72.0
+	_ray_time = now
+	if _game:
+		for i in 2:
+			if hands[i].get("ok", false):
+				hands[i]["aim"] = _game_hand_ray(i, measured, hands[i], controllers[i], dt)
 	_channel.put_var({"t": "tracking", "id": _pose_id, "head": head,
 			"head_ok": head_pose != null and head_pose.has_tracking_data, "eyes": eyes, "fov": fov,
 			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys(), "game": _game})
@@ -483,6 +511,28 @@ func _predict(head: Transform3D, pose: XRPose = null) -> Transform3D:
 		predicted.basis = Basis(_angular_velocity / speed, speed * ahead) * head.basis
 	predicted.origin += _linear_velocity * ahead
 	return predicted
+
+
+func _game_hand_ray(side: int, head: Transform3D, hand: Dictionary, controller: Dictionary, dt: float) -> Transform3D:
+	if _ray_settings.get("use_runtime_aim", true) and controller.get("ok", false):
+		return controller["aim"]
+	var joints: PackedFloat32Array = hand["joints"]
+	var wrist := Vector3(joints[11], joints[12], joints[13])
+	var palm := Vector3(joints[4], joints[5], joints[6])
+	var middle := Vector3(joints[7 * 12 + 4], joints[7 * 12 + 5], joints[7 * 12 + 6])
+	var forward := (middle - wrist).normalized()
+	var previous := _ray_forward[side]
+	var speed := previous.angle_to(forward) / dt if previous != Vector3.ZERO else INF
+	_ray_forward[side] = PointerMath.smooth_direction(previous, PointerMath.deadband_direction(previous, forward, 0.010), dt, PointerMath.adaptive_smoothing(speed, 0.25, 0.03, 0.1, 1.0))
+	var sign_side := -1.0 if side == 0 else 1.0
+	var shoulder := PointerMath.hand_ray_direction(head, palm, sign_side, 0.2, 0.18)
+	var offset: Vector2 = _ray_settings.get("aim_offset_left" if side == 0 else "aim_offset_right", Vector2.ZERO)
+	var yaw := offset.x + deg_to_rad(float(_ray_settings.get("trim_yaw_right_deg", 0))) * sign_side
+	var pitch := -offset.y + deg_to_rad(float(_ray_settings.get("trim_pitch_down_deg", 0)))
+	var direction := PointerMath.pitch_direction(PointerMath.yaw_direction(PointerMath.blend_ray_direction(shoulder, _ray_forward[side], float(_ray_settings.get("rotation_weight", 0.5))), yaw), pitch)
+	var rotation := Quaternion(joints[7], joints[8], joints[9], joints[10])
+	var origin := Transform3D(Basis(rotation), wrist) * Vector3(0.02 * sign_side, 0.11, 0.06)
+	return Transform3D(Basis.looking_at(direction), origin)
 
 
 func _hand(tracker: XRHandTracker) -> Dictionary:

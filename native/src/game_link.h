@@ -12,11 +12,11 @@
 
 namespace workplace {
 
-constexpr const wchar_t *GAME_LINK_MAPPING = L"Local\\WoRkPlaceGameLinkV3";
+constexpr const wchar_t *GAME_LINK_MAPPING = L"Local\\WoRkPlaceGameLinkV6";
 // Set by the host after each new pose: the driver's pose thread waits on it.
 constexpr const wchar_t *GAME_LINK_EVENT = L"Local\\WoRkPlaceGameLinkPose";
 constexpr uint32_t GAME_LINK_MAGIC = 0x57524b47; // "WRKG"
-constexpr uint32_t GAME_LINK_VERSION = 3;
+constexpr uint32_t GAME_LINK_VERSION = 6;
 
 // Godot's and OpenVR's spaces agree (right-handed, Y up, -Z forward, metres).
 struct GameTransform {
@@ -62,7 +62,9 @@ struct GameLink {
 	float fov[2][4]; // tangents per eye: left (negative), right, down (negative), up
 	GameController controllers[2]; // left, right
 	uint32_t hand_ok[2];
+	float hand_trigger[2];
 	GameTransform wrist[2];
+	GameTransform hand_grip[2]; // anatomical frame, separate from the pointing ray
 	GameTransform bones[2][31]; // SteamVR parent-local bones, root identity
 
 	// Driver → host (written by the driver only).
@@ -71,6 +73,7 @@ struct GameLink {
 	std::atomic<uint32_t> eyes_width; // both eyes side by side
 	std::atomic<uint32_t> eyes_height;
 	std::atomic<uint32_t> frames_presented;
+	std::atomic<uint32_t> scene_pid;
 	// Latest pulse per hand: duration ms (16), amplitude/1000 (10), Hz (16).
 	// Single atomic exchange: no partial parameter reads across processes.
 	std::atomic<uint64_t> haptics[2];

@@ -32,6 +32,9 @@ var _eyes_told := ""
 var _driver_alive := false
 var _tracking_count := 0
 var _next_log := 0.0
+var _driver_wait_since := -1.0
+var _had_vr_app := false
+var _app_closed_since := -1.0
 
 
 func _ready() -> void:
@@ -55,6 +58,26 @@ func _process(_delta: float) -> void:
 	if now >= _next_driver_check:
 		_next_driver_check = now + DRIVER_CHECK_SEC
 		_check_driver()
+		var driver: Dictionary = _bridge.get_driver() if _bridge != null else {}
+		if driver.get("scene_pid", 0) != 0:
+			_had_vr_app = true
+			_app_closed_since = -1.0
+		elif _had_vr_app:
+			if _app_closed_since < 0:
+				_app_closed_since = now
+			elif now - _app_closed_since > 3.0:
+				print("[games] VR-приложение закрыто; возвращаю предыдущий режим")
+				_leave_games()
+				return
+		if not _driver_alive:
+			if _driver_wait_since < 0.0:
+				_driver_wait_since = now
+			elif now - _driver_wait_since > 45.0:
+				print("[games] драйвер WoRkPlace не появился за 45 с; возвращаю рабочий мир")
+				_leave_games()
+				return
+		else:
+			_driver_wait_since = -1.0
 	_update_sound(now)
 	if now >= _next_log and _device != "":
 		_next_log = now + 10.0
@@ -120,7 +143,10 @@ func _serve(now: float) -> void:
 				print("[games] шлем «%s» поздоровался" % _device)
 				var config := ConfigFile.new()
 				config.load("user://settings.cfg")
-				_send({"t": "games", "fov_percent": clampf(float(config.get_value("headset", "game_fov_percent", 30.0)), 0.0, 100.0)})
+				var ray := {}
+				for key: String in config.get_section_keys("ray"):
+					ray[key] = config.get_value("ray", key)
+				_send({"t": "games", "fov_percent": clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0.0, 100.0), "ray": ray})
 			"tracking":
 				tracking = message
 			"ping":
@@ -209,8 +235,13 @@ func _drop(why: String) -> void:
 ## stays is ended a few seconds later, the link server comes back (world in the
 ## headset) and this ends. The headset app follows by itself (headset_root.gd).
 func _leave_games() -> void:
-	print("[games] шлем просит выйти: закрываю SteamVR, включаю «мир в шлеме»")
+	print("[games] завершаю игровую сессию, возвращаю предыдущий режим")
 	_send({"t": "bye"})
+	if WorkMode.parse(FileAccess.get_file_as_string(WorkMode.file_path())) == WorkMode.PC_GAMES:
+		var previous := WorkMode.parse(FileAccess.get_file_as_string(WorkMode.file_path().get_base_dir().path_join("before_games.txt")))
+		WorkMode.write(previous if previous >= 0 and previous < WorkMode.PC_GAMES else WorkMode.HEADSET_WORLD)
+		get_tree().quit()
+		return
 	OS.create_process("taskkill.exe", ["/IM", "vrmonitor.exe"])
 	OS.create_process("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command",
 			"Start-Sleep 6; Get-Process vrmonitor,vrserver,vrcompositor,vrdashboard,vrwebhelper,vrstartup -ErrorAction SilentlyContinue | Stop-Process -Force"])

@@ -360,7 +360,7 @@ func _run_call(target: String, op: String, args: Array) -> void:
 		"app":
 			# The headset's world ends with the link; its app finds what runs next.
 			var mode: int = args[0] if not args.is_empty() and args[0] is int else -1
-			if mode >= WorkMode.OPENXR and mode <= WorkMode.PC_DRAWS and mode != WorkMode.HEADSET_WORLD:
+			if mode >= WorkMode.OPENXR and mode <= WorkMode.PC_GAMES and mode != WorkMode.HEADSET_WORLD:
 				WorkMode.switch_to(mode)
 				get_tree().quit()
 		"thumbs":

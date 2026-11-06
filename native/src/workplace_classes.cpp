@@ -226,8 +226,19 @@ void GameBridge::write_hands(const Array &hands) {
 			world[j]=Transform3D(Basis(q.normalized()),p);
 		}
 		if(!valid) continue;
-		put_transform(link->wrist[h],world[1]);
-		world[0]=world[1];
+		// Construct a controller frame pointing along the fingers. A joint frame
+		// is not a controller grip frame (raw wrist axes produced a sideways ray).
+		Vector3 forward=(world[11].origin-world[1].origin).normalized();
+		Vector3 normal=world[1].basis.get_column(1);
+		if(forward.length_squared()<0.5 || forward.cross(normal).length_squared()<0.01) continue;
+		Transform3D grip(Basis::looking_at(forward,normal),world[1].origin);
+		put_transform(link->hand_grip[h],grip);
+		if(data.has("aim")) grip = data["aim"];
+		put_transform(link->wrist[h],grip);
+		world[0]=grip;
+		float distance=world[5].origin.distance_to(world[10].origin);
+		bool pressed=link->hand_trigger[h]>0.5f;
+		link->hand_trigger[h]=(distance < (pressed?0.035f:0.025f))?1.0f:0.0f;
 		const int tips[]={5,10,15,20,25};
 		for(int i=0;i<5;i++) world[26+i]=world[tips[i]];
 		for(int j=0;j<31;j++) {
@@ -271,6 +282,7 @@ Dictionary GameBridge::get_driver() const {
 	result["width"] = static_cast<int64_t>(link->eyes_width.load());
 	result["height"] = static_cast<int64_t>(link->eyes_height.load());
 	result["frames"] = static_cast<int64_t>(link->frames_presented.load());
+	result["scene_pid"] = static_cast<int64_t>(link->scene_pid.load());
 	return result;
 }
 
