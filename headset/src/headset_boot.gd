@@ -212,6 +212,9 @@ func _update_lost_notice(now: float) -> void:
 	if up:
 		if _lost_since >= 0.0:
 			print("[link] связь вернулась через %.1f с" % (now - _lost_since))
+			# The PC may have restarted meanwhile: its Windows layout as it was (main.gd).
+			if is_instance_valid(_main) and _main.has_method(&"windows_layout_anew"):
+				_main.call(&"windows_layout_anew")
 		_lost_since = -1.0
 	elif _lost_since < 0.0:
 		_lost_since = now

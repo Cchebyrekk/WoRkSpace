@@ -871,6 +871,7 @@ void shutdown_backend() {
 	// A recording left running would keep its hook thread (and a joinable static
 	// std::thread, which terminates the process at exit).
 	key_recording_stop();
+	game_link_close();
 	std::lock_guard<std::mutex> lock(agent_mutex);
 	close_agent_pipe();
 }

@@ -16,6 +16,7 @@ extends RefCounted
 const OPENXR := 0
 const HEADSET_WORLD := 1
 const PC_DRAWS := 2
+const PC_GAMES := 3
 
 ## Set by main.gd's REMOTE_ENV (PC_DRAWS) and by the watchdog for what it runs.
 const REMOTE_ENV := "WORKPLACE_REMOTE"
@@ -29,7 +30,7 @@ static var remote_switch := Callable()
 
 
 static func name_of(mode: int) -> String:
-	return ["OpenXR на ПК (Link, SteamVR…)", "мир в шлеме", "ПК рисует"][clampi(mode, 0, 2)]
+	return ["OpenXR на ПК (Link, SteamVR…)", "мир в шлеме", "ПК рисует", "Игры с ПК (SteamVR)"][clampi(mode, 0, 3)]
 
 
 ## The mode this process runs in.
@@ -51,11 +52,17 @@ static func parse(text: String) -> int:
 	if not stripped.is_valid_int():
 		return -1
 	var mode := stripped.to_int()
-	return mode if mode >= OPENXR and mode <= PC_DRAWS else -1
+	return mode if mode >= OPENXR and mode <= PC_GAMES else -1
 
 
 static func write(mode: int) -> bool:
 	DirAccess.make_dir_recursive_absolute(file_path().get_base_dir())
+	if mode == PC_GAMES:
+		var previous := parse(FileAccess.get_file_as_string(file_path()))
+		if previous >= 0 and previous < PC_GAMES:
+			var saved := FileAccess.open(file_path().get_base_dir().path_join("before_games.txt"), FileAccess.WRITE)
+			if saved != null:
+				saved.store_string(str(previous))
 	var file := FileAccess.open(file_path(), FileAccess.WRITE)
 	if file == null:
 		print("[mode] не записать %s: %d" % [file_path(), FileAccess.get_open_error()])

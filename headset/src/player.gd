@@ -1,4 +1,5 @@
 extends Node3D
+const COMPARISON_UI := preload("res://src/game_comparison.gd")
 ## The headset app of the pc-render branch: the PC draws everything. This sends
 ## the head, the eyes, the hands and the controllers to the PC every frame
 ## (LinkProtocol "tracking") and shows the eyes' stream that comes back. Each
@@ -29,6 +30,9 @@ const RECEIVER_ID := 1
 ## The PC draws this much more than the eyes see on each side: a picture shown
 ## a little late still covers the view when the head turns (its edges showed).
 const FOV_MARGIN := 0.15
+## A game's (04.11.2026): at 15 % a quick turn showed the edge pixels drawn out
+## for a moment; the latency there is longer (SteamVR, the paced frames).
+const GAME_FOV_MARGIN := 0.0
 ## Each eye's plane is this much larger than its picture, the picture's edge
 ## drawn out over the rest: past the margin a quick turn shows a smear, not black.
 const PLANE_EXTEND := 2.0
@@ -102,6 +106,33 @@ var _screens: ScreenLayers
 ## The eyes' video: rows of the eyes, of the alpha mask under them.
 var _eye_rows := 1
 var _plane_distance := PLANE_DISTANCE
+## Slice q1: the eyes come from a PC VR game through SteamVR (game_host.gd), not
+## from WoRkPlace: no screens to put the planes at, and nothing of the game's
+## depth — the planes stand far, which keeps turns of the head right.
+var _game := false
+var _game_buffer_frames := 1
+var _comparison_ui: Variant
+var _comparison_profile := 1
+var _ui_down: Array[bool] = [false, false]
+var _ray_settings: Dictionary = {}
+var _ray_forward: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
+var _ray_time := -1.0
+var _link_mode := HeadsetOptions.LINK_AUTO
+var _game_fov_margin := GAME_FOV_MARGIN
+var _projection: Object
+var _projection_strength := 0.55
+var _projection_error := ""
+## Leaving the games (04.11.2026: SteamVR had no way out from the headset): the
+## left menu button (≡, or the left hand's menu gesture) held EXIT_HOLD_SEC or
+## pressed twice within EXIT_TAP_SEC — the PC closes SteamVR and goes back to the
+## world in the headset.
+const EXIT_HOLD_SEC := 1.5
+const EXIT_TAP_SEC := 1.0
+var _menu_down := false
+var _menu_since := 0.0
+var _menu_last_tap := -10.0
+var _exit_sent := false
+var _exit_started := 0.0
 ## The picture's share of the decoder's buffer (EYE_SHADER's crop).
 var _crop := Vector2.ONE
 var _mask_rows := 0
@@ -125,6 +156,7 @@ var _pose_id := 0
 ## Pose id -> [head, [eye transforms relative to the head], [fov tangents]].
 var _poses: Dictionary = {}
 var _shown_pose := -1
+var _shown_frame := -1
 var _buffer := 0
 var _next_log := 0.0
 var _sent := 0
@@ -135,10 +167,19 @@ var _delay := DELAY_START_SEC
 var _last_head := Transform3D.IDENTITY
 var _last_head_time := -1.0
 var _angular_velocity := Vector3.ZERO
+## A game's: the sensors' angular velocity, smoothed by this much per frame.
+const GAME_SPIN_SMOOTHING := 0.35
+var _game_spin := Vector3.ZERO
 var _linear_velocity := Vector3.ZERO
 
 
 func _ready() -> void:
+	var config := ConfigFile.new()
+	if config.load("user://settings.cfg") == OK:
+		_link_mode = clampi(int(config.get_value("headset", "link_mode", 0)), 0, 2)
+		_game_fov_margin = clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0, 100) / 100.0
+	if Engine.has_singleton("GameProjection"):
+		_projection = Engine.get_singleton("GameProjection")
 	_xr = XRServer.find_interface("OpenXR")
 	if _xr == null or not _xr.is_initialized():
 		print("[player] OpenXR не поднялся")
@@ -173,6 +214,11 @@ func _ready() -> void:
 	_status.no_depth_test = true
 	_status.position = STATUS_OFFSET
 	_camera.add_child(_status)
+	_comparison_ui = COMPARISON_UI.new()
+	_comparison_ui.position = Vector3(0, -0.36, -1.15)
+	_comparison_ui.visible = false
+	_comparison_ui.selected.connect(_select_profile)
+	_camera.add_child(_comparison_ui)
 	if OS.get_name() == "Android":
 		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
 		_sound = JavaClassWrapper.wrap("com.workplace.headset.SoundReceiver")
@@ -186,24 +232,37 @@ func _process(_delta: float) -> void:
 	if _origin == null:
 		return
 	var now := Time.get_ticks_msec() / 1000.0
+	if _exit_sent and now - _exit_started > 4.0:
+		_reset("выход подтверждается слишком долго, восстанавливаю связь")
 	if _channel == null:
 		_search(now)
 	else:
 		_serve(now)
 	_show_picture()
-	_status.visible = not _receiving or _buffer == 0
-	_status.text = _describe()
+	_comparison_ui.visible = _game and not _exit_sent and _channel != null
+	_status.visible = _exit_sent or not _receiving or _buffer == 0
+	_status.text = "Закрываю SteamVR, возвращаюсь в мир…" if _exit_sent else _describe()
 	if now >= _next_log:
 		_next_log = now + 10.0
 		print("[player] %s; поз отправлено %d, картинок %d за 10 с, задержка %.0f мс, кадр глаза %s" % [_describe(), _sent,
 				_pictures, _delay * 1000.0, _xr.get_render_target_size()])
+		if _game and _receiver != null:
+			var pacing := str(_receiver.pacingReport(RECEIVER_ID))
+			print("[player] кадры игры за 10 с: %s" % pacing)
+			print("[player] задержка кадра игры от ПК: %s" % _receiver.latencyReport())
+			var metrics := str(_receiver.frameTimings(RECEIVER_ID))
+			print("[q4-video] ", metrics)
+			var layer_metrics := str(_projection.timing_report()) if _projection != null else "projection unavailable"
+			print("[q4-layer] ", layer_metrics)
+			if _channel != null:
+				_channel.put_var({"t": "game_metrics", "video": metrics, "layer": layer_metrics, "pacing": pacing})
 		_sent = 0
 		_pictures = 0
 
 
 ## For headset_root.gd: whether a PC that draws is there.
 func connected() -> bool:
-	return _channel != null
+	return _channel != null and not _exit_sent
 
 
 ## headset_root.gd swaps to the other mode.
@@ -222,8 +281,16 @@ func _describe() -> String:
 
 
 func _search(now: float) -> void:
+	# Auto prefers USB on the first attempt; Wi-Fi is the fallback if no reverse
+	# is available. Cable-only never discovers a Wi-Fi host.
+	if _tcp == null and _rounds == 0 and _link_mode != HeadsetOptions.LINK_WIFI:
+		_rounds = 1
+		_connect(LOCALHOST, LinkProtocol.REMOTE_CONTROL_PORT, now)
+		return
 	while _udp.get_available_packet_count() > 0:
 		var answer := LinkProtocol.parse_answer(_udp.get_packet())
+		if _link_mode == HeadsetOptions.LINK_CABLE:
+			continue
 		# A PC that answered over Wi-Fi wins over a try at the cable: with a stale
 		# `adb reverse` that one connects and drops at once, round after round.
 		if not answer.is_empty() and (_tcp == null or _pc_address == LOCALHOST):
@@ -253,12 +320,14 @@ func _search(now: float) -> void:
 		return
 	_next_search = now + SEARCH_SEC
 	for address in _broadcast_addresses():
+		if _link_mode == HeadsetOptions.LINK_CABLE:
+			break
 		_udp.set_dest_address(address, LinkProtocol.REMOTE_DISCOVERY_PORT)
 		_udp.put_packet(LinkProtocol.ask_packet())
 	# Over the cable (adb reverse tcp:47902 tcp:47902, tcp:47903 tcp:47903), every
 	# other round, so a Wi-Fi answer has time to come first.
 	_rounds += 1
-	if _rounds % 2 == 0:
+	if _link_mode != HeadsetOptions.LINK_WIFI and (_rounds % 2 == 0 or _link_mode == HeadsetOptions.LINK_CABLE):
 		_connect(LOCALHOST, LinkProtocol.REMOTE_CONTROL_PORT, now)
 
 
@@ -293,8 +362,12 @@ func _serve(now: float) -> void:
 		match message["t"]:
 			"eyes":
 				_eyes_port = message["port"]
+				_game_fov_margin = clampf(float(message.get("fov_percent", _game_fov_margin * 100)), 0, 100) / 100.0
 				var strength: float = message.get("foveation", 1.0)
+				_projection_strength = strength
 				_mask_rows = message.get("mask", 0)
+				_game = message.get("game", false)
+				_exit_sent = false
 				_eye_rows = message["h"] - _mask_rows
 				for mesh in _eyes:
 					mesh.mesh = _plane_mesh(strength)
@@ -304,15 +377,37 @@ func _serve(now: float) -> void:
 				_screens.set_address(_pc_address)
 				print("[player] ПК рисует %dx%d, поток на порту %d" % [message["w"], message["h"], _eyes_port])
 				if _receiver != null:
-					_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+					_start_eyes()
 					_receiving = true
 					_buffer = 0
+			"games":
+				_game = true
+				_apply_profile(clampi(int(message.get("ab_profile", 1)), 0, 1))
+				_game_buffer_frames = clampi(int(message.get("buffer_frames", 1)), 0, 2)
+				_ray_settings = message.get("ray", {})
+				_game_fov_margin = clampf(float(message.get("fov_percent", 0.0)), 0.0, 100.0) / 100.0
+			"game_profile":
+				_game_buffer_frames = 1
+				_receiver.configurePacing(RECEIVER_ID, 1)
+				_apply_profile(int(message["profile"]))
+			"pose_ack":
+				if _receiver != null:
+					_receiver.recordUplink(RECEIVER_ID, int(message["sent_us"]), int(message["received_us"]))
+			"haptic":
+				var hand := int(message["hand"])
+				if _game and hand >= 0 and hand < 2:
+					_xr.trigger_haptic_pulse("haptic", CONTROLLER_TRACKER_NAMES[hand], clampf(float(message["frequency"]), 0, 1000), clampf(float(message["amplitude"]), 0, 1), clampf(float(message["duration"]), 0, 5), 0)
 			"videos":
 				_screens.set_videos(message["videos"])
 			"layers":
 				_screens.queue(message["pose"], message["layers"])
 			"bye":
 				_reset("ПК закрылся")
+				return
+			"games_leaving":
+				var previous := int(message["mode"])
+				_reset("выход из игр подтверждён ПК")
+				get_parent().call_deferred(&"return_from_games", previous)
 				return
 	if now - _last_heard > LinkProtocol.LINK_TIMEOUT_SEC:
 		_reset("ПК молчит")
@@ -322,13 +417,50 @@ func _serve(now: float) -> void:
 		_channel.put_var(LinkProtocol.ping(now))
 	if _receiving and _receiver != null and not _receiver.isAlive(RECEIVER_ID):
 		print("[player] поток глаз прервался: %s, снова" % _receiver.status(RECEIVER_ID))
-		_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+		_start_eyes()
 		_buffer = 0
 	_screens.poll(now, _camera.transform.origin)
 	_send_tracking()
+	_check_exit(now)
+
+
+## A game's eyes are paced (VideoReceiver: one frame per frame here, in order):
+## the newest only, its motion stuttered over Wi-Fi.
+func _start_eyes() -> void:
+	if _game:
+		_receiver.startTexturePaced(RECEIVER_ID, _pc_address, _eyes_port)
+		_receiver.configurePacing(RECEIVER_ID, _game_buffer_frames)
+		_receiver.configureComparison(RECEIVER_ID, _comparison_profile)
+	else:
+		_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
+
+
+func _check_exit(now: float) -> void:
+	if not _game or _exit_sent or _channel == null:
+		return
+	var tracker := XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[0]) as XRControllerTracker
+	var down: bool = tracker != null and tracker.get_input(&"menu_button") == true
+	var leave := false
+	if down and not _menu_down:
+		_menu_since = now
+		leave = now - _menu_last_tap < EXIT_TAP_SEC
+		_menu_last_tap = now
+	elif down and now - _menu_since >= EXIT_HOLD_SEC:
+		leave = true
+	_menu_down = down
+	if leave:
+		_exit_sent = true
+		_exit_started = now
+		_channel.put_var({"t": "games_exit"})
+		print("[player] выход из игр: ПК закрывает SteamVR")
 
 
 func _reset(why: String) -> void:
+	_exit_sent = false
+	_exit_started = 0.0
+	_shown_frame = -1
+	if _projection != null:
+		_projection.clear()
 	print("[player] %s, ищу снова" % why)
 	if _receiver != null:
 		_receiver.stopAll()
@@ -339,6 +471,8 @@ func _reset(why: String) -> void:
 	_tcp = null
 	_channel = null
 	_greeted = false
+	_game = false
+	_rounds = 0
 	_receiving = false
 	_buffer = 0
 	_screens.reset()
@@ -347,6 +481,8 @@ func _reset(why: String) -> void:
 
 
 func _send_tracking() -> void:
+	var sample_time := Time.get_ticks_usec() / 1e6
+	var sent_us: int = _receiver.monotonicUsec() if _receiver != null else 0
 	_pose_id += 1
 	var head_tracker := XRServer.get_tracker(&"head") as XRPositionalTracker
 	var head_pose: XRPose = head_tracker.get_pose(&"default") if head_tracker != null else null
@@ -357,26 +493,52 @@ func _send_tracking() -> void:
 		eyes.append(measured.affine_inverse() * _xr.get_transform_for_view(view, Transform3D.IDENTITY))
 		var p := _xr.get_projection_for_view(view, 1.0, 0.05, 100.0)
 		fov.append(Vector4((p[2][0] - 1.0) / p[0][0], (p[2][0] + 1.0) / p[0][0],
-				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + FOV_MARGIN))
-	var head := _predict(measured)
+				(p[2][1] - 1.0) / p[1][1], (p[2][1] + 1.0) / p[1][1]) * (1.0 + _game_fov_margin))
+	var head := _predict(measured, head_pose)
 	var hands: Array = []
 	var controllers: Array = []
 	for i in 2:
 		hands.append(_hand(XRServer.get_tracker(HAND_TRACKER_NAMES[i]) as XRHandTracker))
 		controllers.append(_controller(XRServer.get_tracker(CONTROLLER_TRACKER_NAMES[i]) as XRControllerTracker))
+	var now := Time.get_ticks_usec() / 1e6
+	var dt := clampf(now - _ray_time, 0.001, 0.1) if _ray_time > 0 else 1.0 / 72.0
+	_ray_time = now
+	if _game:
+		for i in 2:
+			if hands[i].get("ok", false):
+				hands[i]["aim"] = _game_hand_ray(i, measured, hands[i], controllers[i], dt)
+		if not _exit_sent:
+			_update_comparison_inputs(hands, controllers, dt)
 	_channel.put_var({"t": "tracking", "id": _pose_id, "head": head,
 			"head_ok": head_pose != null and head_pose.has_tracking_data, "eyes": eyes, "fov": fov,
-			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys()})
+			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys(), "game": _game, "sent_us": sent_us})
 	_poses[_pose_id] = [head, eyes, fov]
 	_poses.erase(_pose_id - POSES_KEPT)
-	_sent_at[_pose_id] = Time.get_ticks_usec() / 1e6
+	_sent_at[_pose_id] = sample_time
 	_sent_at.erase(_pose_id - POSES_KEPT)
 	_sent += 1
 
 
 ## The head `_delay` and a frame from now, going on as it moves (its speed
 ## smoothed over the last frames).
-func _predict(head: Transform3D) -> Transform3D:
+## In the games (04.11.2026, «the picture shrinks and grows while moving»): the
+## turn is foreseen by the runtime's own angular velocity (its sensors, as ALVR
+## takes it), the place not at all — the planes put a missed turn right, but a
+## missed step shows as the whole picture swelling and shrinking, and the speed
+## differenced from frame to frame overshot each start and stop. The sensors'
+## speed is smoothed too (GAME_SPIN_SMOOTHING; «it trembles a little», the user
+## chose smoothing the prediction): a jitter of it, times 80 ms ahead, shook
+## the pose the game drew with.
+func _predict(head: Transform3D, pose: XRPose = null) -> Transform3D:
+	if _game:
+		var ahead_game := _delay + 1.0 / maxf(Engine.get_frames_per_second(), 60.0)
+		var measured_spin := pose.angular_velocity if pose != null else Vector3.ZERO
+		_game_spin = _game_spin.lerp(measured_spin, GAME_SPIN_SMOOTHING)
+		var spin := _game_spin
+		var predicted_game := head
+		if spin.length() > 1e-4:
+			predicted_game.basis = Basis(spin.normalized(), spin.length() * ahead_game) * head.basis
+		return predicted_game
 	var now := Time.get_ticks_usec() / 1e6
 	var dt := now - _last_head_time
 	if _last_head_time >= 0.0 and dt > 0.001 and dt < 0.1:
@@ -395,6 +557,78 @@ func _predict(head: Transform3D) -> Transform3D:
 		predicted.basis = Basis(_angular_velocity / speed, speed * ahead) * head.basis
 	predicted.origin += _linear_velocity * ahead
 	return predicted
+
+
+func _select_profile(profile: int) -> void:
+	if _channel != null and _game and not _exit_sent:
+		_channel.put_var({"t": "game_profile", "profile": profile})
+
+
+func _apply_profile(profile: int) -> void:
+	_comparison_profile = profile
+	_comparison_ui.set_profile(profile)
+	if _receiver != null:
+		_receiver.configureComparison(RECEIVER_ID, profile)
+		_receiver.frameTimings(RECEIVER_ID)
+		_receiver.pacingReport(RECEIVER_ID)
+	if _projection != null:
+		_projection.timing_report()
+	_sent = 0
+	_pictures = 0
+	_next_log = Time.get_ticks_msec() / 1000.0 + 10.0
+	print("[q4-ab] ", "Как изначально" if profile == 0 else "Тест q4")
+
+
+func _update_comparison_inputs(hands: Array, controllers: Array, dt: float) -> void:
+	var aims: Array = [null, null]
+	var down: Array[bool] = [false, false]
+	for h in 2:
+		var controller: Dictionary = controllers[h]
+		var hand: Dictionary = hands[h]
+		var profile := str(controller.get("profile", ""))
+		var physical: bool = controller.get("ok", false) and not profile.is_empty() and not profile.contains("hand_interaction")
+		if physical:
+			aims[h] = _origin.global_transform * (controller["aim"] as Transform3D)
+			var inputs: Dictionary = controller.get("inputs", {})
+			down[h] = float(inputs.get("trigger", 0)) > (0.1 if _ui_down[h] else 0.75) or bool(inputs.get("trigger_click", false))
+		elif hand.get("ok", false) and int(hand.get("source", 0)) not in [2, 3] and hand.has("aim"):
+			var joints: PackedFloat32Array = hand.get("joints", PackedFloat32Array())
+			if joints.size() >= 26 * 7:
+				aims[h] = _origin.global_transform * (hand["aim"] as Transform3D)
+				var thumb := Vector3(joints[39], joints[40], joints[41])
+				var index := Vector3(joints[74], joints[75], joints[76])
+				down[h] = thumb.distance_to(index) < (0.035 if _ui_down[h] else 0.025)
+		_ui_down[h] = down[h]
+	var captured: Array[bool] = _comparison_ui.update_inputs(aims, down, dt)
+	for h in 2:
+		if captured[h]:
+			var inputs: Dictionary = controllers[h].get("inputs", {})
+			inputs["trigger"] = 0.0
+			inputs["trigger_click"] = false
+			controllers[h]["inputs"] = inputs
+			hands[h]["ui_capture"] = true
+
+
+func _game_hand_ray(side: int, head: Transform3D, hand: Dictionary, controller: Dictionary, dt: float) -> Transform3D:
+	if _ray_settings.get("use_runtime_aim", true) and controller.get("ok", false):
+		return controller["aim"]
+	var joints: PackedFloat32Array = hand["joints"]
+	var wrist := Vector3(joints[11], joints[12], joints[13])
+	var palm := Vector3(joints[4], joints[5], joints[6])
+	var middle := Vector3(joints[7 * 12 + 4], joints[7 * 12 + 5], joints[7 * 12 + 6])
+	var forward := (middle - wrist).normalized()
+	var previous := _ray_forward[side]
+	var speed := previous.angle_to(forward) / dt if previous != Vector3.ZERO else INF
+	_ray_forward[side] = PointerMath.smooth_direction(previous, PointerMath.deadband_direction(previous, forward, 0.010), dt, PointerMath.adaptive_smoothing(speed, 0.25, 0.03, 0.1, 1.0))
+	var sign_side := -1.0 if side == 0 else 1.0
+	var shoulder := PointerMath.hand_ray_direction(head, palm, sign_side, 0.2, 0.18)
+	var offset: Vector2 = _ray_settings.get("aim_offset_left" if side == 0 else "aim_offset_right", Vector2.ZERO)
+	var yaw := offset.x + deg_to_rad(float(_ray_settings.get("trim_yaw_right_deg", 0))) * sign_side
+	var pitch := -offset.y + deg_to_rad(float(_ray_settings.get("trim_pitch_down_deg", 0)))
+	var direction := PointerMath.pitch_direction(PointerMath.yaw_direction(PointerMath.blend_ray_direction(shoulder, _ray_forward[side], float(_ray_settings.get("rotation_weight", 0.5))), yaw), pitch)
+	var rotation := Quaternion(joints[7], joints[8], joints[9], joints[10])
+	var origin := Transform3D(Basis(rotation), wrist) * Vector3(0.02 * sign_side, 0.11, 0.06)
+	return Transform3D(Basis.looking_at(direction), origin)
 
 
 func _hand(tracker: XRHandTracker) -> Dictionary:
@@ -475,19 +709,38 @@ func _show_picture() -> void:
 			print("[player] первая картинка")
 		_buffer = buffer
 		_texture.set_external_buffer_id(buffer)
-		_pictures += 1
 	var pose_id: int = _receiver.textureFramePose(RECEIVER_ID)
-	if pose_id == _shown_pose or not _poses.has(pose_id):
+	var frame_time: int = _receiver.textureFrameTime(RECEIVER_ID)
+	# Two different game frames can use the same head pose. Frame identity is
+	# its stream timestamp, not the tracking sample number or recycled EGLImage.
+	if frame_time == _shown_frame or not _poses.has(pose_id):
 		return
+	_shown_frame = frame_time
 	_shown_pose = pose_id
+	_pictures += 1
 	_screens.picture_shown(pose_id)
 	if _sent_at.has(pose_id):
 		var delay: float = Time.get_ticks_usec() / 1e6 - _sent_at[pose_id]
 		_delay = clampf(lerpf(_delay, delay, DELAY_SMOOTHING), 0.0, DELAY_MAX_SEC)
 	var pose: Array = _poses[pose_id]
 	var head: Transform3D = pose[0]
+	if _game and _projection != null:
+		var eye_poses: Array = [head * (pose[1][0] as Transform3D), head * (pose[1][1] as Transform3D)]
+		var size := Vector2i(_receiver.textureWidth(RECEIVER_ID), _receiver.textureHeight(RECEIVER_ID))
+		var padded := Vector2i(_receiver.textureBufferWidth(RECEIVER_ID), _receiver.textureBufferHeight(RECEIVER_ID))
+		var source_age_ms: float = (Time.get_ticks_usec() / 1e6 - float(_sent_at[pose_id])) * 1000 if _sent_at.has(pose_id) else -1.0
+		var video_age_ms: float = _receiver.textureAgeMs(RECEIVER_ID)
+		var submitted: bool = _projection.present(buffer, size, padded, eye_poses, pose[2], _projection_strength, source_age_ms, video_age_ms)
+		for mesh in _eyes:
+			mesh.visible = false
+		if not submitted:
+			var problem: String = _projection.get_error()
+			if problem != _projection_error:
+				_projection_error = problem
+				print("[projection] ", problem)
+		return
 	var looked_at := _screens.looked_at_distance(head.origin, -head.basis.z, LOOK_CONE)
-	var target := looked_at if looked_at > 0.0 else PLANE_DISTANCE
+	var target := PLANE_DISTANCE_RANGE.y if _game else (looked_at if looked_at > 0.0 else PLANE_DISTANCE)
 	_plane_distance = clampf(lerpf(_plane_distance, target, PLANE_DISTANCE_SMOOTHING),
 			PLANE_DISTANCE_RANGE.x, PLANE_DISTANCE_RANGE.y)
 	for eye in 2:

@@ -30,8 +30,12 @@ var _videos_serial := -1
 const RETRY_SEC := 1.0
 const RETRY_MAX_SEC := 30.0
 ## How many decoders this headset gives at once, learnt from the first refusal
-## (the user's setting may ask for more); learnt again when the setting changes.
+## (the user's setting may ask for more); learnt again when the setting changes,
+## and tried one higher after LIMIT_RETRY_SEC with no refusal (02.11.2026: refusals
+## while streams restarted after a lost link left it at 1 for good).
 var _decoder_limit := 1 << 30
+var _limit_retry_at := 0.0
+const LIMIT_RETRY_SEC := 30.0
 var _limit_for_setting := -1
 
 
@@ -107,6 +111,7 @@ func poll(now: float, camera: Camera3D) -> void:
 		screen["retry_at"] = now + minf(RETRY_SEC * pow(2.0, failures - 1), RETRY_MAX_SEC)
 		if _receiver.decoderFailed(screen["id"]):
 			var working := _working_count()
+			_limit_retry_at = now + LIMIT_RETRY_SEC
 			if working < _decoder_limit:
 				_decoder_limit = maxi(working, 1)
 				print("[video] шлем дал только %d декодеров — живых экранов будет не больше" % _decoder_limit)
@@ -114,6 +119,11 @@ func poll(now: float, camera: Camera3D) -> void:
 			print("[video] %s: поток прервался (%s), снова через %.0f с" % [key, _receiver.status(screen["id"]),
 					screen["retry_at"] - now])
 		_stop(screen)
+	var asked := HeadsetOptions.current.live_screens if HeadsetOptions.current != null else DEFAULT_LIVE
+	if _decoder_limit < asked and now >= _limit_retry_at:
+		_decoder_limit += 1
+		_limit_retry_at = now + LIMIT_RETRY_SEC
+		print("[video] пробую %d декодеров" % _decoder_limit)
 	if now >= _next_live_check and camera != null:
 		_next_live_check = now + LIVE_CHECK_SEC
 		_choose_live(camera)

@@ -28,3 +28,13 @@
 /headset/android/
 /headset/addons/workplace_video/bin/
 /headset/shared/
+
+# SteamVR driver (slice q1): the OpenVR header is downloaded, the DLL built locally
+/native/openvr/
+/native/steamvr_driver/*.obj
+/native/steamvr_driver/workplace/bin/
+/headset/native/include/
+/headset/native/.sconsign*
+/headset/native/*.os
+!/native/steamvr_driver/workplace/resources/rendermodels/controller_box/controller_box.obj
+/headset/addons/workplace_projection/bin/

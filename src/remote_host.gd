@@ -226,8 +226,11 @@ func _start_eyes() -> void:
 		return
 	print("[remote] поток глаз: рисую %dx%d, шлю %dx%d с фовеацией %.2f, HEVC %d кбит/с, %d к/с" % [EYE_SIZE.x * 2,
 			EYE_SIZE.y, SENT_EYE_SIZE.x * 2, SENT_EYE_SIZE.y, Foveation.STRENGTH, BITRATE_KBPS, FPS])
+	var config := ConfigFile.new()
+	config.load("user://settings.cfg")
 	_send({"t": "eyes", "port": LinkProtocol.REMOTE_EYES_PORT, "w": SENT_EYE_SIZE.x * 2,
-			"h": SENT_EYE_SIZE.y + MASK_ROWS, "mask": MASK_ROWS, "foveation": Foveation.STRENGTH})
+			"h": SENT_EYE_SIZE.y + MASK_ROWS, "mask": MASK_ROWS, "foveation": Foveation.STRENGTH,
+			"fov_percent": clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0, 100)})
 
 
 func _stop_eyes() -> void:

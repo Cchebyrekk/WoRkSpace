@@ -199,6 +199,15 @@ static func assign(fixtures: Array[Fixture], key: String, target: int) -> void:
 			fixture.monitors.append(key)
 
 
+## The first fixture of `kind` ("sphere", "wall", "column"), or null (a saved
+## layout's screens go back to the first of the kind they stood on, 04.11.2026).
+static func first_of_kind(fixtures: Array[Fixture], kind: String) -> Fixture:
+	for fixture in fixtures:
+		if fixture.kind == kind:
+			return fixture
+	return null
+
+
 ## The fixture holding monitor `key`, or the first one.
 static func fixture_of(fixtures: Array[Fixture], key: String) -> Fixture:
 	for fixture in fixtures:

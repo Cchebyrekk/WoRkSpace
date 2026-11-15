@@ -1,0 +1,6 @@
+{
+	"driver_workplace": {
+		"enable": true,
+		"loadPriority": 100
+	}
+}

@@ -1,0 +1,7 @@
+[configuration]
+entry_symbol = "workplace_projection_init"
+compatibility_minimum = "4.7"
+
+[libraries]
+android.debug.arm64 = "res://addons/workplace_projection/bin/libworkplace_projection.so"
+android.release.arm64 = "res://addons/workplace_projection/bin/libworkplace_projection.so"
