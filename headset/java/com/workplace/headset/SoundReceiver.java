@@ -110,7 +110,8 @@ public final class SoundReceiver {
 		Socket connection = new Socket();
 		connection.setTcpNoDelay(true);
 		socket = connection;
-		connection.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+		connection = InternetTransport.connect(connection, host, port, CONNECT_TIMEOUT_MS);
+		socket = connection;
 		InputStream raw = connection.getInputStream();
 		DataInputStream input = new DataInputStream(raw);
 		byte[] magic = new byte[4];

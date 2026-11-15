@@ -44,6 +44,7 @@ var _device := ""
 var _udp := PacketPeerUDP.new()
 var _tcp: StreamPeerTCP
 var _channel: PacketPeerStream
+var _internet: InternetLink.Request
 var _next_search := 0.0
 var _started := 0.0
 var _last_heard := 0.0
@@ -96,6 +97,11 @@ func close() -> void:
 
 
 func _search(now: float) -> void:
+	if InternetLink.enabled():
+		if now >= _next_search:
+			_next_search = now + SEARCH_SEC
+			_connect(LOCALHOST, LinkProtocol.CONTROL_PORT, now)
+		return
 	while _udp.get_available_packet_count() > 0:
 		var answer := LinkProtocol.parse_answer(_udp.get_packet())
 		var ip := _udp.get_packet_ip()
@@ -140,6 +146,15 @@ func _broadcast_addresses() -> Array[String]:
 
 
 func _connect(ip: String, port: int, now: float) -> void:
+	if not InternetLink.configure_video():
+		return
+	if InternetLink.enabled():
+		_internet = InternetLink.request("tunnel", {"port": port})
+		_tcp = _internet.tcp
+		pc_address = LOCALHOST
+		_started = now
+		state = State.CONNECTING
+		return
 	_tcp = StreamPeerTCP.new()
 	if _tcp.connect_to_host(ip, port) != OK:
 		_tcp = null
@@ -150,6 +165,13 @@ func _connect(ip: String, port: int, now: float) -> void:
 
 
 func _connecting(now: float) -> void:
+	if _internet != null:
+		_internet.poll()
+		if _internet.failed:
+			_reset("интернет: %s" % _internet.error_code)
+			return
+		if not _internet.ready:
+			return
 	_tcp.poll()
 	match _tcp.get_status():
 		StreamPeerTCP.STATUS_CONNECTED:
@@ -158,7 +180,7 @@ func _connecting(now: float) -> void:
 			_channel = PacketPeerStream.new()
 			_channel.input_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
 			_channel.output_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
-			_channel.stream_peer = _tcp
+			_channel.stream_peer = _internet.tls if _internet != null else _tcp
 			_channel.put_var(LinkProtocol.hello(_device))
 			_last_heard = now
 			_next_ping = now
@@ -172,6 +194,14 @@ func _connecting(now: float) -> void:
 
 
 func _connected(now: float) -> void:
+	if (_internet != null) != InternetLink.enabled():
+		_reset("способ подключения изменён")
+		return
+	if _internet != null:
+		_internet.poll()
+		if _internet.failed:
+			_reset("интернет-канал закрыт")
+			return
 	# The user switched to the other way: this connection goes, the next is found.
 	var mode := _mode()
 	var cable := pc_address == LOCALHOST
@@ -243,6 +273,12 @@ func _take_monitors(list: Array) -> void:
 func _reset(why: String) -> void:
 	if why != "":
 		print("[link] %s, ищу снова" % why)
+	if _internet != null and state == State.CONNECTED and not videos.is_empty():
+		# Keep the last decoded screens while the authenticated link retries.
+		InternetLink.prepare_transport_change()
+	if _internet != null:
+		_internet.close()
+		_internet = null
 	if _tcp != null:
 		_tcp.disconnect_from_host()
 	_tcp = null

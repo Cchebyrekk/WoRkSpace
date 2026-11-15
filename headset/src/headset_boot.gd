@@ -46,11 +46,14 @@ var _sound_from := ""
 
 
 func _ready() -> void:
+	# A transport chosen offline must reach the PC before importing its old choice.
+	_settings_unsent = InternetLink.has_local_choice()
 	# Before main.gd every frame: the link's news (monitors, streams) come first.
 	process_priority = -100
 	_link = HeadsetLink.new(OS.get_model_name())
 	PcLink.link = _link
 	PcLink.screens = VideoScreens.new()
+	InternetLink.freeze_video = PcLink.screens.freeze_last_frames
 	VddConfig.remote_text = _vdd_config_text
 	VddConfig.remote_write = _write_vdd_config
 	WorkMode.remote_switch = _switch_work_mode
@@ -98,6 +101,7 @@ func _send_settings() -> void:
 	_settings_unsent = text == "" or not PcLink.connected()
 	if not _settings_unsent:
 		_link.send(LinkProtocol.settings_message(text))
+		InternetLink.clear_local_choice()
 
 
 ## For headset_root.gd: whether the PC's link server is there.
@@ -156,8 +160,9 @@ func _process(_delta: float) -> void:
 	_update_lost_notice(now)
 	var options := HeadsetOptions.current
 	if options != null:
-		_link.video_kbps = roundi(options.video_mbps * 1000.0)
-		_link.video_fps = options.video_fps
+		var stream_options := options.video_for_transport(InternetLink.enabled())
+		_link.video_kbps = stream_options.x
+		_link.video_fps = stream_options.y
 	_update_video_stats(now, options != null and options.video_stats != 0)
 
 
@@ -190,6 +195,8 @@ func _update_video_stats(now: float, shown: bool) -> void:
 
 func _describe_video() -> String:
 	var lines: Array[String] = []
+	if _link.rtt_ms >= 0.0:
+		lines.append("управление: ответ ПК за %.0f мс" % _link.rtt_ms)
 	var report: String = _receiver.latencyReport() if _receiver != null else ""
 	if report != "":
 		# count arrived shown shownMax decode decodeMax (VideoReceiver.latencyReport)
@@ -265,6 +272,7 @@ func _stop_sound() -> void:
 
 ## headset_root.gd swaps to the other mode: nothing of this one may stay.
 func _exit_tree() -> void:
+	InternetLink.freeze_video = Callable()
 	_stop_sound()
 	if PcLink.screens != null:
 		PcLink.screens.stop_all()
