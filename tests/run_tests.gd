@@ -32,6 +32,7 @@ func _init() -> void:
 	_test_wall_split()
 	_test_wall_resize()
 	_test_kept_layout_and_live()
+	_test_slot_screens()
 	_test_column_and_lean()
 	_test_place_network()
 	_test_desktop_groups()
@@ -1494,6 +1495,31 @@ static func _split_wall(splits: Dictionary) -> WallLayout.Wall:
 	var wall := WallLayout.Wall.new()
 	wall.splits = splits
 	return wall
+
+
+## A saved layout's screens back on the first fixture of their kind (04.11.2026).
+func _test_slot_screens() -> void:
+	var sphere := WorldLayout.Fixture.new()
+	sphere.id = 1
+	var wall_a := WorldLayout.Fixture.new()
+	wall_a.id = 2
+	wall_a.kind = "wall"
+	var wall_b := WorldLayout.Fixture.new()
+	wall_b.id = 3
+	wall_b.kind = "wall"
+	var fixtures: Array[WorldLayout.Fixture] = [sphere, wall_a, wall_b]
+	_check(WorldLayout.first_of_kind(fixtures, "wall") == wall_a and WorldLayout.first_of_kind(fixtures, "column") == null,
+			"ячейка раскладки: первая заготовка того же вида")
+	var wall := WallLayout.Wall.new()
+	wall.splits = {"1,0": "c2"}
+	wall.cells = {"x": Rect2i(0, 0, 1, 1)}
+	var into := WallLayout.placed_back(wall, "m", "1,0:1", Rect2i())
+	_check(into.parts.get("m") == "1,0:1", "ячейка раскладки: экран на своё место на стене")
+	var taken := wall.copy()
+	taken.parts = {"y": "1,0:1"}
+	var aside := WallLayout.placed_back(taken, "m", "1,0:1", Rect2i(2, 0, 1, 1))
+	_check(aside.parts.get("y") == "1,0:1" and aside.cells.get("m") == Rect2i(2, 0, 1, 1), "ячейка раскладки: место занято — на свои клетки")
+	_check(WallLayout.placed_back(wall, "m", "9,9:3", Rect2i()) == wall, "ячейка раскладки: места нет — как было")
 
 
 ## The Windows layout kept between runs; which screens are live (01.11.2026).

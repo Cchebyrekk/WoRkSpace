@@ -1862,6 +1862,16 @@ static func into(wall: Wall, key: String, leaf: String) -> Wall:
 	return result
 
 
+## Screen `key` back where a saved layout had it: in place `place` if that is a
+## free place on the wall now, else onto whole cells `cells` (if any), else as it is.
+static func placed_back(wall: Wall, key: String, place: String, cells: Rect2i) -> Wall:
+	if place != "" and is_leaf(wall, place) and wall.occupant(place) in ["", key]:
+		return into(wall, key, place)
+	if cells.has_area():
+		return onto_cells(wall, key, cells)
+	return wall
+
+
 ## Screen `key` onto whole cells at `target` (kept off split cells); screens there
 ## step aside as in `moved`.
 static func onto_cells(wall: Wall, key: String, target: Rect2i) -> Wall:

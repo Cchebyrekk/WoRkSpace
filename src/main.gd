@@ -170,7 +170,7 @@ const TUNABLES := [
 	["world", "vignette", "Затемнение краёв при движении", 100.0, "%", 0.1, 0.0, 1.0],
 	["world", "grid", "Сетка точками", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "grid_step", "Сетка: шаг", 1.0, "м", 0.25, 0.25, 5.0],
-	["world", "status_line", "Строка состояния", 1.0, "", 1.0, 0.0, 1.0],
+	["world", "status_line", "Строка состояния", 1.0, "", 1.0, -1.0, 1.0],
 	["world", "keyboard_bars", "Клавиатура: планки переноса и наклона", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "keyboard_click", "Клавиатура: звук нажатия", 1.0, "", 1.0, 0.0, 1.0],
 	["world", "hand_dots", "Точки на руках", 1.0, "", 1.0, 0.0, 2.0],
@@ -686,6 +686,13 @@ var _windows_layout := {}
 ## when the first look began (ms), as resolutions by cells may take a while.
 var _windows_layout_checked := false
 var _windows_layout_since := -1
+## After the Meta button resets the view the headset's space jumps (02.11.2026: the
+## marked areas stood elsewhere than the room they showed): the head's pose a frame
+## ago, and until when (ms) a jump is looked for.
+var _last_head := Transform3D()
+var _head_before_last := Transform3D()
+var _recenter_watch_until := 0
+var _recenter_jumps := 0
 ## Tilt per monitor name and per row (key: row from the primary's, as a string),
 ## in radians; neither = facing the eye. Curvature per monitor name, 0..1.
 var _panel_pitches := {}
@@ -1162,6 +1169,11 @@ const WALL_MAX_LINES := 40
 const AREA_PUNCH_PRIORITY := 100
 ## How long at start the Windows layout waits for the screens' sizes to be as they were.
 const WINDOWS_LAYOUT_WAIT_MS := 90000
+## How long after the Meta button's reset the head's jump is looked for, and the
+## least jump taken for one (m, radians; beyond how the head was moving).
+const RECENTER_WATCH_MS := 1500
+const RECENTER_JUMP_METRES := 0.08
+const RECENTER_JUMP_RADIANS := 0.1
 ## The size pad of a wall held now: its columns and rows when it came up, the
 ## steps taken since, and the way (+1/-1 each) a step could not go from there
 ## (not tried again every frame until a step goes).
@@ -1438,6 +1450,7 @@ func _process(delta: float) -> void:
 	if not _xr_ready:
 		return
 	_update_work_mode_switch(delta)
+	_follow_room_after_reset()
 	_remember_pose()
 	if _remote != null:
 		_remote.cursor_key = _pointers[_cursor_owner].panel.monitor_key if _cursor_owner >= 0 and _cursor_owner < _pointers.size() 				and _pointers[_cursor_owner].panel != null else _remote.cursor_key
@@ -1519,10 +1532,13 @@ func _process(delta: float) -> void:
 		lines.append("ОТМЕТКА КОМНАТЫ — щипок в одном углу, разжать в противоположном; короткий щипок внутри — убрать; выключается тем же пунктом меню")
 	if _hands_paused:
 		lines.append("УПРАВЛЕНИЕ НА ПАУЗЕ (руки и контроллеры) — ладони друг к другу, чтобы продолжить")
-	if _world.status_line >= 1:
+	if _world.status_line == 1:
 		lines.append("Экранов Windows: %d  |  наклон луча %.0f°, вбок %.1f°%s" % [DisplayServer.get_screen_count(), _ray_pitch_down_deg, _ray_yaw_right_deg, ("  |  " + _vdd_message) if _vdd_message != "" else ""])
 	elif _vdd_message != "":
 		lines.append(_vdd_message)
+	# «Совсем нет» (-1; 04.11.2026, the user's wish): not even the modes' warnings.
+	if _world.status_line < 0:
+		lines.clear()
 	_status.text = "\n".join(lines)
 	_probe_mark(6)
 
@@ -4799,6 +4815,7 @@ func _quit(restore_layout := false) -> void:
 
 func _on_pose_recentered() -> void:
 	print("[xr] вид сброшен кнопкой Meta, выравниваю сцену")
+	_recenter_watch_until = Time.get_ticks_msec() + RECENTER_WATCH_MS
 	# A moment later, when the new head pose has arrived.
 	get_tree().create_timer(0.3).timeout.connect(_recenter)
 
@@ -5242,11 +5259,62 @@ func _rebuild_panels() -> void:
 	_refresh_fixture_section()
 	_place_panels([], true)
 	# The Windows layout by groups again (sizes change with resolutions; at start
-	# the groups come together as they stand in VR, 23.10.2026).
+	# the groups come together as they stand in VR, 23.10.2026). Not while a slot
+	# loads: they kept the layout script busy, and the load never went on (04.11.2026).
+	if not _slot_loading.is_empty():
+		return
 	_apply_group_windows()
 	# «Разрешение по клетке» goes one screen at a time: the next after each rebuild.
 	_apply_wall_resolutions()
 	_keep_windows_layout()
+
+
+## The PC came back after the link was lost (the headset app calls it; 02.11.2026 the
+## PC had restarted while the headset ran on, and the row Windows came up in was
+## kept): the layout is looked at again as at start.
+func windows_layout_anew() -> void:
+	_windows_layout_checked = false
+	_windows_layout_since = -1
+	print("[screens] связь с ПК вернулась: раскладка Windows — проверю, как была")
+
+
+## The marked areas and portals stay where they are in the room when the Meta
+## button's reset moves the headset's space: the head's jump between two frames
+## right after it is the space's, the areas go with it (upright: a turn and a shift).
+func _follow_room_after_reset() -> void:
+	var head := _camera.transform
+	var before := _last_head
+	var earlier := _head_before_last
+	_head_before_last = before
+	_last_head = head
+	if _recenter_watch_until == 0:
+		return
+	if Time.get_ticks_msec() > _recenter_watch_until:
+		_recenter_watch_until = 0
+		if _recenter_jumps == 0:
+			print("[passthrough] вид сброшен, пространство не сдвинулось — области на месте")
+		_recenter_jumps = 0
+		return
+	# What the head did this frame beyond going on as in the last one: a turn of
+	# the head is smooth, the space's jump is not (04.11.2026: quick turns of the
+	# head were taken for it, the areas turning with them).
+	var jump := head * before.affine_inverse() * (before * earlier.affine_inverse()).affine_inverse()
+	var turn := PassthroughAreas.yaw_of(jump.basis)
+	var shift := Vector3(jump.origin.x, 0.0, jump.origin.z)
+	if shift.length() < RECENTER_JUMP_METRES and absf(turn) < RECENTER_JUMP_RADIANS:
+		return
+	# Watched on to the end: a reset may come in more than one jump (04.11.2026 the
+	# areas went astray about every other reset when only the first was followed).
+	_recenter_jumps += 1
+	# The next frame is measured from here, not as going on with the jump.
+	_head_before_last = head
+	var frame := Transform3D(Basis(Vector3.UP, turn), shift)
+	_areas_local = _areas_local.map(func(box: Dictionary) -> Dictionary: return PassthroughAreas.moved(box, frame))
+	_portals = _portals.map(func(box: Dictionary) -> Dictionary: return PassthroughAreas.moved(box, frame))
+	_areas_dirty = true
+	_save_settings()
+	print("[passthrough] вид сброшен: пространство сдвинулось на (%.2f, %.2f) м, поворот %.0f° (скачок %d) — области за комнатой" % [
+			shift.x, shift.z, rad_to_deg(turn), _recenter_jumps])
 
 
 ## The Windows layout kept between runs: at start put back as it was if Windows
@@ -5255,7 +5323,7 @@ func _rebuild_panels() -> void:
 ## after that every settled layout is kept. Not where the layout follows the
 ## groups in VR (_apply_group_windows lays it out itself).
 func _keep_windows_layout() -> void:
-	if _panels.is_empty() or _topology.busy or not _layout_pending.is_empty():
+	if _panels.is_empty() or _topology.busy or not _layout_pending.is_empty() or not _slot_loading.is_empty():
 		return
 	var now := {}
 	for panel in _panels:
@@ -7679,7 +7747,15 @@ func _on_topology_idle() -> void:
 		_vdd_message = "меняю раскладку Windows…"
 		_topology.arrange(positions)
 		return
+	# A slot being loaded waits for the script to be free (04.11.2026: with walls the
+	# panels were always rebuilt while it was busy, and the load never went on).
+	if not _slot_loading.is_empty():
+		_continue_slot_load()
+		return
 	_apply_wall_resolutions()
+	# The panels are rebuilt while the script is still busy: the layout is looked at
+	# once it is free (02.11.2026 it was never kept, so nothing was put back).
+	_keep_windows_layout()
 
 
 func _own_arrangement() -> Dictionary:
@@ -9135,7 +9211,8 @@ func _on_slot_save(slot: int) -> void:
 		positions[panel.monitor_key] = panel.monitor_rect.position
 	_arrangements[_mode_key()] = _own_arrangement()
 	_layout_slots[str(slot)] = {"mode": _panel_options.move_mode, "count": _panels.size(), "positions": positions,
-			"arrangements": _arrangements.duplicate(true), "time": Time.get_datetime_string_from_system(false, true)}
+			"arrangements": _arrangements.duplicate(true), "screens": _slot_screens(),
+			"time": Time.get_datetime_string_from_system(false, true)}
 	_save_settings()
 	_refresh_layout_section()
 	_layout_status.text = "сохранено в ячейку %d" % slot
@@ -9157,6 +9234,8 @@ func _on_slot_load(slot: int) -> void:
 	_slot_loading = data.duplicate(true)
 	_slot_load_steps = 0
 	_slot_waiting_count = -1
+	# The layout loaded is the user's: not the one before put back over it.
+	_windows_layout_checked = true
 	_save_settings()
 	_refresh_settings_panel()
 	_place_panels([], true)
@@ -9215,10 +9294,27 @@ func _continue_slot_load() -> void:
 	for mode: String in ["windows", "vr"]:
 		_arrangements[mode] = _remapped_arrangement(arrangements.get(mode, {}), mapping)
 	_apply_arrangement(_arrangements[_mode_key()])
-	var positions := _slot_positions(saved_positions, mapping)
+	var screens: Dictionary = _normalized_keys(_slot_loading.get("screens", {}))
+	_put_slot_screens(screens, mapping)
+	var sizes := {}
+	for saved_key: String in screens:
+		var size: Variant = (screens[saved_key] as Dictionary).get("size")
+		if mapping.has(saved_key) and size is Array and size.size() == 2:
+			sizes[mapping[saved_key]] = Vector2i(int(size[0]), int(size[1]))
+	var modes := _slot_modes(sizes)
+	var positions := _slot_positions(saved_positions, mapping, sizes)
 	_finish_slot_load()
 	_save_settings()
 	_place_panels([], true)
+	if not modes.is_empty():
+		# The resolutions first, the layout (made for them) once they are set.
+		print("[layouts] разрешения: ", modes)
+		_topology.set_modes(modes)
+		if not positions.is_empty():
+			_layout_status.text = "раскладка загружена"
+			print("[layouts] загружено (после разрешений): ", positions)
+			_queued_positions = positions
+		return
 	if positions.is_empty():
 		_layout_status.text = "экраны на месте; сохранённая раскладка Windows к ним не подходит"
 		print("[layouts] сохранённая раскладка Windows к нынешним экранам не подходит")
@@ -9270,6 +9366,67 @@ func _finish_slot_load() -> void:
 		_settings_written()
 
 
+## Where each screen stands, for a saved layout: monitor key -> {"kind" of its
+## fixture, its "place" (a part or joined cell) or "cells" on a wall, its "size"
+## in pixels}.
+func _slot_screens() -> Dictionary:
+	var screens := {}
+	for panel in _panels:
+		var fixture := _fixture_of(panel)
+		var key := panel.monitor_key
+		var entry := {"kind": fixture.kind if fixture != null else "sphere", "size": [panel.monitor_rect.size.x, panel.monitor_rect.size.y]}
+		if fixture != null and _walled(fixture):
+			var wall := _saved_wall(fixture)
+			if wall.parts.has(key):
+				entry["place"] = wall.parts[key]
+			elif wall.cells.has(key):
+				var cells: Rect2i = wall.cells[key]
+				entry["cells"] = [cells.position.x, cells.position.y, cells.size.x, cells.size.y]
+		screens[key] = entry
+	return screens
+
+
+## A loaded layout's screens onto the first fixture of the kind each stood on,
+## where it stood there if that place is free (the user's wish, 04.11.2026).
+func _put_slot_screens(screens: Dictionary, mapping: Dictionary) -> void:
+	for saved_key: String in screens:
+		if not mapping.has(saved_key):
+			continue
+		var key: String = mapping[saved_key]
+		var entry: Dictionary = screens[saved_key]
+		var target := WorldLayout.first_of_kind(_fixtures, str(entry.get("kind", "")))
+		if target == null:
+			continue
+		WorldLayout.assign(_fixtures, key, target.id)
+		if not _walled(target):
+			continue
+		var saved_cells: Variant = entry.get("cells")
+		var cells := Rect2i()
+		if saved_cells is Array and saved_cells.size() == 4:
+			cells = Rect2i(int(saved_cells[0]), int(saved_cells[1]), int(saved_cells[2]), int(saved_cells[3]))
+		var placed := WallLayout.placed_back(_saved_wall(target), key, str(entry.get("place", "")), cells)
+		target.cells = placed.cells
+		target.parts = placed.parts
+		target.splits = placed.splits
+		target.blocks = placed.blocks
+	_refresh_fixture_section()
+
+
+## The resolutions a loaded layout had (current key -> size), where they differ
+## now: monitor name -> mode. Not for the driver's screens on walls when
+## «Разрешение по клетке» sets them by their places.
+func _slot_modes(sizes: Dictionary) -> Dictionary:
+	var modes := {}
+	for panel in _panels:
+		if not sizes.has(panel.monitor_key) or sizes[panel.monitor_key] == panel.monitor_rect.size:
+			continue
+		if _world.wall_resolution == 1 and _walled(_fixture_of(panel)) and panel.monitor_key.contains("MTT1337"):
+			continue
+		var size: Vector2i = sizes[panel.monitor_key]
+		modes[panel.monitor_name] = "%dx%d@60" % [size.x, size.y]
+	return modes
+
+
 ## Saved monitor keys -> the current monitors' keys: the same monitor where it is
 ## still there, the rest in order of their keys.
 func _slot_mapping(saved_keys: Array) -> Dictionary:
@@ -9311,7 +9468,7 @@ func _remapped_arrangement(arrangement: Dictionary, mapping: Dictionary) -> Dict
 
 ## Saved positions for the screens there are now (through `mapping`). Empty if
 ## that is not a valid layout, e.g. the sizes are different now.
-func _slot_positions(saved: Dictionary, mapping: Dictionary) -> Dictionary:
+func _slot_positions(saved: Dictionary, mapping: Dictionary, sizes := {}) -> Dictionary:
 	var by_key := {}
 	for key: String in saved:
 		if mapping.has(key):
@@ -9320,7 +9477,7 @@ func _slot_positions(saved: Dictionary, mapping: Dictionary) -> Dictionary:
 	var primary := -1
 	for i in _panels.size():
 		var at: Vector2i = by_key.get(_panels[i].monitor_key, _panels[i].monitor_rect.position)
-		rects.append(Rect2i(at, _panels[i].monitor_rect.size))
+		rects.append(Rect2i(at, sizes.get(_panels[i].monitor_key, _panels[i].monitor_rect.size)))
 		if at == Vector2i.ZERO:
 			primary = i
 	if primary < 0 or not LayoutEdit.is_valid(rects, primary):
@@ -9529,7 +9686,9 @@ func _tunable_text(tunable: Array, value: float) -> String:
 		return ["рывками", "плавно", "выключен"][clampi(roundi(value), 0, 2)]
 	elif tunable[1] == "stick_mode":
 		return ["по лучу", "прокрутка", "движение"][clampi(roundi(value), 0, 2)]
-	elif tunable[1] in ["grid", "status_line", "keyboard_bars", "keyboard_click", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "wall_tilt_handle", "split_handle"]:
+	elif tunable[1] == "status_line":
+		return ["совсем нет", "только предупреждения", "да"][clampi(roundi(value) + 1, 0, 2)]
+	elif tunable[1] in ["grid", "keyboard_bars", "keyboard_click", "outlines", "sphere_handle", "wall_size_handle", "wall_bend_handle", "wall_tilt_handle", "split_handle"]:
 		return "да" if value >= 0.5 else "нет"
 	elif tunable[1] == "option_lists":
 		return "списком" if value >= 0.5 else "нажатиями"
