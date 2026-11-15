@@ -38,3 +38,7 @@
 /headset/native/*.os
 !/native/steamvr_driver/workplace/resources/rendermodels/controller_box/controller_box.obj
 /headset/addons/workplace_projection/bin/
+
+# Internet link: local credentials, certificates and Python caches.
+/internet/__pycache__/
+/internet/state/

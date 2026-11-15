@@ -14,7 +14,6 @@ class ProbeRoot extends "res://headset/src/headset_root.gd":
 
 var _checks := 0
 var _failures := 0
-var _clicks: Array[int] = []
 
 func _init() -> void:
 	_run.call_deferred()
@@ -25,9 +24,6 @@ func _check(ok: bool, text: String) -> void:
 		_failures += 1
 		push_error(text)
 
-func _clicked(profile: int) -> void:
-	_clicks.append(profile)
-
 func _run() -> void:
 	for profile in [0, 1]:
 		_check(LinkProtocol.problem({"t": "game_profile", "profile": profile}) == "", "valid comparison profile")
@@ -36,36 +32,6 @@ func _run() -> void:
 	for mode in [0, 1, 2]:
 		_check(LinkProtocol.problem({"t": "games_leaving", "mode": mode}) == "", "valid return mode")
 	_check(LinkProtocol.problem({"t": "games_leaving", "mode": 3}) != "", "return to games rejected")
-	var ui: Variant = load("res://headset/src/game_comparison.gd").new()
-	root.add_child(ui)
-	ui.selected.connect(_clicked)
-	var aims: Array = [Transform3D(Basis.IDENTITY, Vector3(-0.22, 0, 1)), null]
-	var up: Array[bool] = [false, false]
-	var down: Array[bool] = [true, false]
-	ui.update_inputs(aims, up, 0.01)
-	var capture: Array[bool] = ui.update_inputs(aims, down, 0.2)
-	_check(capture[0] and _clicks.is_empty(), "hold captures input before activation")
-	ui.update_inputs(aims, down, 0.3)
-	_check(_clicks == [0], "original button activates after hold")
-	ui.update_inputs(aims, down, 1.0)
-	_check(_clicks == [0], "held button does not repeat")
-	capture = ui.update_inputs(aims, up, 0.01)
-	_check(not capture[0], "release ends input capture")
-	aims[0] = Transform3D(Basis.IDENTITY, Vector3(10, 0, 1))
-	ui.update_inputs(aims, down, 1.0)
-	aims[0] = Transform3D(Basis.IDENTITY, Vector3(0.22, 0, 1))
-	ui.update_inputs(aims, down, 1.0)
-	_check(_clicks == [0], "dragging an existing press onto a button does not activate")
-	ui.update_inputs(aims, up, 0.01)
-	ui.update_inputs(aims, down, 0.5)
-	_check(_clicks == [0, 1], "test button activates")
-	ui.free()
-	var held_ui: Variant = load("res://headset/src/game_comparison.gd").new()
-	root.add_child(held_ui)
-	held_ui.selected.connect(_clicked)
-	var initial_capture: Array[bool] = held_ui.update_inputs(aims, down, 1.0)
-	_check(not initial_capture[0] and _clicks == [0, 1], "a press held before the panel appeared cannot activate it")
-	held_ui.free()
 	for previous in [WorkMode.HEADSET_WORLD, WorkMode.PC_DRAWS]:
 		var target := WorkMode.PC_DRAWS if previous == WorkMode.HEADSET_WORLD else WorkMode.HEADSET_WORLD
 		var server := TCPServer.new()
@@ -90,5 +56,5 @@ func _run() -> void:
 	probe.return_from_games(WorkMode.PC_DRAWS)
 	_check(probe.started.back() == WorkMode.PC_DRAWS, "explicit game exit preserves PC-draw mode")
 	probe.free()
-	print("Game comparison: %d checks, %d failures" % [_checks, _failures])
+	print("Game return: %d checks, %d failures" % [_checks, _failures])
 	quit(0 if _failures == 0 else 1)

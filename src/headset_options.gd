@@ -7,6 +7,7 @@ extends RefCounted
 const LINK_AUTO := 0
 const LINK_CABLE := 1
 const LINK_WIFI := 2
+const LINK_INTERNET := 3
 
 const LIVE_BY_GAZE := 0
 const LIVE_BY_DISTANCE := 1
@@ -31,6 +32,9 @@ var link_mode := LINK_AUTO
 ## new pictures a second; the PC restarts its streams when either changes.
 var video_mbps := 12.0
 var video_fps := 60
+## Independent per-screen quality for the internet transport, saved on the PC.
+var internet_video_mbps := 6.0
+var internet_video_fps := 30
 ## Extra tangent coverage for PC VR games, percent. Applied on next game link.
 var game_fov_percent := 0.0
 ## PC VR quality, applied when SteamVR next starts / the headset reconnects.
@@ -58,8 +62,18 @@ static var current: HeadsetOptions
 static var settings_saved := Callable()
 
 
+func video_for_transport(internet: bool) -> Vector2i:
+	if internet:
+		return Vector2i(roundi(clampf(internet_video_mbps, 2.0, 60.0) * 1000.0), clampi(internet_video_fps, 15, 90))
+	return Vector2i(roundi(video_mbps * 1000.0), video_fps)
+
+
 static func link_mode_name(mode: int) -> String:
-	return ["кабель или Wi-Fi", "только кабель", "только Wi-Fi"][clampi(mode, 0, 2)]
+	return ["кабель или Wi-Fi", "только кабель", "только Wi-Fi", "интернет"][clampi(mode, 0, 3)]
+
+
+static func cycle_link_mode(mode: int, direction: int) -> int:
+	return wrapi(mode + signi(direction), LINK_AUTO, LINK_INTERNET + 1)
 
 
 ## The screens to keep live, best first, at most `count`: each entry {"key",

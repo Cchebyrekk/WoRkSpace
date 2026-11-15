@@ -1,5 +1,4 @@
 extends Node3D
-const COMPARISON_UI := preload("res://src/game_comparison.gd")
 ## The headset app of the pc-render branch: the PC draws everything. This sends
 ## the head, the eyes, the hands and the controllers to the PC every frame
 ## (LinkProtocol "tracking") and shows the eyes' stream that comes back. Each
@@ -111,9 +110,6 @@ var _plane_distance := PLANE_DISTANCE
 ## depth — the planes stand far, which keeps turns of the head right.
 var _game := false
 var _game_buffer_frames := 1
-var _comparison_ui: Variant
-var _comparison_profile := 1
-var _ui_down: Array[bool] = [false, false]
 var _ray_settings: Dictionary = {}
 var _ray_forward: Array[Vector3] = [Vector3.ZERO, Vector3.ZERO]
 var _ray_time := -1.0
@@ -142,6 +138,7 @@ var _status: Label3D
 var _udp := PacketPeerUDP.new()
 var _tcp: StreamPeerTCP
 var _channel: PacketPeerStream
+var _internet: InternetLink.Request
 var _pc_address := ""
 var _connecting_since := 0.0
 var _next_search := 0.0
@@ -176,7 +173,7 @@ var _linear_velocity := Vector3.ZERO
 func _ready() -> void:
 	var config := ConfigFile.new()
 	if config.load("user://settings.cfg") == OK:
-		_link_mode = clampi(int(config.get_value("headset", "link_mode", 0)), 0, 2)
+		_link_mode = clampi(int(config.get_value("headset", "link_mode", 0)), 0, 3)
 		_game_fov_margin = clampf(float(config.get_value("headset", "game_fov_percent", 0.0)), 0, 100) / 100.0
 	if Engine.has_singleton("GameProjection"):
 		_projection = Engine.get_singleton("GameProjection")
@@ -214,11 +211,6 @@ func _ready() -> void:
 	_status.no_depth_test = true
 	_status.position = STATUS_OFFSET
 	_camera.add_child(_status)
-	_comparison_ui = COMPARISON_UI.new()
-	_comparison_ui.position = Vector3(0, -0.36, -1.15)
-	_comparison_ui.visible = false
-	_comparison_ui.selected.connect(_select_profile)
-	_camera.add_child(_comparison_ui)
 	if OS.get_name() == "Android":
 		_receiver = JavaClassWrapper.wrap("com.workplace.headset.VideoReceiver")
 		_sound = JavaClassWrapper.wrap("com.workplace.headset.SoundReceiver")
@@ -239,7 +231,6 @@ func _process(_delta: float) -> void:
 	else:
 		_serve(now)
 	_show_picture()
-	_comparison_ui.visible = _game and not _exit_sent and _channel != null
 	_status.visible = _exit_sent or not _receiving or _buffer == 0
 	_status.text = "Закрываю SteamVR, возвращаюсь в мир…" if _exit_sent else _describe()
 	if now >= _next_log:
@@ -281,6 +272,30 @@ func _describe() -> String:
 
 
 func _search(now: float) -> void:
+	if InternetLink.enabled():
+		if _internet == null:
+			if now >= _next_search:
+				_next_search = now + SEARCH_SEC
+				_connect(LOCALHOST, LinkProtocol.REMOTE_CONTROL_PORT, now)
+		if _internet == null:
+			return
+		_internet.poll()
+		if _internet.failed:
+			_reset("интернет: %s" % _internet.error_code)
+			return
+		if not _internet.ready:
+			return
+		_tcp.set_no_delay(true)
+		_channel = PacketPeerStream.new()
+		_channel.input_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
+		_channel.output_buffer_max_size = LinkProtocol.CHANNEL_BUFFER
+		_channel.stream_peer = _internet.tls
+		_channel.put_var(LinkProtocol.hello(OS.get_model_name()))
+		_last_heard = now
+		_greeted = true
+		if _sound != null:
+			_sound.start(LOCALHOST, LinkProtocol.REMOTE_SOUND_PORT)
+		return
 	# Auto prefers USB on the first attempt; Wi-Fi is the fallback if no reverse
 	# is available. Cable-only never discovers a Wi-Fi host.
 	if _tcp == null and _rounds == 0 and _link_mode != HeadsetOptions.LINK_WIFI:
@@ -332,6 +347,14 @@ func _search(now: float) -> void:
 
 
 func _connect(ip: String, port: int, now: float) -> void:
+	if not InternetLink.configure_video():
+		return
+	if InternetLink.enabled():
+		_internet = InternetLink.request("tunnel", {"port": port})
+		_tcp = _internet.tcp
+		_pc_address = LOCALHOST
+		_connecting_since = now
+		return
 	_tcp = StreamPeerTCP.new()
 	if _tcp.connect_to_host(ip, port) != OK:
 		_tcp = null
@@ -350,6 +373,11 @@ func _broadcast_addresses() -> Array[String]:
 
 
 func _serve(now: float) -> void:
+	if _internet != null:
+		_internet.poll()
+		if _internet.failed or not InternetLink.enabled():
+			_reset("интернет-канал закрыт")
+			return
 	_tcp.poll()
 	if _tcp.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		_reset("связь оборвалась")
@@ -382,14 +410,9 @@ func _serve(now: float) -> void:
 					_buffer = 0
 			"games":
 				_game = true
-				_apply_profile(clampi(int(message.get("ab_profile", 1)), 0, 1))
 				_game_buffer_frames = clampi(int(message.get("buffer_frames", 1)), 0, 2)
 				_ray_settings = message.get("ray", {})
 				_game_fov_margin = clampf(float(message.get("fov_percent", 0.0)), 0.0, 100.0) / 100.0
-			"game_profile":
-				_game_buffer_frames = 1
-				_receiver.configurePacing(RECEIVER_ID, 1)
-				_apply_profile(int(message["profile"]))
 			"pose_ack":
 				if _receiver != null:
 					_receiver.recordUplink(RECEIVER_ID, int(message["sent_us"]), int(message["received_us"]))
@@ -430,7 +453,7 @@ func _start_eyes() -> void:
 	if _game:
 		_receiver.startTexturePaced(RECEIVER_ID, _pc_address, _eyes_port)
 		_receiver.configurePacing(RECEIVER_ID, _game_buffer_frames)
-		_receiver.configureComparison(RECEIVER_ID, _comparison_profile)
+		_receiver.configureComparison(RECEIVER_ID, 1)
 	else:
 		_receiver.startTexture(RECEIVER_ID, _pc_address, _eyes_port)
 
@@ -466,6 +489,9 @@ func _reset(why: String) -> void:
 		_receiver.stopAll()
 	if _sound != null:
 		_sound.stop()
+	if _internet != null:
+		_internet.close()
+		_internet = null
 	if _tcp != null:
 		_tcp.disconnect_from_host()
 	_tcp = null
@@ -507,8 +533,19 @@ func _send_tracking() -> void:
 		for i in 2:
 			if hands[i].get("ok", false):
 				hands[i]["aim"] = _game_hand_ray(i, measured, hands[i], controllers[i], dt)
-		if not _exit_sent:
-			_update_comparison_inputs(hands, controllers, dt)
+	if InternetLink.setup_visible:
+		InternetLink.update_setup_inputs([], dt)
+		for i in 2:
+			if not InternetLink.setup_capture[i]:
+				continue
+			hands[i]["ui_capture"] = true
+			if not _game:
+				hands[i]["ok"] = false
+				controllers[i]["ok"] = false
+			var inputs: Dictionary = controllers[i].get("inputs", {})
+			for input in inputs:
+				var value: Variant = inputs[input]
+				inputs[input] = false if value is bool else (Vector2.ZERO if value is Vector2 else 0.0)
 	_channel.put_var({"t": "tracking", "id": _pose_id, "head": head,
 			"head_ok": head_pose != null and head_pose.has_tracking_data, "eyes": eyes, "fov": fov,
 			"hands": hands, "controllers": controllers, "shown": _screens.shown_keys(), "game": _game, "sent_us": sent_us})
@@ -557,56 +594,6 @@ func _predict(head: Transform3D, pose: XRPose = null) -> Transform3D:
 		predicted.basis = Basis(_angular_velocity / speed, speed * ahead) * head.basis
 	predicted.origin += _linear_velocity * ahead
 	return predicted
-
-
-func _select_profile(profile: int) -> void:
-	if _channel != null and _game and not _exit_sent:
-		_channel.put_var({"t": "game_profile", "profile": profile})
-
-
-func _apply_profile(profile: int) -> void:
-	_comparison_profile = profile
-	_comparison_ui.set_profile(profile)
-	if _receiver != null:
-		_receiver.configureComparison(RECEIVER_ID, profile)
-		_receiver.frameTimings(RECEIVER_ID)
-		_receiver.pacingReport(RECEIVER_ID)
-	if _projection != null:
-		_projection.timing_report()
-	_sent = 0
-	_pictures = 0
-	_next_log = Time.get_ticks_msec() / 1000.0 + 10.0
-	print("[q4-ab] ", "Как изначально" if profile == 0 else "Тест q4")
-
-
-func _update_comparison_inputs(hands: Array, controllers: Array, dt: float) -> void:
-	var aims: Array = [null, null]
-	var down: Array[bool] = [false, false]
-	for h in 2:
-		var controller: Dictionary = controllers[h]
-		var hand: Dictionary = hands[h]
-		var profile := str(controller.get("profile", ""))
-		var physical: bool = controller.get("ok", false) and not profile.is_empty() and not profile.contains("hand_interaction")
-		if physical:
-			aims[h] = _origin.global_transform * (controller["aim"] as Transform3D)
-			var inputs: Dictionary = controller.get("inputs", {})
-			down[h] = float(inputs.get("trigger", 0)) > (0.1 if _ui_down[h] else 0.75) or bool(inputs.get("trigger_click", false))
-		elif hand.get("ok", false) and int(hand.get("source", 0)) not in [2, 3] and hand.has("aim"):
-			var joints: PackedFloat32Array = hand.get("joints", PackedFloat32Array())
-			if joints.size() >= 26 * 7:
-				aims[h] = _origin.global_transform * (hand["aim"] as Transform3D)
-				var thumb := Vector3(joints[39], joints[40], joints[41])
-				var index := Vector3(joints[74], joints[75], joints[76])
-				down[h] = thumb.distance_to(index) < (0.035 if _ui_down[h] else 0.025)
-		_ui_down[h] = down[h]
-	var captured: Array[bool] = _comparison_ui.update_inputs(aims, down, dt)
-	for h in 2:
-		if captured[h]:
-			var inputs: Dictionary = controllers[h].get("inputs", {})
-			inputs["trigger"] = 0.0
-			inputs["trigger_click"] = false
-			controllers[h]["inputs"] = inputs
-			hands[h]["ui_capture"] = true
 
 
 func _game_hand_ray(side: int, head: Transform3D, hand: Dictionary, controller: Dictionary, dt: float) -> Transform3D:

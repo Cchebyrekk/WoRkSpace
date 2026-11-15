@@ -61,6 +61,8 @@ public final class VideoReceiver {
 	private Thread thread;
 	private Socket socket;
 	private volatile boolean running;
+	private volatile boolean keepLastFrame;
+	private final Object freezeLock = new Object();
 	private volatile String status = "остановлен";
 	private volatile long framesReceived;
 	private volatile long framesShown;
@@ -293,6 +295,16 @@ public final class VideoReceiver {
 		}
 	}
 
+	/** Retain the displayed buffer while a transport is being changed. */
+	public static synchronized void freeze(int id) {
+		VideoReceiver receiver = receivers.get(id);
+		if (receiver != null) {
+			receiver.keepLastFrame = true;
+			receiver.running = false;
+			receiver.closeSocket();
+		}
+	}
+
 	public static synchronized void stopAll() {
 		for (VideoReceiver receiver : receivers.values()) {
 			receiver.halt();
@@ -408,6 +420,8 @@ public final class VideoReceiver {
 
 	/** Does not wait: closing the socket ends the thread, which releases the decoder. */
 	private void halt() {
+		keepLastFrame = false;
+		synchronized (freezeLock) { freezeLock.notifyAll(); }
 		running = false;
 		closeSocket();
 	}
@@ -576,7 +590,8 @@ public final class VideoReceiver {
 			}
 			connection.setTcpNoDelay(true);
 			connection.setReceiveBufferSize(1 << 20);
-			connection.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+			connection = InternetTransport.connect(connection, host, port, CONNECT_TIMEOUT_MS);
+			synchronized (this) { socket = connection; }
 			DataInputStream input = new DataInputStream(new BufferedInputStream(connection.getInputStream(), 1 << 16));
 			OutputStream toPc = connection.getOutputStream();
 			if (paced) tell(toPc, 3, 5); // request per-frame timestamps; old servers ignore it
@@ -724,6 +739,17 @@ public final class VideoReceiver {
 				} catch (Exception ignored) {
 				}
 				decoder.release();
+			}
+			// A frozen convex panel still references its EGLImage. Keep it alive
+			// until stop/replacement, rather than destroying the last picture.
+			synchronized (freezeLock) {
+				while (keepLastFrame) {
+					try { freezeLock.wait(); }
+					catch (InterruptedException interrupted) {
+						keepLastFrame = false;
+						Thread.currentThread().interrupt();
+					}
+				}
 			}
 			closeFrames();
 			closeSocket();

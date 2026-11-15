@@ -26,16 +26,48 @@ var _cable_probe: StreamPeerTCP
 var _probe_since := 0.0
 var _next_probe := 0.0
 var _probe_mode := -1
+var _internet_status: InternetLink.Request
+var _next_internet_status := 0.0
+var _internet_setup: Node3D
+var _internet_alone_since := -1.0
+var _internet_recovery := false
 
 
 func _ready() -> void:
 	_udp.set_broadcast_enabled(true)
 	_udp.bind(0)
+	InternetLink.load_profile()
 	_start(_last_mode())
+	if InternetLink.enabled() and InternetLink.configured() and not InternetLink.bound():
+		_show_internet_setup()
 
 
 func _process(_delta: float) -> void:
 	var now := Time.get_ticks_msec() / 1000.0
+	if _child == null:
+		return
+	if is_instance_valid(_internet_setup) and _internet_setup.visible:
+		# A transient outage is not a new pairing. Keep discovering the PC's
+		# mode and dismiss the recovery notice once the existing link returns.
+		if _internet_recovery and InternetLink.enabled() and InternetLink.bound():
+			if _child.call(&"connected"):
+				_internet_setup.call(&"connection_restored")
+			else:
+				_poll_internet(now)
+		return
+	if InternetLink.enabled():
+		if _child.call(&"connected"):
+			_internet_alone_since = -1.0
+		elif _internet_alone_since < 0.0:
+			_internet_alone_since = now
+		if not InternetLink.configured() or not InternetLink.registered():
+			_show_internet_setup()
+			return
+		_poll_internet(now)
+		return
+	_internet_alone_since = -1.0
+	if InternetLink.configured() and InternetLink.registered() and not InternetLink.bound():
+		_poll_internet(now, true)
 	if _child != null and _child.call(&"connected"):
 		_close_probe()
 		_alone_since = -1.0
@@ -61,6 +93,79 @@ func _process(_delta: float) -> void:
 			for port in [LinkProtocol.DISCOVERY_PORT, LinkProtocol.REMOTE_DISCOVERY_PORT]:
 				_udp.set_dest_address(address, port)
 				_udp.put_packet(LinkProtocol.ask_packet())
+
+
+func _show_internet_setup(recovery := false) -> void:
+	# Pairing is an overlay in the existing world, never a work-mode transition.
+	_internet_recovery = recovery
+	if is_instance_valid(_internet_setup):
+		if not _internet_setup.visible:
+			_internet_setup.call(&"open_panel")
+		if recovery:
+			_internet_setup.call(&"set_reconnecting", InternetLink.last_error_code)
+		elif not InternetLink.last_error_code.is_empty():
+			_internet_setup.call(&"set_connection_error", InternetLink.last_error_code)
+		return
+	_internet_setup = Node3D.new()
+	_internet_setup.set_script(load("res://src/internet_setup.gd"))
+	_internet_setup.connect(&"finished", _internet_continue)
+	add_child(_internet_setup)
+	if recovery:
+		_internet_setup.call(&"set_reconnecting", InternetLink.last_error_code)
+	elif not InternetLink.last_error_code.is_empty():
+		_internet_setup.call(&"set_connection_error", InternetLink.last_error_code)
+
+
+func _internet_continue() -> void:
+	# The original world/camera remain alive. Only its transport reconnects.
+	_internet_recovery = false
+	_internet_alone_since = -1.0
+	_alone_since = -1.0
+	if _internet_status != null:
+		_internet_status.close()
+		_internet_status = null
+
+
+func _poll_internet(now: float, pairing_only := false) -> void:
+	if _internet_status == null and now >= _next_internet_status:
+		_next_internet_status = now + 2.0
+		_internet_status = InternetLink.request("status", {}, pairing_only)
+	if _internet_status == null:
+		return
+	_internet_status.poll()
+	if _internet_status.failed:
+		var code := _internet_status.error_code
+		if not code.is_empty() and code != InternetLink.last_error_code:
+			InternetLink.last_error_code = code
+			print("[internet] ошибка этапа: ", code)
+		_internet_status.close()
+		_internet_status = null
+		if not pairing_only and _internet_alone_since >= 0.0 and now - _internet_alone_since >= 10.0:
+			_show_internet_setup(InternetLink.bound())
+		return
+	if not _internet_status.ready:
+		return
+	var status := _internet_status.result
+	InternetLink.last_error_code = ""
+	_internet_status.close()
+	_internet_status = null
+	if not status.get("trusted", false):
+		if pairing_only:
+			return
+		InternetLink.identity["trusted"] = false
+		InternetLink.save_identity(InternetLink.identity)
+		_show_internet_setup()
+		return
+	if not InternetLink.bound():
+		InternetLink.identity["trusted"] = true
+		InternetLink.save_identity(InternetLink.identity)
+	if pairing_only:
+		return
+	var pc_mode := int(status.get("mode", -1))
+	if pc_mode in [WorkMode.HEADSET_WORLD, WorkMode.PC_DRAWS, WorkMode.PC_GAMES]:
+		var target := WorkMode.HEADSET_WORLD if pc_mode == WorkMode.HEADSET_WORLD else WorkMode.PC_DRAWS
+		if target != _mode:
+			_start(target)
 
 
 func _start(mode: int) -> void:

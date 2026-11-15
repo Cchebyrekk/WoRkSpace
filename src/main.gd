@@ -179,9 +179,11 @@ const TUNABLES := [
 	["headset", "work_mode", "Режим работы", 1.0, "", 1.0, 0.0, 3.0],
 	["headset", "live_screens", "Живых экранов", 1.0, "", 1.0, 1.0, 16.0],
 	["headset", "live_by", "Живые экраны", 1.0, "", 1.0, 0.0, 2.0],
-	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 2.0],
+	["headset", "link_mode", "Связь с ПК", 1.0, "", 1.0, 0.0, 3.0],
 	["headset", "video_mbps", "Битрейт экрана", 1.0, "Мбит/с", 2.0, 2.0, 60.0],
 	["headset", "video_fps", "Кадров в секунду", 1.0, "", 6.0, 30.0, 90.0],
+	["headset", "internet_video_mbps", "Интернет: битрейт экрана", 1.0, "Мбит/с", 2.0, 2.0, 60.0],
+	["headset", "internet_video_fps", "Интернет: кадров в секунду", 1.0, "", 15.0, 15.0, 90.0],
 	["headset", "game_fov_percent", "Зона обзора (при подключении)", 1.0, "%", 5.0, 0.0, 100.0],
 	["headset", "game_bitrate_mbps", "Игры: битрейт (после перезапуска SteamVR)", 1.0, "Мбит/с", 10.0, 30.0, 120.0],
 	["headset", "game_render_percent", "Игры: разрешение рендера (перезапуск SteamVR)", 1.0, "%", 10.0, 70.0, 180.0],
@@ -246,7 +248,7 @@ const TUNABLE_TABS := {
 	"scroll_mode": 1, "stick_speed": 1, "invert_vertical": 1, "invert_horizontal": 1, "disc_dwell": 1,
 	"disc_radius": 1, "disc_turn_units": 1, "disc_align": 1, "disc_together": 1, "disc_ring_curl": 1,
 	"drag_threshold": 2, "drag_delay_sec": 2, "double_click_sec": 2, "double_click_radius": 2,
-	"work_mode": 3, "live_screens": 3, "live_by": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "game_fov_percent": 3, "video_stats": 3, "pc_sound": 3, "passthrough": 3,
+	"work_mode": 3, "live_screens": 3, "live_by": 3, "link_mode": 3, "video_mbps": 3, "video_fps": 3, "internet_video_mbps": 3, "internet_video_fps": 3, "game_fov_percent": 3, "video_stats": 3, "pc_sound": 3, "passthrough": 3,
 	"grab_mode": 8, "move_mode": 8, "magnet": 8, "tilt_mode": 8, "monitor_menu": 8,
 	"travel_mode": 8, "move_speed": 8, "turn_mode": 8, "snap_degrees": 8, "turn_speed_degrees": 8, "wall_slide_hand": 8, "wall_resolution": 8, "outlines": 8, "sphere_handle": 8, "wall_size_handle": 8, "wall_bend_handle": 8, "wall_tilt_handle": 8, "split_handle": 8, "handles_mode": 8, "size_drag": 8,
 	"vignette": 8, "grid": 8, "grid_step": 8, "status_line": 2, "keyboard_bars": 2, "keyboard_click": 2, "hand_dots": 2, "option_lists": 8, "render_radius": 8, "interact_radius": 8, "stick_mode": 8, "flight_sec": 8, "auto_links": 8, "edit_step": 8, "edit_turn_degrees": 8,
@@ -1495,6 +1497,15 @@ func _process(delta: float) -> void:
 			if pointer.poses.get(action, false):
 				lines[-1] += " | %s (%s)" % [GestureCatalog.label_of(action).to_upper(), GestureCatalog.name_of(_bindings[action], _custom_poses)]
 	_probe_mark(2)
+	# Only a ray aimed at the PIN panel is captured; movement and the world stay live.
+	var setup_capture := InternetLink.update_setup_inputs(_pointers, delta)
+	var setup_active: Array[bool] = []
+	var setup_distances: Array[float] = []
+	for i in 2:
+		setup_active.append(_pointers[i].active)
+		setup_distances.append(_pointers[i].hit_distance)
+		if setup_capture[i]:
+			_pointers[i].active = false
 
 	_update_two_hand_gestures()
 	_update_calibration()
@@ -1517,6 +1528,10 @@ func _process(delta: float) -> void:
 	_update_secure_desktop()
 	_probe_mark(4)
 	_update_cursor()
+	for i in 2:
+		if setup_capture[i]:
+			_pointers[i].active = setup_active[i]
+			_pointers[i].hit_distance = minf(_pointers[i].hit_distance, setup_distances[i])
 	_update_rays()
 	_probe_mark(5)
 
@@ -9507,7 +9522,12 @@ func _tunable_target(section: String) -> Object:
 
 func _on_tunable_button(index: int, direction: float) -> void:
 	var tunable: Array = TUNABLES[index]
-	_set_tunable(index, float(_tunable_target(tunable[0]).get(tunable[1])) + direction * float(tunable[5]), true)
+	var current := float(_tunable_target(tunable[0]).get(tunable[1]))
+	var value := current + direction * float(tunable[5])
+	if tunable[0] == "headset" and tunable[1] == "link_mode":
+		value = HeadsetOptions.cycle_link_mode(roundi(current), roundi(direction))
+		InternetLink.prepare_transport_change()
+	_set_tunable(index, value, true)
 
 
 ## Whether a setting gets a slider: a number with at least a few steps between

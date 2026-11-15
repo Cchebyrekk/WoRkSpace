@@ -37,6 +37,15 @@ var _decoder_limit := 1 << 30
 var _limit_retry_at := 0.0
 const LIMIT_RETRY_SEC := 30.0
 var _limit_for_setting := -1
+var _frozen := false
+
+
+func freeze_last_frames() -> void:
+	_frozen = true
+	if _receiver != null:
+		for screen: Dictionary in _attached.values():
+			if screen["started"]:
+				_receiver.freeze(screen["id"])
 
 
 func _init() -> void:
@@ -82,6 +91,10 @@ func poll(now: float, camera: Camera3D) -> void:
 		return
 	var videos := PcLink.link.videos if PcLink.link != null else []
 	var serial := PcLink.link.videos_serial if PcLink.link != null else 0
+	if _frozen:
+		if not PcLink.connected() or videos.is_empty() or serial == _videos_serial:
+			return
+		_frozen = false
 	if serial != _videos_serial:
 		_videos_serial = serial
 		# New streams (after a reconnect, slice o6): every receiver starts at once,
@@ -152,7 +165,7 @@ func poll(now: float, camera: Camera3D) -> void:
 
 ## Every frame, after poll: convex panels get their newest decoded frame.
 func update_textures() -> void:
-	if _receiver == null:
+	if _receiver == null or _frozen:
 		return
 	for key: String in _attached:
 		var screen: Dictionary = _attached[key]
@@ -176,6 +189,7 @@ func update_textures() -> void:
 
 ## Forgets every panel (the world is being built again).
 func reset() -> void:
+	_frozen = false
 	stop_all()
 	_attached.clear()
 	_live.clear()
